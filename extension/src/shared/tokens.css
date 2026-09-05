@@ -1,0 +1,257 @@
+/*
+ * Token desain Rangefinder.
+ *
+ * ATURAN YANG TIDAK BOLEH DILANGGAR
+ * - Tidak ada gradient di mana pun. Kedalaman dibentuk lewat border 1 piksel
+ *   dan pergeseran nilai permukaan, bukan gradasi.
+ * - Radius sedang: 10 kartu, 8 kontrol, 6 chip, 4 indikator.
+ * - Angka wajib tabular-nums supaya tidak bergoyang saat nilainya berubah.
+ * - Accent hanya untuk elemen interaktif, tidak pernah untuk dekorasi.
+ * Lihat PRD bagian 8.
+ */
+
+/*
+ * Font dibundel lokal, tidak diambil dari CDN.
+ *
+ * Dua alasan. Pertama, Content Security Policy MV3 melarang memuat sumber daya
+ * dari luar. Kedua, side panel harus tetap benar saat offline, dan engine
+ * memang berjalan lokal jadi tidak masuk akal kalau tampilannya bergantung
+ * pada jaringan.
+ *
+ * Plus Jakarta Sans adalah variable font, jadi satu berkas melayani seluruh
+ * rentang bobot 200 sampai 800 yang kita pakai.
+ */
+@font-face {
+  font-family: "Plus Jakarta Sans";
+  font-style: normal;
+  font-weight: 200 800;
+  font-display: swap;
+  src: url("./fonts/plus-jakarta-sans-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "Plus Jakarta Sans";
+  font-style: normal;
+  font-weight: 200 800;
+  font-display: swap;
+  src: url("./fonts/plus-jakarta-sans-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF,
+    U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020,
+    U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+:root {
+  --bg: #0f1115;
+  --surface: #161920;
+  --surface-raised: #1d212a;
+  --border: #262b36;
+  --border-strong: #333a47;
+  --text: #e7eaf0;
+  --text-muted: #8d95a5;
+  --accent: #4c8df6;
+  --upper: #2e9e63;
+  --lower: #d8484d;
+  --warn: #c98a2e;
+
+  --r-card: 10px;
+  --r-control: 8px;
+  --r-chip: 6px;
+  --r-bar: 4px;
+
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --s6: 32px;
+
+  --font: "Plus Jakarta Sans", "Segoe UI", system-ui, -apple-system, sans-serif;
+
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --bg: #fbfbfc;
+  --surface: #ffffff;
+  --surface-raised: #f4f5f7;
+  --border: #e3e6eb;
+  --border-strong: #cdd2da;
+  --text: #14171c;
+  --text-muted: #5d6470;
+  --accent: #2563d9;
+  --upper: #1e7f4e;
+  --lower: #c0393e;
+  --warn: #9a6a16;
+
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  /* Side panel sempit. Scroll horizontal tidak pernah boleh terjadi. */
+  overflow-x: hidden;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0;
+  font-weight: 600;
+}
+
+h1 {
+  font-size: 15px;
+}
+
+h2 {
+  font-size: 13px;
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+.muted {
+  color: var(--text-muted);
+}
+
+.label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-card);
+  padding: var(--s3);
+}
+
+.card + .card {
+  margin-top: var(--s2);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.row + .row {
+  margin-top: var(--s2);
+}
+
+.row > .value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+button {
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-control);
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+input {
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-control);
+  padding: 8px 10px;
+  width: 100%;
+}
+
+input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  border-radius: var(--r-chip);
+  border: 1px solid var(--border-strong);
+  padding: 3px 8px;
+  white-space: nowrap;
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  flex: none;
+}
+
+.dot.ok {
+  background: var(--upper);
+}
+
+.dot.bad {
+  background: var(--lower);
+}
+
+.dot.warn {
+  background: var(--warn);
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.scroll-x {
+  overflow-x: auto;
+}

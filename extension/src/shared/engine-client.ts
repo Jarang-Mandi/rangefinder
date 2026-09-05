@@ -1,0 +1,199 @@
+/**
+ * Klien engine: HTTP untuk aksi, WebSocket untuk status yang didorong.
+ *
+ * INVARIAN
+ * - Panel adalah penerima pasif. Status datang dari dorongan engine, bukan dari
+ *   polling. Satu satunya yang dikirim berkala adalah denyut, dan itu untuk
+ *   menjaga koneksi sekaligus memundurkan kunci otomatis wallet.
+ * - Token tidak pernah masuk URL. Lihat protocol.ts.
+ * - Penyambungan ulang memakai backoff. Engine yang mati adalah kondisi normal,
+ *   bukan kejadian luar biasa, jadi jangan membanjiri layar dengan error.
+ */
+
+import {
+  DEFAULT_ENGINE_ORIGIN,
+  WS_SUBPROTOCOL,
+  asEngineStatus,
+  type ClientMessage,
+  type EnginePing,
+  type EngineStatus,
+  type ServerMessage,
+} from "./protocol";
+
+export type ConnectionState =
+  | "idle"
+  | "connecting"
+  | "connected"
+  | "unauthorized"
+  | "offline";
+
+interface Handlers {
+  onState: (state: ConnectionState, detail?: string) => void;
+  onStatus: (status: EngineStatus) => void;
+  onAlert: (level: string, code: string, message: string) => void;
+}
+
+const HEARTBEAT_MS = 20_000;
+const BACKOFF_START_MS = 1_000;
+const BACKOFF_MAX_MS = 15_000;
+
+export class EngineClient {
+  private socket: WebSocket | null = null;
+  private heartbeat: number | null = null;
+  private reconnectTimer: number | null = null;
+  private backoff = BACKOFF_START_MS;
+  private stopped = false;
+
+  constructor(
+    private readonly origin: string = DEFAULT_ENGINE_ORIGIN,
+    private token: string = "",
+    private readonly handlers: Handlers,
+  ) {}
+
+  setToken(token: string) {
+    this.token = token;
+  }
+
+  /** Cek keberadaan engine tanpa token. Dipakai layar pairing. */
+  async probe(): Promise<EnginePing> {
+    const res = await fetch(`${this.origin}/v1/ping`);
+    if (!res.ok) throw new Error(`engine menjawab ${res.status}`);
+    return (await res.json()) as EnginePing;
+  }
+
+  /** Panggilan HTTP yang butuh token. */
+  async call<T>(path: string, init?: RequestInit): Promise<T> {
+    const res = await fetch(`${this.origin}${path}`, {
+      ...init,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${this.token}`,
+        ...(init?.headers ?? {}),
+      },
+    });
+
+    if (res.status === 401) {
+      this.handlers.onState("unauthorized", "token pairing tidak cocok");
+      throw new Error("token pairing tidak cocok");
+    }
+
+    const body = await res.json().catch(() => null);
+    if (!res.ok) {
+      const message =
+        (body && typeof body === "object" && "message" in body
+          ? String((body as Record<string, unknown>).message)
+          : null) ?? `engine menjawab ${res.status}`;
+      throw new Error(message);
+    }
+    return body as T;
+  }
+
+  connect() {
+    this.stopped = false;
+    this.openSocket();
+  }
+
+  disconnect() {
+    this.stopped = true;
+    this.clearTimers();
+    this.socket?.close();
+    this.socket = null;
+    this.handlers.onState("idle");
+  }
+
+  private openSocket() {
+    if (this.stopped || !this.token) return;
+
+    this.handlers.onState("connecting");
+    const wsUrl = this.origin.replace(/^http/, "ws") + "/ws";
+
+    let socket: WebSocket;
+    try {
+      // Argumen kedua adalah daftar subprotocol. Di sinilah token dititipkan,
+      // karena header tidak bisa dipasang pada WebSocket dari browser.
+      socket = new WebSocket(wsUrl, [WS_SUBPROTOCOL, this.token]);
+    } catch {
+      this.scheduleReconnect();
+      return;
+    }
+    this.socket = socket;
+
+    socket.onopen = () => {
+      this.backoff = BACKOFF_START_MS;
+      this.handlers.onState("connected");
+      this.startHeartbeat();
+    };
+
+    socket.onmessage = (event) => {
+      let msg: ServerMessage;
+      try {
+        msg = JSON.parse(event.data as string) as ServerMessage;
+      } catch {
+        return;
+      }
+
+      const status = asEngineStatus(msg);
+      if (status) {
+        this.handlers.onStatus(status);
+        return;
+      }
+      if (msg.type === "alert") {
+        this.handlers.onAlert(msg.level, msg.code, msg.message);
+      }
+    };
+
+    socket.onclose = (event) => {
+      this.clearTimers();
+      this.socket = null;
+      // 1006 tanpa pernah terbuka biasanya berarti handshake ditolak, dan
+      // penyebab paling umum adalah token yang salah.
+      if (event.code === 1006 && this.backoff === BACKOFF_START_MS) {
+        this.handlers.onState("offline", "engine tidak menjawab, atau token salah");
+      } else {
+        this.handlers.onState("offline");
+      }
+      this.scheduleReconnect();
+    };
+
+    socket.onerror = () => {
+      // onclose selalu menyusul, jadi penanganannya cukup di sana.
+    };
+  }
+
+  private send(msg: ClientMessage) {
+    if (this.socket?.readyState === WebSocket.OPEN) {
+      this.socket.send(JSON.stringify(msg));
+    }
+  }
+
+  requestStatus() {
+    this.send({ type: "get_status" });
+  }
+
+  private startHeartbeat() {
+    this.clearHeartbeat();
+    this.heartbeat = self.setInterval(() => this.send({ type: "ping" }), HEARTBEAT_MS);
+  }
+
+  private clearHeartbeat() {
+    if (this.heartbeat !== null) {
+      self.clearInterval(this.heartbeat);
+      this.heartbeat = null;
+    }
+  }
+
+  private clearTimers() {
+    this.clearHeartbeat();
+    if (this.reconnectTimer !== null) {
+      self.clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+  }
+
+  private scheduleReconnect() {
+    if (this.stopped) return;
+    const delay = this.backoff;
+    this.backoff = Math.min(this.backoff * 2, BACKOFF_MAX_MS);
+    this.reconnectTimer = self.setTimeout(() => this.openSocket(), delay);
+  }
+}

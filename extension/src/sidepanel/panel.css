@@ -1,0 +1,133 @@
+/* Tata letak side panel. Lebar kerja 320 sampai 480 piksel. */
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.tabs {
+  display: flex;
+  gap: 2px;
+  padding: var(--s2) var(--s3) 0;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+
+.tab {
+  flex: 1;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 8px 4px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.tab:hover:not(:disabled) {
+  border-color: transparent;
+  color: var(--text);
+}
+
+.tab.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+.content {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: var(--s3);
+}
+
+.statusbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex-wrap: wrap;
+  padding: var(--s2) var(--s3);
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  font-size: 11px;
+}
+
+.pairing {
+  padding: var(--s5) var(--s4);
+  max-width: 420px;
+  margin: 0 auto;
+}
+
+.pairing h1 {
+  margin-bottom: var(--s1);
+}
+
+.pairing p {
+  margin: 0 0 var(--s4);
+  color: var(--text-muted);
+}
+
+.pairing .actions {
+  display: flex;
+  gap: var(--s2);
+  margin-top: var(--s3);
+}
+
+.pairing .actions button {
+  flex: 1;
+}
+
+.error {
+  color: var(--lower);
+  margin-top: var(--s2);
+}
+
+.hint {
+  margin-top: var(--s2);
+  color: var(--text-muted);
+}
+
+.section-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: var(--s2);
+}
+
+.registry-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.registry-table th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--text-muted);
+  padding-bottom: 4px;
+}
+
+.registry-table td {
+  padding: 3px 0;
+  border-top: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.registry-table td:last-child {
+  text-align: right;
+}
+
+.blocked {
+  margin: var(--s2) 0 0;
+  padding-left: 18px;
+  color: var(--warn);
+}
+
+.phase-note {
+  color: var(--text-muted);
+  padding: var(--s5) 0;
+  text-align: center;
+}

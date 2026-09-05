@@ -1,0 +1,13 @@
+# Alias cargo khusus repo ini.
+#
+# `cargo xtask verify` memeriksa registry kontrak terhadap chain, lalu memeriksa
+# kesesuaian kode dengan dokumen. Aturan sinkronisasi di PRD 13.1 mewajibkan
+# perintah ini hijau sebelum commit yang menyentuh chain.toml, protocol.rs,
+# atau dokumen di docs/.
+#
+# Berkas ini sempat berisi penyiasatan raw-dylib untuk toolchain GNU. Itu sudah
+# tidak dibutuhkan sejak MSVC Build Tools lengkap terpasang. Riwayatnya ada di
+# docs/DECISIONS.md entri 0003.
+
+[alias]
+xtask = "run --quiet -p xtask --"

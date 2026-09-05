@@ -1,0 +1,19 @@
+{
+  "name": "rangefinder-extension",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Side panel Rangefinder dan jembatan chart gmgn",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "preact": "^10.28.3"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.1.28",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.2"
+  }
+}

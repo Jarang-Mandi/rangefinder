@@ -17,6 +17,12 @@ Product Requirements Document
 | Protokol | Uniswap V3 dan V4 sekaligus | Cakupan pool paling luas. Wajib lapisan validasi berlapis karena permukaan bug dua kali lipat. |
 | Otomasi | Semi otomatis: engine memantau, side panel menampilkan kartu aksi, user klik sekali | Tidak ada transaksi yang terjadi tanpa persetujuan eksplisit per aksi. |
 | Chain | Robinhood Chain saja (chain id 4663) | Kode tetap memakai chain abstraction supaya penambahan chain lain nanti murah. |
+| Wallet | Satu wallet saja | Tidak ada pemilih wallet di UI. Struktur data tetap menyimpan `wallet_address` supaya penambahan nanti tidak butuh migrasi. |
+| Batas nominal | Tanpa batas secara bawaan | `maxPositionUsd` dan `maxDailyDeployUsd` tetap ada di kode dan bisa diisi user, tapi nilai bawaannya tidak terbatas. Rincian di 9.2. |
+| Posisi dari luar | Dikelola penuh | Posisi V3 dan V4 milik wallet yang dibuka di platform lain bisa direbalance, diklaim, dan ditutup dari Rangefinder. |
+| Allowlist hook V4 | Berbasis adopsi nyata | Hook masuk allowlist otomatis jika lolos ambang pemakaian on chain. Kriteria di 5.4. |
+| Notifikasi | Toast diinjeksi di pojok kanan atas halaman gmgn, dengan suara | Tidak bergantung pada side panel yang sedang terbuka. Spesifikasi di 3.7. |
+| Penggambaran garis | Otomatis di setiap halaman token gmgn | Tidak perlu paste contract address dulu. Spesifikasi di 3.3. |
 
 ---
 
@@ -204,11 +210,17 @@ Side panel punya empat tab. Pemisahan ini diminta eksplisit dan tidak digabung.
 
 **Story.** Sebagai operator LP, saya ingin paste contract address lalu langsung melihat batas atas dan batas bawah di chart yang bisa saya geser, supaya saya menentukan range sambil melihat struktur harga yang sebenarnya.
 
+**Dua jalan masuk, keduanya wajib.**
+
+Jalan pertama, user paste contract address ke input di puncak tab Range.
+
+Jalan kedua, dan ini yang lebih sering terjadi dalam pemakaian nyata: user sendiri yang membuka halaman token mana pun di gmgn, entah dari Trending, dari hasil pencarian, atau dari tautan orang lain. Begitu content script mendeteksi halaman token, Rangefinder **langsung menggambar garis range yang disarankan dan menampilkan kartu aksi tanpa diminta**. User tidak perlu menyalin alamat lalu menempelkannya kembali. Ini berlaku untuk setiap pair yang dibuka, termasuk pair yang belum pernah dilihat sebelumnya.
+
 **Alur.**
 
-1. User paste contract address ke input di puncak tab Range.
-2. Ekstensi memeriksa tab gmgn yang sedang terbuka. Jika belum ada di token itu, ekstensi menavigasi tab tersebut ke `https://gmgn.ai/robinhood/token/<CA>`. Jika tidak ada tab gmgn sama sekali, ekstensi membuka satu tab baru.
-3. Content script menunggu chart siap, lalu menggambar dua garis horizontal: batas atas hijau, batas bawah merah, sesuai gambar referensi.
+1. Content script mendeteksi navigasi ke pola `https://gmgn.ai/robinhood/token/<CA>`, baik karena user membuka sendiri maupun karena hasil paste di panel. Deteksi memakai History API dan `MutationObserver`, karena gmgn adalah aplikasi Next.js satu halaman yang tidak memuat ulang dokumen saat berpindah token.
+2. Jika alurnya berasal dari paste, ekstensi menavigasi tab gmgn yang sudah terbuka ke alamat itu. Jika tidak ada tab gmgn sama sekali, ekstensi membuka satu tab baru.
+3. Content script menunggu chart siap, lalu menggambar dua garis horizontal: batas atas hijau, batas bawah merah, sesuai gambar referensi. Posisi awal kedua garis berasal dari doktrin penempatan di 5.7, bukan dari lebar tetap.
 4. Engine menarik daftar pool untuk pair itu di V3 dan V4, mengurutkan berdasarkan proyeksi fee, lalu mengisi pool picker.
 5. Engine menjalankan Range Optimizer dan menempatkan kedua garis di lebar yang disarankan.
 6. User menggeser garis. Setiap `drawing_event` memicu perhitungan ulang.
@@ -226,6 +238,8 @@ Side panel punya empat tab. Pemisahan ini diminta eksplisit dan tidak digabung.
 - Kartu proyeksi menampilkan estimasi fee APR, estimasi waktu bertahan di range, jam yang dibutuhkan untuk menutup IL, dan kepadatan likuiditas pesaing di dalam range.
 - Mengganti pool di picker menggambar ulang garis ke tick grid pool baru.
 - Menutup tab gmgn atau berpindah token membersihkan semua shape milik Rangefinder dan tidak menyentuh shape milik user.
+- Membuka halaman token mana pun di gmgn secara langsung, tanpa melalui input paste, tetap menghasilkan garis dan kartu aksi dalam waktu di bawah 2 detik setelah chart siap.
+- Kartu aksi selalu menyatakan satu rekomendasi tegas beserta alasannya dalam satu kalimat, termasuk saat rekomendasinya adalah tidak membuka posisi.
 
 ### 3.4 Tab Signals
 
@@ -239,7 +253,7 @@ Side panel punya empat tab. Pemisahan ini diminta eksplisit dan tidak digabung.
 - Setiap baris punya satu label aksi yang tegas: `LP Sideways`, `LP Beli Turun`, `LP Jual Naik`, `Pantau`, atau `Hindari`.
 - Klik baris menavigasi gmgn dan mengaktifkan tab Range dengan pool dan range terisi otomatis.
 - Filter mengikuti playbook di 2.5, semuanya bisa diubah user dan tersimpan antar sesi.
-- Token dengan transfer tax bukan nol ditandai `Hindari` dan tidak bisa diklik untuk LP, dengan alasan tertulis.
+- Token yang gagal uji jalur transfer di 5.4 ditandai `Hindari` dan tidak bisa diklik untuk LP, dengan alasan tertulis. Token yang berpajak bagi pembeli biasa tapi mengecualikan jalur LP tetap boleh muncul, dengan penanda bahwa pajaknya sudah diuji dan tidak mengenai jalur yang kita pakai.
 - Pemindaian tidak melebihi 1 request gmgn per 2 detik agar sesi user tidak kena rate limit.
 
 ### 3.5 Tab Positions
@@ -248,7 +262,8 @@ Side panel punya empat tab. Pemisahan ini diminta eksplisit dan tidak digabung.
 
 **Acceptance criteria.**
 
-- Menampilkan semua posisi V3 dan V4 milik wallet, termasuk posisi yang dibuka di luar Rangefinder.
+- Menampilkan semua posisi V3 dan V4 milik wallet, termasuk posisi yang dibuka di luar Rangefinder, dan **mengelolanya penuh**. Posisi dari platform lain punya set aksi yang sama persis: tambah, rebalance, klaim, tutup. Satu satunya pembatas adalah posisi pada pool dengan hook di luar allowlist, yang hanya boleh ditutup, tidak boleh ditambah.
+- Posisi dari luar yang tidak punya catatan cost basis di basis data lokal direkonstruksi dari log on chain, yaitu event `IncreaseLiquidity`, `DecreaseLiquidity`, dan `Collect`, sehingga PnL-nya tetap terhitung. Jika rekonstruksi tidak lengkap, kartu menandainya sebagai perkiraan, bukan menyembunyikannya.
 - Setiap kartu menampilkan pair, versi protokol, fee tier, range, harga sekarang relatif range, status in range atau out of range, durasi, fee terkumpul yang belum diklaim, dan net PnL berjalan.
 - Indikator posisi harga di dalam range berupa bar horizontal solid, bukan gradient.
 - Klik kartu membuka daftar aksi: Tambah likuiditas, Rebalance ke range baru, Klaim fee, Tutup posisi, Tutup lalu swap ke ETH.
@@ -268,7 +283,51 @@ Side panel punya empat tab. Pemisahan ini diminta eksplisit dan tidak digabung.
 - Kartu bisa diekspor jadi PNG.
 - Angka net PnL memakai basis yang bisa dipilih user antara USD atau ETH.
 
-### 3.7 Non Goals
+### 3.7 Notifikasi
+
+**Story.** Sebagai operator LP, saya ingin diberi tahu setiap ada kejadian penting pada posisi saya, tanpa harus menatap side panel terus menerus.
+
+**Tempat munculnya.** Notifikasi utama adalah toast yang diinjeksi content script ke **pojok kanan atas halaman gmgn**. Ini pilihan yang disengaja: side panel hanya hidup saat dibuka, sedangkan halaman gmgn hampir selalu terbuka saat user bekerja. Toast menumpuk ke bawah, maksimal empat sekaligus, sisanya masuk antrean.
+
+Jika tidak ada satu pun tab gmgn yang terbuka, engine jatuh ke `chrome.notifications` bawaan sistem sehingga kejadian kritis tetap sampai.
+
+**Tingkat dan perilaku.**
+
+| Tingkat | Contoh kejadian | Perilaku toast | Suara |
+| --- | --- | --- | --- |
+| Info | Fee terkumpul melewati ambang klaim, sinyal baru berskor tinggi, posisi kembali masuk range | Hilang sendiri setelah 6 detik | Nada pendek satu ketukan, pelan |
+| Peringatan | Harga mendekati batas range, dilusi likuiditas melewati ambang, aturan keluar berbasis imbal hasil terpicu | Hilang sendiri setelah 12 detik | Nada dua ketukan |
+| Kritis | Posisi keluar range, transaksi gagal atau revert, data harga tidak sehat, RPC mati, verifikasi pasca kirim tidak cocok | Menetap sampai diklik | Nada tiga ketukan, lebih tegas |
+
+**Daftar kejadian yang wajib memicu notifikasi.**
+
+```
+posisi dibuka berhasil            posisi dibuka gagal
+transaksi terkirim                transaksi terkonfirmasi
+transaksi gagal atau revert       verifikasi pasca kirim tidak cocok
+harga mendekati batas range       posisi keluar range
+posisi kembali masuk range        fee melewati ambang klaim
+dilusi likuiditas melewati ambang aturan keluar imbal hasil terpicu
+sinyal baru berskor tinggi        wallet terkunci otomatis
+data harga tidak sehat            RPC gagal dan gagal failover
+```
+
+**Catatan teknis yang tidak boleh dilewatkan.**
+
+1. Service worker MV3 tidak bisa memutar audio. Pemutaran suara wajib lewat `chrome.offscreen` dengan alasan `AUDIO_PLAYBACK`, atau dari content script di halaman gmgn.
+2. Chrome memblokir autoplay audio sampai ada interaksi user pada halaman itu. Karena itu side panel punya tombol sekali pakai untuk mengaktifkan suara, yang menyalakan `AudioContext` dan menyimpan izinnya. Sebelum tombol itu ditekan, notifikasi tetap muncul tanpa suara, dan panel menjelaskan kenapa.
+3. Berkas audio dibundel di dalam ekstensi sebagai file pendek, bukan diambil dari jaringan.
+
+**Acceptance criteria.**
+
+- Toast muncul di pojok kanan atas halaman gmgn dalam waktu di bawah 300 ms setelah engine memancarkan kejadian.
+- Toast tidak pernah menutupi harga terakhir atau tombol beli jual milik gmgn.
+- Setiap toast punya judul, satu baris keterangan, dan aksi lanjutan jika relevan, misalnya Buka posisi atau Rebalance sekarang.
+- Suara bisa dimatikan seluruhnya, atau dimatikan per tingkat.
+- Kejadian yang sama untuk posisi yang sama tidak diulang dalam periode pendinginan yang bisa diatur, bawaan 5 menit, supaya harga yang bergetar di sekitar batas tidak membanjiri layar.
+- Riwayat 50 notifikasi terakhir bisa dibuka dari side panel.
+
+### 3.8 Non Goals
 
 - Bukan pengganti terminal trading. Tidak ada beli jual spot di luar swap yang dibutuhkan zap.
 - Tidak ada chart sendiri di dalam side panel pada fase awal. Chart tetap milik gmgn.
@@ -447,7 +506,7 @@ z_V > 0.50
 BW  < 0.35
 VC  < 0.80
 liquidity_usd > ambang user
-transfer_tax == 0
+uji jalur transfer di 5.4 lolos
 ```
 
 **Persistensi rezim.** Chop mengelompok. Engine menghitung skor untuk 6 jendela sebelumnya. Jika minimal 4 dari 6 juga di atas ambang, skor mendapat pengali 1,15. Ini membuat sinyal lebih ke arah prediksi ketimbang deskripsi masa lalu.
@@ -455,6 +514,49 @@ transfer_tax == 0
 **Pola pasca run.** Setup klasik dari playbook, dideteksi terpisah dan diberi bendera sendiri: token mencetak all time high antara 1 sampai 4 hari lalu, sudah retrace 40 sampai 70 persen dari puncak, dan 6 jam terakhir menunjukkan `ER` rendah dengan volume yang masih di atas median. Ini kandidat LP terbaik yang ada, karena penjual panik sudah habis dan harga membangun basis sambil tetap ramai.
 
 **Bobot bukan angka suci.** Semua bobot dan ambang di atas adalah titik awal, disimpan di file konfigurasi, dan dikalibrasi ulang oleh loop self improvement di bagian 12.
+
+### 5.2b Detektor dump lalu basis
+
+Diminta secara khusus: kondisi di mana harga jatuh seperti dump, tapi volume masih besar dan aktif, dan setelah itu bergerak menyamping. Ini pola yang paling menguntungkan untuk LP dan sekaligus paling sering ditinggalkan trader spot, karena secara tampilan terlihat seperti koin yang sudah selesai.
+
+Detektor ini terpisah dari 5.2 dan punya bendera sendiri, karena 5.2 mengukur kondisi menyamping yang sudah berjalan, sedangkan detektor ini menangkap saat menyamping baru saja terbentuk, yaitu titik masuk yang paling bernilai.
+
+**Bentuk yang dicari.** Sebuah kaki turun yang tajam dan impulsif dari puncak lokal, lalu berhenti, lalu membentuk basis mendatar yang volumenya masih ramai.
+
+**Syarat, dihitung atas candle 1 menit.**
+
+```
+1  kedalaman        drawdown = (P_puncak - P_dasar) / P_puncak        >= 0.40
+2  ketajaman        jumlah bar dari puncak ke dasar                   <= 60
+3  usia dasar       jumlah bar sejak dasar terbentuk                  >= 30
+4  tidak ada low baru   min(low, 30 bar terakhir) >= P_dasar * 0.98
+5  dasar tidak miring turun   slope regresi linear atas low basis     >= 0
+6  volume masih hidup   median V basis / median V sebelum pump        >= 2.0
+7  volume sudah mereda  median V basis / V puncak dump          dalam [0.05, 0.60]
+8  volatilitas mengendap   ATR(basis) / ATR(jendela dump)             <= 0.50
+9  sudah menyamping     ER pada jendela basis                         <  0.35
+10 tape seimbang        B pada jendela basis                          >= 0.60
+```
+
+**Kenapa setiap syarat ada.** Syarat 1 dan 2 memastikan yang terjadi memang dump, bukan penurunan pelan. Syarat 3 sampai 5 adalah **penjaga dead cat**, yang memisahkan basis sejati dari pendarahan lambat yang terus mencetak low baru. Ini pembeda terpenting, karena tanpa syarat 5 detektor akan terus menyarankan LP di tengah tren turun, dan itu cara tercepat kehilangan modal. Syarat 6 memastikan koin belum mati, karena basis tanpa volume tidak membayar fee. Syarat 7 memastikan kepanikan sudah lewat, karena volume yang masih sekencang puncak dump berarti penjualan belum selesai. Syarat 8 sampai 10 memastikan menyamping sudah benar benar terbentuk.
+
+**Sinyal penguat, menaikkan peringkat tapi tidak wajib.**
+
+- **Sumbu kapitulasi.** Bar dasar punya `z_V > 3` dan sumbu bawah lebih panjang dari dua kali badannya. Ini penanda dasar yang jauh lebih dapat dipercaya daripada low biasa, dan menjadi jangkar batas bawah terbaik.
+- **Breakdown gagal.** Harga sempat menembus di bawah dasar basis lalu direbut kembali dalam kurang dari 10 bar dengan volume naik. Konfirmasi terkuat bahwa dasar itu dipertahankan.
+- **Rasio jual mereda.** Porsi volume jual pada jendela basis lebih kecil daripada pada jendela dump. Penjual habis.
+
+**Keluaran detektor.** Selain skor, detektor mengembalikan jangkar harga yang langsung dipakai untuk menempatkan garis di 5.7:
+
+```
+L_basis   low terendah jendela basis, atau low sumbu kapitulasi jika ada
+H_basis   high tertinggi jendela basis
+POC       harga dengan volume terbanyak pada jendela basis
+VAL, VAH  batas area nilai 70 persen pada jendela basis
+P_invalid level pembatalan, yaitu L_basis dikurangi satu ATR basis
+```
+
+**Risiko yang harus dinyatakan di kartu aksi.** Pola ini bisa juga mendahului kaki turun kedua. Karena itu setiap posisi yang dibuka atas dasar sinyal ini **wajib** membawa level pembatalan `P_invalid`. Jika harga menutup di bawahnya dengan `z_V > 1`, engine mengirim notifikasi kritis dan menyarankan tutup. Sinyal ini tidak pernah disajikan sebagai kepastian.
 
 ### 5.3 Filter playbook
 
@@ -486,11 +588,28 @@ creator_close, fund_from_address, is_show_alert, hot_level
 
 Kelompok kedua dari simulasi on chain, mahal tapi wajib sebelum modal masuk:
 
-1. **Uji transfer tax.** Simulasikan `transfer` sejumlah X dari alamat yang punya saldo, ukur jumlah yang diterima. Selisih bukan nol berarti fee on transfer. **Ini blokir keras.** Matematika concentrated liquidity di V3 dan V4 mengasumsikan transfer tepat. Token berpajak akan membuat mint gagal atau posisi tidak bisa ditutup dengan benar. Halaman gmgn menampilkan `Total Tax` dan itu dipakai sebagai saringan awal, tapi keputusan akhir dari simulasi.
-2. **Uji honeypot.** Simulasikan jual kecil lewat router. Jika revert, token ditolak.
-3. **Uji hook V4.** Baca alamat hook dari PoolKey. Hook nol berarti aman. Hook dalam allowlist, saat ini hanya BagsV4Hook, dilanjutkan. Hook lain ditolak sampai diaudit manual dan dimasukkan ke allowlist secara eksplisit.
-4. **Uji likuiditas terkunci.** Verifikasi bahwa pool bukan pool palsu yang bisa dikuras kreator.
+1. **Uji transfer tax pada jalur yang sebenarnya dipakai.** Angka `Total Tax` di halaman gmgn hanya saringan awal, bukan keputusan. Banyak memecoin memang berpajak untuk pembeli biasa, tapi mengecualikan alamat pool, router, dan PositionManager, sehingga LP tetap berjalan normal. Menolak semua token berpajak secara membabi buta akan membuang banyak setup bagus, termasuk token pada gambar contoh yang menampilkan pajak 2 persen beli dan 2 persen jual.
 
+   Karena itu ujinya adalah simulasi terhadap **jalur persis yang akan dipakai saat mint**, yaitu dari wallet ke PositionManager lalu ke pool. Ukur selisih antara jumlah yang dikirim dan jumlah yang benar benar diterima pool. Selisih nol berarti jalur itu dikecualikan dari pajak dan token boleh di-LP. Selisih bukan nol adalah blokir keras, karena matematika concentrated liquidity mengasumsikan transfer tepat, dan posisi bisa berakhir tidak bisa ditutup dengan benar.
+
+   Hasil uji disimpan di `tokens.tax_verified_at` beserta nilainya, dan diuji ulang jika sudah lebih tua dari 24 jam, karena kontrak dengan owner aktif bisa mengubah daftar pengecualian kapan saja.
+2. **Uji honeypot.** Simulasikan jual kecil lewat router. Jika revert, token ditolak.
+3. **Uji hook V4 dengan allowlist berbasis adopsi.** Baca alamat hook dari PoolKey. Hook nol berarti aman.
+
+   Keputusan user: hook yang sudah ramai dipakai orang boleh langsung masuk allowlist. Supaya itu bisa dijalankan mesin dan bukan tebakan, adopsi diukur, bukan dikira kira. Sebuah hook masuk allowlist otomatis jika memenuhi seluruh syarat berikut, dihitung dari data on chain:
+
+   ```
+   jumlah pool yang memakai hook itu      >= 50
+   total TVL seluruh pool tersebut        >= 250.000 USD
+   jumlah alamat LP unik                  >= 200
+   umur sejak deploy                      >= 14 hari
+   tidak ada fungsi upgrade atau proxy admin yang masih aktif
+   ```
+
+   Syarat terakhir tidak bisa ditawar. Hook yang bisa diganti isinya sewaktu waktu tidak boleh masuk allowlist berapa pun adopsinya, karena kode yang diperiksa hari ini bukan kode yang akan berjalan besok. BagsV4Hook dievaluasi memakai kriteria yang sama seperti hook lain, tanpa perlakuan khusus.
+
+   Hook yang belum lolos tetap bisa dipakai user secara manual lewat pilihan sadar per pool, yang menampilkan peringatan dan mencatat persetujuannya. Yang otomatis hanya penolakan bawaannya.
+4. **Uji likuiditas terkunci.** Verifikasi bahwa pool bukan pool palsu yang bisa dikuras kreator.
 ### 5.5 Klasifikasi aksi
 
 Satu token menghasilkan tepat satu label.
@@ -504,6 +623,95 @@ Satu token menghasilkan tepat satu label.
 | `Hindari` | Ada gate risiko yang gagal | Diblokir, alasan ditampilkan |
 
 Dua label satu sisi itu penting dan sering dilupakan. Range yang seluruhnya berada di satu sisi harga tidak butuh dua token, tidak menanggung impermanent loss sampai harga menyentuhnya, dan mengubah LP menjadi alat eksekusi order yang dibayar fee. Ini yang membuat produk ini berguna bahkan saat pasar sedang tidak menyamping.
+
+### 5.6 Keluarga sinyal tambahan
+
+Selain 5.2 dan 5.2b, sembilan sinyal berikut dihitung dan bisa dinyalakan sendiri sendiri. Semuanya dipilih karena bisa dihitung dari data yang sudah kita punya, dan karena masing masing menjawab pertanyaan yang berbeda.
+
+| Sinyal | Yang diukur | Rumus atau sumber | Arti untuk LP |
+| --- | --- | --- | --- |
+| Kecepatan fee | Fee nyata per dolar likuiditas, satu jam terakhir | `fee_1h / liquidity_usd` dari event `Swap` on chain | Pengukur paling langsung tentang di mana uang LP sedang dihasilkan. Ini yang seharusnya jadi urutan utama, bukan volume |
+| Vakum likuiditas | Volume besar bertemu likuiditas tipis | `volume_1h / liquidity_usd` | Laju fee ekstrem. Risiko juga tinggi karena dampak harga saat masuk dan keluar besar |
+| Likuiditas menganggur | Selisih TVL nominal dengan likuiditas yang benar benar aktif | Peta tick: `L_dalam_range_aktif / L_total` | Ini keunggulan yang jarang dipakai orang. Pool dengan TVL besar tapi sebagian besarnya terparkir jauh di luar range berarti porsi kita jauh lebih besar daripada yang terlihat dari TVL |
+| Sumbu kapitulasi | Bar dasar dengan volume ekstrem dan sumbu bawah panjang | `z_V > 3` dan sumbu bawah lebih dari dua kali badan | Jangkar batas bawah paling dapat dipercaya |
+| Breakdown gagal | Tembus ke bawah lalu direbut kembali | Tembus di bawah `L_basis` lalu close di atasnya dalam 10 bar dengan volume naik | Konfirmasi dasar. Setelah ini, batas bawah boleh dinaikkan lebih rapat |
+| Squeeze rentang | Kelompok bar dengan rentang tersempit | k bar tersempit dalam N terakhir muncul berdekatan | Volatilitas rendah cenderung berlanjut dalam jangka pendek, cocok untuk range rapat |
+| Churn dua arah | Banyak transaksi kecil, arah seimbang | Jumlah swap tinggi, `B >= 0.7`, ukuran rata rata trade kecil | Mesin fee paling murni. Banyak transaksi kecil membayar lebih baik daripada sedikit transaksi besar |
+| Musim volume harian | Jam aktif token itu sendiri | Rata rata volume per jam dalam sehari, dari 7 hari terakhir | Buka posisi sebelum jendela ramai dimulai, bukan setelahnya |
+| Delta kepadatan LP | Perubahan mendadak likuiditas pesaing di range sasaran | Event `Mint` dan `Burn` pada pita tick sasaran | Penarikan besar oleh pihak lain berarti porsi kita melonjak. Ini jendela masuk yang bagus dan berumur pendek |
+
+Tiga di antaranya layak disebut lagi karena paling jarang dipakai orang dan paling mudah diukur: kecepatan fee, likuiditas menganggur, dan delta kepadatan LP. Ketiganya berbicara tentang **penerimaan kita**, sementara hampir semua alat lain hanya berbicara tentang **pergerakan harga**. Untuk LP, yang pertama jauh lebih menentukan.
+
+### 5.7 Doktrin penempatan range
+
+Bagian ini menjawab pertanyaan yang paling sulit: di mana persisnya garis harus ditaruh. Aturannya dibuat supaya bisa dijalankan mesin, dan supaya user bisa memeriksa alasannya, bukan sekadar percaya.
+
+**Prinsip dasar yang mendasari semuanya.** Di concentrated liquidity, harga yang naik menembus range membuat kita berakhir memegang seluruhnya WETH, artinya kita telah menjual. Harga yang turun menembus range membuat kita berakhir memegang seluruhnya token, artinya kita telah membeli. Jadi menempatkan range sama dengan menyatakan dua hal sekaligus: pada harga berapa saya bersedia membeli, dan pada harga berapa saya bersedia menjual. Setiap kali ragu, kembalikan pertanyaannya ke bentuk itu.
+
+**Langkah 1, tentukan rezim.** Dari 5.2, 5.2b, dan `ER`.
+
+**Langkah 2, temukan jangkar struktur.** Semua dihitung dari candle 1 menit pada jendela yang relevan, bukan dari angka bulat.
+
+```
+L_basis   low terendah, atau low sumbu kapitulasi jika ada
+H_basis   high tertinggi
+POC       harga dengan volume terbanyak
+VAL, VAH  batas bawah dan atas area nilai 70 persen
+ATR       rentang sebenarnya rata rata pada jendela basis
+```
+
+**Langkah 3, petakan rezim ke batas.**
+
+| Rezim | Batas bawah | Batas atas | Alasan |
+| --- | --- | --- | --- |
+| Basis pasca dump | Tepat di bawah `L_basis`, sekitar `L_basis` dikurangi `0.25 x ATR` | `VAH`, atau retracement 0.382 dari kaki dump, ambil yang lebih rendah | Bawah adalah harga di mana kita rela memegang token. Atas adalah tempat pantulan pertama biasanya tersendat |
+| Menyamping murni | `VAL` | `VAH` | Area nilai menampung sekitar 70 persen volume. Di sinilah fee sesungguhnya dibayar |
+| Tren naik | `POC`, yang berada di bawah harga | Jauh di atas harga, minimal `2 x ATR` | Batas atas yang terlalu rapat akan menjual seluruh posisi terlalu cepat, tepat sebelum bagian terbaiknya |
+| Tren turun | Jangan pasang range dua sisi | | Pakai `LP Jual Naik` satu sisi, atau tidak sama sekali. Range dua sisi di tren turun hanya membeli terus menerus sambil harga jatuh |
+| Launch baru | Tidak ada penempatan | | Belum ada struktur. Tidak ada `L_basis` yang bisa dipercaya, jadi tidak ada batas bawah yang bisa dibenarkan |
+
+**Langkah 4, pisahkan inti dan luar.** Jangan menaruh seluruh modal pada satu lebar. Bagi dua:
+
+```
+range inti   VAL sampai VAH             sekitar 70 persen modal   fee maksimum
+range luar   L_basis*0.95 sampai H_basis*1.05   sekitar 30 persen modal   penangkap sumbu dan penyangga
+```
+
+Range inti yang rapat menghasilkan fee jauh lebih besar per dolar, sementara range luar menahan sumbu harga tanpa menyeret seluruh posisi keluar. Keduanya digambar sekaligus di chart dengan ketebalan garis berbeda.
+
+**Langkah 5, tiga pemeriksaan sebelum konfirmasi.** Jika salah satu gagal, penempatan ditolak dan panel menjelaskan mana yang gagal.
+
+1. Jam impas IL dari 11.4 harus lebih pendek daripada ekspektasi jam bertahan dari 11.2. Kalau tidak, posisi kalah secara matematis sebelum dibuka.
+2. Porsi kita terhadap likuiditas aktif di dalam range harus di atas ambang minimum. Kalau terlalu kecil, fee-nya tidak sepadan dengan risikonya.
+3. Level pembatalan wajib terdefinisi dan wajib berada di bawah batas bawah, bukan di dalam range.
+
+**Langkah 6, aturan darurat saat struktur tidak jelas.** Kalau chart tidak menunjukkan basis yang bisa dibaca dan user tetap ingin masuk, jangan menebak lebarnya. Pakai `harga sekarang dikurangi 1.5 x ATR` sampai `harga sekarang ditambah 1.5 x ATR`, ukuran modal setengah dari biasa, dan tinjau ulang dalam 30 menit. Ini bukan penempatan optimal, ini penempatan yang tidak memalukan saat salah.
+
+**Contoh terpakai pada gambar referensi.** Angka di bawah dibaca dari chart contoh dan sifatnya perkiraan, tapi cara berpikirnya yang penting.
+
+Bacaan struktur: all time high di 527,61K, dump ke dasar sekitar 200K, harga sekarang 239,22K, pantulan tertinggi setelah dump sekitar 300K. Jadi basisnya kira kira 200K sampai 300K, dan POC kemungkinan berada di 230K sampai 250K karena di situ lilin konsolidasi menumpuk.
+
+Penempatan yang dihasilkan doktrin ini:
+
+```
+range inti   sekitar 215K  sampai 280K
+range luar   sekitar 195K  sampai 320K
+pembatalan   penutupan di bawah 195K dengan z_V > 1
+```
+
+Bandingkan dengan garis pada gambar, yaitu 300K di atas dan 150K di bawah. Garis atas di 300K sudah tepat, karena persis berada di puncak basis dan di resistensi pertama. Garis bawah di 150K yang bermasalah, karena berada 25 persen di bawah dasar basis. Seluruh modal yang duduk di tick antara 150K dan 200K kemungkinan besar tidak akan pernah tersentuh perdagangan, jadi tidak menghasilkan apa apa sambil tetap mengunci modal.
+
+Besarnya kerugian itu bisa dihitung. Kepadatan likuiditas untuk modal yang sama kira kira berbanding terbalik dengan `sqrt(Pb) - sqrt(Pa)`:
+
+```
+150K sampai 300K   ->  sqrt(300) - sqrt(150) = 17,32 - 12,25 = 5,07
+200K sampai 300K   ->  sqrt(300) - sqrt(200) = 17,32 - 14,14 = 3,18
+215K sampai 280K   ->  sqrt(280) - sqrt(215) = 16,73 - 14,66 = 2,07
+```
+
+Artinya, dengan modal yang sama, menaikkan batas bawah dari 150K ke 200K memberi sekitar 1,6 kali lebih banyak fee selama harga berada di dalam range. Memakai range inti 215K sampai 280K memberi sekitar 2,45 kali lipat dibanding penempatan awal. Angka ini pendekatan untuk ilustrasi, sedangkan engine menghitungnya persis dari likuiditas dan komposisi token yang sebenarnya.
+
+Itulah nilai yang diberikan alat ini. Bukan menebak arah, melainkan memastikan modal ditempatkan di tick yang benar benar dilewati perdagangan.
 
 ---
 
@@ -632,32 +840,39 @@ Alasan pembagian: browser memegang sesi gmgn dan chart, sehingga semua yang butu
 
 ### 7.3 Kontrak pesan
 
+Daftar ini mencakup fase yang belum ditulis kodenya. Kolom Fase menyatakan kapan
+pesan mulai ada. `cargo xtask docs-check` memeriksa satu arah: setiap pesan yang
+sudah ada di kode wajib tercantum di sini. Sebaliknya tidak diwajibkan, karena
+rencana boleh mendahului implementasi.
+
 Panel ke engine:
 
-```
-quote_range        { pool, tickLower, tickUpper, sizeUsd, sourceToken }
-open_position      { quoteId }
-rebalance          { positionId, tickLower, tickUpper }
-claim              { positionId, swapToEth }
-close              { positionId, swapToEth }
-scan               { filters }
-subscribe_token    { address }
-unlock_wallet      { passphrase }
-```
+| Pesan | Isi | Fase |
+| --- | --- | --- |
+| `get_status` | tanpa isi, minta kiriman status terbaru sekarang juga | 1 |
+| `ping` | denyut, sekaligus memundurkan kunci otomatis | 1 |
+| `unlock_wallet` | `{ passphrase }`, lewat HTTP bukan WebSocket | 1 |
+| `subscribe_token` | `{ address }` | 2 |
+| `quote_range` | `{ pool, tickLower, tickUpper, sizeUsd, sourceToken }` | 3 |
+| `open_position` | `{ quoteId }` | 3 |
+| `rebalance` | `{ positionId, tickLower, tickUpper }` | 3 |
+| `claim` | `{ positionId, swapToEth }` | 3 |
+| `close` | `{ positionId, swapToEth }` | 3 |
+| `scan` | `{ filters }` | 6 |
 
 Engine ke panel:
 
-```
-range_quote        { quoteId, feeApr, expectedHoursInRange, ilBreakevenHours,
-                     crowdedLiquidityUsd, ourSharePct, amount0, amount1,
-                     swapNeeded, priceImpact, gasEstimate, warnings[] }
-position_update    { positionId, inRange, pricePct, feesUsd, netPnlUsd, ... }
-price_tick         { address, priceUsd, priceWeth, mcapUsd }
-signal_list        { items[] }
-tx_status          { txId, stage, hash, error }
-alert              { level, code, message, positionId }
-engine_status      { walletLocked, rpcHealthy, blockLag, dailySpentUsd }
-```
+| Pesan | Isi | Fase |
+| --- | --- | --- |
+| `hello` | `{ engineVersion, protocolVersion }`, dikirim sekali saat tersambung | 1 |
+| `engine_status` | `{ engineVersion, uptimeSecs, chain, wallet, registry, canExecute, blockedReasons[] }` | 1 |
+| `pong` | balasan denyut | 1 |
+| `alert` | `{ level, code, message, positionId }` | 1 |
+| `price_tick` | `{ address, priceUsd, priceWeth, mcapUsd }` | 2 |
+| `range_quote` | `{ quoteId, feeApr, expectedHoursInRange, ilBreakevenHours, crowdedLiquidityUsd, ourSharePct, amount0, amount1, swapNeeded, priceImpact, gasEstimate, warnings[] }` | 3 |
+| `tx_status` | `{ txId, stage, hash, error }` | 3 |
+| `position_update` | `{ positionId, inRange, pricePct, feesUsd, netPnlUsd }` | 5 |
+| `signal_list` | `{ items[] }` | 6 |
 
 Content script ke engine, lewat service worker:
 
@@ -806,15 +1021,19 @@ Side panel bekerja pada lebar 320 sampai 480 piksel dan wajib benar di seluruh r
 Dipaksakan di sisi engine, bukan di UI, sehingga tidak bisa dilewati dengan memanipulasi panel.
 
 ```
-maxPositionUsd        nilai maksimum satu posisi
-maxDailyDeployUsd     total maksimum yang dikerahkan per hari
-maxOpenPositions      jumlah posisi terbuka bersamaan
-minEthReserve         saldo ETH yang selalu disisakan untuk gas
-maxSlippageBps        batas slippage zap
-newPoolFirstSizeUsd   batas ukuran untuk posisi pertama di pool yang belum pernah dipakai
+maxPositionUsd        nilai maksimum satu posisi                 bawaan: tidak terbatas
+maxDailyDeployUsd     total maksimum yang dikerahkan per hari    bawaan: tidak terbatas
+maxOpenPositions      jumlah posisi terbuka bersamaan            bawaan: tidak terbatas
+newPoolFirstSizeUsd   batas ukuran posisi pertama di pool baru   bawaan: tidak terbatas
+minEthReserve         saldo ETH yang disisakan untuk gas         bawaan: aktif
+maxSlippageBps        batas slippage zap                         bawaan: aktif
 ```
 
-Melampaui batas berarti transaksi ditolak di engine dengan alasan yang dikembalikan ke panel.
+Keputusan user: keempat pembatas nominal bernilai tidak terbatas secara bawaan. Mekanismenya tetap dibangun dan tetap dipaksakan di engine, sehingga user bisa menyalakannya kapan saja lewat konfigurasi tanpa perubahan kode.
+
+Dua pembatas terakhir tetap aktif secara bawaan karena sifatnya berbeda. `minEthReserve` mencegah wallet kehabisan gas sehingga posisi tidak bisa ditutup, dan itu kegagalan operasional, bukan pilihan strategi. `maxSlippageBps` mencegah zap dieksekusi pada harga yang jauh meleset, dan tanpa itu satu swap buruk bisa menghapus fee berhari hari.
+
+Melampaui batas yang aktif berarti transaksi ditolak di engine dengan alasan yang dikembalikan ke panel.
 
 ### 9.3 Permukaan lokal
 
@@ -830,7 +1049,7 @@ Tidak ada telemetri. Tidak ada server jarak jauh. Seluruh basis data, log, dan k
 
 ### 9.5 Batasan yang disadari
 
-Hot wallet lokal berarti perangkat yang sudah disusupi sama dengan dana yang hilang. Ini konsekuensi yang diterima secara sadar demi otomasi dan kecepatan. Mitigasi yang wajib disampaikan ke user di layar setup: pakai wallet terpisah khusus operasi ini, jangan menyimpan dana jangka panjang di sana, dan pertahankan batas harian yang ketat.
+Hot wallet lokal berarti perangkat yang sudah disusupi sama dengan dana yang hilang. Ini konsekuensi yang diterima secara sadar demi otomasi dan kecepatan. Karena pembatas nominal bawaannya tidak terbatas, satu satunya pengaman yang tersisa adalah berapa banyak dana yang benar benar ada di wallet itu. Mitigasi yang wajib disampaikan ke user di layar setup: pakai wallet terpisah khusus operasi ini, isi hanya sebanyak yang siap dipertaruhkan, dan jangan menyimpan dana jangka panjang di sana.
 
 ---
 
@@ -974,9 +1193,23 @@ Diminta supaya setiap agent yang masuk ke repo ini paham keseluruhan kode tanpa 
 | `docs/RUNBOOK.md` | Cara menjalankan, cara membuka wallet, cara masuk mode dry run, apa yang harus dilakukan saat transaksi tersangkut atau RPC mati. |
 | `memory/` | Catatan per topik yang tumbuh seiring waktu: jebakan yang sudah ditemukan, kesalahan yang pernah dibuat, alasan sebuah pendekatan ditinggalkan. |
 
-Aturan yang berlaku sepanjang proyek: setiap modul Rust dibuka dengan komentar kepala yang menyatakan invarian modul itu. Setiap kali sebuah asumsi tentang gmgn atau tentang chain terbukti salah, catatannya masuk ke `memory/` pada sesi yang sama, bukan ditunda.
+### 13.1 Aturan sinkronisasi, wajib
 
-Selain itu disediakan perintah `cargo xtask verify` yang menjalankan ulang seluruh probe verifikasi: alamat kontrak, hash bytecode, jalur akses chart, dan bentuk respons endpoint gmgn. Perintah ini yang menjaga dokumen tetap jujur.
+Ini aturan yang diminta user secara eksplisit dan berlaku untuk setiap sesi, setiap agent, tanpa pengecualian.
+
+**Setiap perubahan wajib dicatat di memori pada sesi yang sama.** Bukan di akhir minggu, bukan di sesi berikutnya. Kalau sebuah pendekatan dicoba lalu gagal, alasannya masuk ke `memory/`. Kalau sebuah asumsi tentang gmgn atau tentang chain terbukti salah, koreksinya masuk ke `memory/` saat itu juga.
+
+**Setiap perubahan sistem wajib diikuti pembaruan dokumen yang terdampak, dalam commit yang sama.** Kalau kontrak pesan berubah, bagian 7.3 ikut berubah. Kalau gate risiko bertambah, bagian 5.4 ikut berubah. Kalau alamat kontrak diperbarui, `docs/CHAIN.md` ikut berubah. Dokumen yang menyimpang dari kode lebih berbahaya daripada tidak ada dokumen sama sekali, karena agent berikutnya akan mempercayainya.
+
+Pemeriksaan berikut menegakkan aturan itu secara mekanis, bukan mengandalkan niat baik:
+
+| Pemeriksa | Yang dicek |
+| --- | --- |
+| `cargo xtask verify` | Alamat kontrak, hash bytecode, jalur akses chart, bentuk respons endpoint gmgn. Menjaga dokumen tetap jujur terhadap dunia luar |
+| `cargo xtask docs-check` | Setiap tipe pesan di kode punya pasangan di bagian 7.3. Setiap tabel basis data di kode punya pasangan di 7.4. Setiap gate di modul `exec` punya baris di 6.4. Selisih berarti build gagal |
+| Templat commit | Punya kotak centang untuk dokumen terdampak dan catatan memori. Tidak dicentang berarti belum selesai |
+
+Aturan tambahan: setiap modul Rust dibuka dengan komentar kepala yang menyatakan invarian modul itu, sehingga pembaca tahu apa yang tidak boleh dirusak sebelum menyentuh isinya.
 
 ---
 
@@ -986,11 +1219,11 @@ Selain itu disediakan perintah `cargo xtask verify` yang menjalankan ulang selur
 | --- | --- | --- |
 | 0 | Spesifikasi | Dokumen ini disetujui, repo dibuat, `CLAUDE.md` dan `docs/` terisi |
 | 1 | Fondasi | Engine Rust jalan, pairing dengan side panel berhasil, keystore berfungsi, RPC sehat, `cargo xtask verify` hijau |
-| 2 | Chart dan matematika | Garis muncul dan bisa digeser di gmgn, konversi satuan benar, tab Range menampilkan tick dan proyeksi dasar. Belum ada transaksi |
+| 2 | Chart dan matematika | Garis muncul otomatis di setiap halaman token gmgn dan bisa digeser, konversi satuan benar, tab Range menampilkan tick dan proyeksi dasar. Belum ada transaksi |
 | 3 | Eksekusi V3 | Buka, klaim, tutup di V3 dengan seluruh tujuh gate aktif. Mode dry run dulu, lalu nominal kecil |
 | 4 | Eksekusi V4 dan zap | Jalur V4 termasuk penanganan hook dan `minHopPriceX36`, zap satu sisi, uji diferensial hijau |
-| 5 | Positions dan PnL | Kedua tab lengkap termasuk posisi dari luar Rangefinder, akuntansi biaya penuh, ekspor kartu |
-| 6 | Signals dan Optimizer | Detektor sideways, filter playbook, gate risiko, Range Optimizer, peta kepadatan likuiditas |
+| 5 | Positions, PnL, dan notifikasi | Kedua tab lengkap termasuk posisi dari luar Rangefinder yang dikelola penuh, akuntansi biaya penuh, ekspor kartu, toast di halaman gmgn beserta suaranya |
+| 6 | Signals, Optimizer, dan doktrin penempatan | Detektor sideways, detektor dump lalu basis, filter playbook, gate risiko, Range Optimizer, peta kepadatan likuiditas, penempatan otomatis menurut 5.7 |
 | 7 | Self improvement | Perekaman fitur dan hasil, kalibrasi, skema penantang, mode replay |
 
 Fase 3 tidak dimulai sebelum fase 2 punya uji integrasi terhadap snapshot gmgn. Fase 4 tidak dimulai sebelum golden vector V3 lengkap.
@@ -1009,16 +1242,27 @@ Fase 3 tidak dimulai sebelum fase 2 punya uji integrasi terhadap snapshot gmgn. 
 | Chain tidak stabil, data tertunda | Keputusan berdasar harga basi | Tiga sumber harga, pemantauan lag blok, eksekusi dinonaktifkan saat data tidak sehat |
 | Perangkat disusupi | Hot wallet terkuras | Wallet terpisah, batas harian, kunci otomatis, tidak ada penyimpanan passphrase secara default |
 | Loop self improvement menyetel ke arah salah | Kualitas keputusan menurun perlahan | Batas keras pada bobot, skema penantang, kemampuan mengembalikan versi |
-| Cakupan melar | Tidak pernah selesai | Daftar non goal di 3.7 dan urutan fase yang mengikat |
+| Basis pasca dump ternyata kaki turun kedua | LP membeli sepanjang jalan turun | Penjaga dead cat di 5.2b syarat 3 sampai 5, level pembatalan wajib, notifikasi kritis saat pembatalan tertembus |
+| Notifikasi membanjiri layar saat harga bergetar di batas | User berhenti membaca notifikasi, lalu melewatkan yang penting | Periode pendinginan per jenis kejadian per posisi, tingkat keparahan yang jelas, suara bisa dimatikan per tingkat |
+| Dokumen menyimpang dari kode | Agent berikutnya bekerja atas informasi salah | Aturan sinkronisasi di 13.1, ditegakkan `cargo xtask docs-check` dan templat commit |
+| Tanpa batas nominal, satu kesalahan bisa memakai seluruh saldo | Kerugian sebesar isi wallet | Diterima secara sadar oleh user. Pengamannya adalah memakai wallet terpisah yang isinya dibatasi, dinyatakan di 9.5 |
+| Cakupan melar | Tidak pernah selesai | Daftar non goal di 3.8 dan urutan fase yang mengikat |
 
 ---
 
-## 16. Pertanyaan Terbuka
+## 16. Pertanyaan yang Sudah Dijawab
 
-Belum menghalangi implementasi fase 1 sampai 3, tapi perlu jawaban sebelum fase berikutnya.
+Lima pertanyaan terbuka pada draft awal sudah dijawab user pada 5 September 2026. Dicatat di sini beserta konsekuensinya, supaya alasan di balik keputusan tidak hilang.
 
-1. Apakah perlu dukungan beberapa wallet sekaligus, atau satu wallet cukup untuk v1.
-2. Apakah notifikasi keluar range perlu keluar dari side panel, misalnya ke Telegram, mengingat side panel hanya hidup saat Chrome terbuka.
-3. Berapa ambang default untuk `maxPositionUsd` dan `maxDailyDeployUsd` yang sesuai dengan ukuran modal sebenarnya.
-4. Apakah posisi V3 dan V4 yang sudah ada dari platform lain perlu ikut dikelola penuh, atau cukup ditampilkan saja pada v1.
-5. Apakah pool yang memakai BagsV4Hook layak masuk allowlist setelah dibaca kodenya, atau ditunda sampai ada audit.
+| Pertanyaan | Jawaban | Konsekuensi pada rancangan |
+| --- | --- | --- |
+| Perlu banyak wallet, atau satu cukup | Satu saja | Tidak ada pemilih wallet di UI. Kolom `wallet_address` tetap disimpan supaya penambahan nanti tidak butuh migrasi basis data |
+| Notifikasi keluar dari side panel, misalnya ke Telegram | Tidak. Injeksi saja ke pojok kanan atas halaman gmgn | Tidak ada integrasi Telegram. Toast di halaman jadi saluran utama, notifikasi Chrome jadi cadangan saat tidak ada tab gmgn. Rincian di 3.7 |
+| Ambang bawaan `maxPositionUsd` dan `maxDailyDeployUsd` | Tanpa batas | Mekanisme tetap dibangun dan dipaksakan di engine, nilainya saja yang tidak terbatas. Karena itu pengaman satu satunya adalah isi wallet, dan hal itu dinyatakan terang terangan di 9.5 |
+| Posisi dari platform lain dikelola penuh atau ditampilkan saja | Dikelola penuh | Set aksi sama persis dengan posisi milik sendiri. Cost basis direkonstruksi dari log on chain. Rincian di 3.5 |
+| BagsV4Hook langsung masuk allowlist atau tunggu audit | Masuk allowlist kalau memang banyak dipakai | Allowlist jadi berbasis ukuran adopsi on chain, bukan penilaian manual, dengan satu syarat mutlak: hook yang masih bisa diupgrade tetap ditolak berapa pun adopsinya. Kriteria di 5.4 |
+
+### Pertanyaan yang masih terbuka
+
+1. Berapa ambang minimum porsi likuiditas aktif yang masuk akal pada langkah 5 di 5.7. Angka ini paling baik ditetapkan setelah ada 20 sampai 30 posisi nyata sebagai pembanding.
+2. Apakah range bertingkat di 11.7 masuk v1 atau ditunda. Fitur ini menambah kompleksitas rebalance secara nyata, dan mungkin lebih baik menunggu sampai penempatan satu lapis terbukti menguntungkan.
