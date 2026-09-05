@@ -768,7 +768,22 @@ Ini permintaan eksplisit: V3 dan V4 sekaligus, tapi bug tidak boleh terjadi. Tuj
 | --- | --- | --- |
 | G1 | Verifikasi registry saat start | Setiap alamat kontrak di konfigurasi dicek `eth_getCode`, hash bytecode dibandingkan dengan nilai yang dipin di repo. Beda berarti engine menolak jalan. |
 | G2 | Builder calldata bertipe | Semua struct dibangun lewat tipe Rust dari ABI, bukan string. Unit test per fungsi. |
-| G3 | Golden vector | Calldata hasil builder dibandingkan byte per byte dengan calldata yang direkam dari UI Uniswap resmi untuk aksi yang setara. Wajib untuk V3 mint, V4 mint, dan setiap jalur router. Perbedaan sekecil apa pun menggagalkan build. |
+| G3 | Golden vector | Calldata hasil builder dibandingkan byte per byte dengan calldata dari transaksi yang benar benar berhasil di rantai. Wajib untuk V3 mint, V4 mint, dan setiap jalur router. Perbedaan sekecil apa pun menggagalkan build. |
+
+Catatan tentang G3. Rencana awal merekam calldata dari UI Uniswap resmi.
+Sumbernya diganti menjadi **transaksi sungguhan di rantai**, yang lebih kuat
+karena tiga alasan. Pertama, transaksi itu terbukti diterima kontrak, bukan
+sekadar dihasilkan antarmuka. Kedua, pengambilannya bisa diotomatiskan lewat
+`cargo xtask golden` sehingga vektornya mudah diperbarui dan diperbanyak.
+Ketiga, ia menangkap pemakaian nyata di chain ini, termasuk pola yang tidak
+muncul di UI, misalnya posisi satu sisi.
+
+Pengambilan dan pengujian dipisah dengan sengaja. `cargo xtask golden`
+menyentuh jaringan dan dijalankan manual. Ujinya berjalan offline terhadap
+berkas di `engine/fixtures/golden/`, sehingga deterministik. Kalau
+perbandingannya gagal, yang salah adalah builder, bukan fixture. Memperbarui
+fixture supaya uji lewat berarti menyembunyikan kesalahan yang akan muncul lagi
+saat dana bergerak.
 | G4 | Simulasi | `eth_call` terhadap state pending sebelum kirim. Revert berarti batal, dan pesan revert didekode ke bahasa manusia. |
 | G5 | Asersi invarian | Hasil simulasi diperiksa: tokenId tercipta, delta likuiditas sesuai, jumlah token dalam batas slippage, tidak ada token tersisa di kontrak, tick akhir sama dengan yang diminta. |
 | G6 | Pembatas nilai | Mode dry run untuk semua fitur baru. Batas nominal per transaksi dan per hari. Posisi pertama pada pool baru dibatasi ke ukuran kecil yang bisa diatur. |

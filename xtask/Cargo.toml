@@ -7,7 +7,7 @@ license.workspace = true
 description = "Perintah verifikasi Rangefinder: alamat kontrak, hash bytecode, dokumen"
 
 [dependencies]
-alloy = { version = "2.1.1", default-features = false, features = ["std", "provider-http", "reqwest-native-tls", "rpc-types-eth", "serde", "json"] }
+alloy = { version = "2.1.1", default-features = false, features = ["std", "provider-http", "reqwest-native-tls", "rpc-types-eth", "serde", "json", "consensus"] }
 anyhow.workspace = true
 rangefinder-engine = { path = "../engine" }
 hex = "0.4.3"

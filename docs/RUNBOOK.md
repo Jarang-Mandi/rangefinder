@@ -81,6 +81,7 @@ dipertaruhkan.
 cargo xtask verify        periksa registry terhadap chain, lalu dokumen
 cargo xtask verify --pin  sekaligus mengunci code_hash yang belum dipin
 cargo xtask docs-check    hanya periksa kesesuaian kode dengan dokumen
+cargo xtask golden [n]    ambil n golden vector dari transaksi mint sungguhan
 cargo test                seluruh uji unit engine
 cargo clippy --all-targets
 ```

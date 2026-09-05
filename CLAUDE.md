@@ -58,6 +58,12 @@ engine/                 biner `rangefinder`, plus pustaka `rangefinder_engine`
   src/pools/            penemuan pool V3 dan V4, penyaringan, pemeringkatan
     abi.rs              ikatan ABI baca saja. Tidak ada alamat di sini
   src/range/            kalibrasi kurs dari chart, tiga satuan, snap tick
+  src/math/tick_math.rs        TickMath bilangan bulat, nilai untuk rantai
+  src/math/liquidity_math.rs   LiquidityAmounts bilangan bulat
+  src/exec/             jalur tulis. Satu satunya modul yang memindahkan dana
+    abi_write.rs        ABI sisi tulis. Terpisah tegas dari ABI baca
+    calldata.rs         gate G2, pembangun calldata bertipe
+    golden.rs           gate G3, perbandingan terhadap transaksi sungguhan
   src/store/            redb, penyimpanan lokal
   src/wallet/           manajemen wallet
     keystore.rs         Argon2id plus AES-256-GCM
@@ -96,6 +102,10 @@ tersandung:
 | Konversi satuan hanya di engine | `range` dan `math` | Panel tidak menghitung apa pun. Angka di layar harus sama persis dengan yang tercatat on chain |
 | Kurs ETH diturunkan dari chart | `math::calibrate_eth_usd` | Sumber luar selalu sedikit meleset dari gmgn, dan garis ikut bergeser |
 | Sisi tampilan bertukar saat memecoin token1 | `range::build_view` | Tick yang lebih besar berarti harga memecoin lebih rendah. Batas atas dan bawah harus ditukar sebelum ditampilkan |
+| f64 untuk tampilan, bilangan bulat untuk rantai | `math` versus `math::tick_math` | Menukar keduanya berarti mengirim harga yang meleset ke kontrak |
+| Perkalian 256 bit meluap | `liquidity_math::mul_div` | Semua perkalian lewat 512 bit. Luapan di sini baru terlihat saat dana sudah bergerak |
+| Golden vector tidak boleh diperbarui supaya lulus | `exec/golden.rs` | Kalau perbandingan gagal, yang salah builder-nya. Memperbarui fixture menyembunyikan kesalahan |
+| Fee V4 bisa berupa penanda, bukan besaran | `pools::ranking_fee` | `0x800000` berarti dynamic fee. Dibaca apa adanya akan tertulis 838 persen |
 
 ## Alur start engine
 
@@ -134,7 +144,7 @@ bytecode yang tidak cocok dengan yang dipin.
 | 1 | Engine: config, pairing, keystore, chain, api, xtask | **selesai dan terverifikasi jalan** |
 | 1 | Ekstensi: manifest, side panel, jembatan chart | selesai, typecheck bersih, build menghasilkan dist yang bisa dimuat |
 | 2 | Injeksi chart dan matematika satuan | **selesai**. Penemuan pool, kalibrasi kurs dari chart, konversi tiga satuan, snap tick beserta laporan drift, lingkaran penuh panel ke chart ke engine, dan uji integrasi terhadap snapshot gmgn |
-| 3 | Eksekusi V3 | belum |
+| 3 | Eksekusi V3 | **berjalan**. Matematika bilangan bulat, gate G2 builder calldata, dan gate G3 golden vector sudah hijau. Yang belum: G4 simulasi, G5 asersi invarian, G6 pembatas, G7 verifikasi pasca kirim, dan pengiriman transaksinya sendiri |
 | 4 | Eksekusi V4 dan zap | belum |
 | 5 | Positions, PnL, notifikasi | belum |
 | 6 | Signals, Optimizer, doktrin penempatan | belum |

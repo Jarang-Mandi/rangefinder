@@ -4,6 +4,7 @@
 //! cargo xtask verify              periksa registry terhadap chain, lalu dokumen
 //! cargo xtask verify --pin        periksa lalu tulis code_hash ke chain.toml
 //! cargo xtask docs-check          hanya periksa kesesuaian kode dengan dokumen
+//! cargo xtask golden [jumlah]     ambil golden vector dari transaksi sungguhan
 //! ```
 //!
 //! INVARIAN
@@ -14,6 +15,8 @@
 //!   dengan menyerialkan ulang struktur. Menyerialkan ulang akan menghapus
 //!   seluruh komentar di berkas itu, padahal komentarnya memuat peringatan
 //!   penting tentang UniversalRouter yang merupakan fork.
+
+mod golden;
 
 use std::path::{Path, PathBuf};
 
@@ -40,8 +43,17 @@ fn main() -> Result<()> {
             let ok = check_docs(&root)?;
             finish(ok)
         }
+        "golden" => {
+            let jumlah = args
+                .get(1)
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(3);
+            let rt = tokio::runtime::Runtime::new()?;
+            let ok = rt.block_on(golden::capture(&root, jumlah))?;
+            finish(ok)
+        }
         other => {
-            eprintln!("perintah `{other}` tidak dikenal. Yang ada: verify, docs-check");
+            eprintln!("perintah `{other}` tidak dikenal. Yang ada: verify, docs-check, golden");
             std::process::exit(2);
         }
     }
