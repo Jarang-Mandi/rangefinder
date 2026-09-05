@@ -144,7 +144,7 @@ bytecode yang tidak cocok dengan yang dipin.
 | 1 | Engine: config, pairing, keystore, chain, api, xtask | **selesai dan terverifikasi jalan** |
 | 1 | Ekstensi: manifest, side panel, jembatan chart | selesai, typecheck bersih, build menghasilkan dist yang bisa dimuat |
 | 2 | Injeksi chart dan matematika satuan | **selesai**. Penemuan pool, kalibrasi kurs dari chart, konversi tiga satuan, snap tick beserta laporan drift, lingkaran penuh panel ke chart ke engine, dan uji integrasi terhadap snapshot gmgn |
-| 3 | Eksekusi V3 | **berjalan**. Matematika bilangan bulat, gate G2 builder calldata, dan gate G3 golden vector sudah hijau. Yang belum: G4 simulasi, G5 asersi invarian, G6 pembatas, G7 verifikasi pasca kirim, dan pengiriman transaksinya sendiri |
+| 3 | Eksekusi V3 | **berjalan**. Keenam gate G1 sampai G7 kecuali pengiriman sudah ada dan teruji: registry, builder calldata, golden vector terhadap transaksi sungguhan, simulasi, asersi invarian, pembatas nilai, dan verifikasi pasca kirim. Yang belum: perakitan pipeline dan pengiriman transaksinya sendiri |
 | 4 | Eksekusi V4 dan zap | belum |
 | 5 | Positions, PnL, notifikasi | belum |
 | 6 | Signals, Optimizer, doktrin penempatan | belum |

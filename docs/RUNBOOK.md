@@ -75,6 +75,20 @@ sudah diambil sadar. Artinya pengaman satu satunya adalah isi wallet itu
 sendiri. Pakai wallet terpisah khusus operasi ini, isi hanya sebanyak yang siap
 dipertaruhkan.
 
+## Mode dry run
+
+`execution.dry_run` di `config.toml` menyala secara bawaan. Dalam mode ini
+engine menyusun transaksi, menjalankan seluruh gate, dan menyimulasikannya,
+tapi tidak pernah mengirim apa pun ke rantai.
+
+Matikan hanya setelah kamu memeriksa hasil simulasinya dan siap memindahkan
+dana:
+
+```toml
+[execution]
+dry_run = false
+```
+
 ## Verifikasi
 
 ```

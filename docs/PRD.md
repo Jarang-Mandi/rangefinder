@@ -1053,6 +1053,15 @@ Keputusan user: keempat pembatas nominal bernilai tidak terbatas secara bawaan. 
 
 Dua pembatas terakhir tetap aktif secara bawaan karena sifatnya berbeda. `minEthReserve` mencegah wallet kehabisan gas sehingga posisi tidak bisa ditutup, dan itu kegagalan operasional, bukan pilihan strategi. `maxSlippageBps` mencegah zap dieksekusi pada harga yang jauh meleset, dan tanpa itu satu swap buruk bisa menghapus fee berhari hari.
 
+Selain itu ada satu saklar terpisah:
+
+```
+execution.dry_run     menyusun dan menyimulasikan, tapi tidak pernah mengirim
+                      bawaan: MENYALA
+```
+
+Dry run menyala secara bawaan dan itu disengaja. Engine harus bisa dipasang di mesin bersih tanpa risiko memindahkan dana pada percobaan pertama. Mengirim transaksi sungguhan adalah tindakan sadar yang dinyalakan user, bukan bawaan yang kebetulan aktif. Config yang tidak menyebut bagian `execution` sama sekali tetap mendapat dry run menyala, bukan mati.
+
 Melampaui batas yang aktif berarti transaksi ditolak di engine dengan alasan yang dikembalikan ke panel.
 
 ### 9.3 Permukaan lokal

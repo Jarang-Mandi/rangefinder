@@ -26,6 +26,28 @@ pub struct Config {
     pub wallet: WalletConfig,
     #[serde(default)]
     pub limits: LimitsConfig,
+    #[serde(default)]
+    pub execution: ExecutionConfig,
+}
+
+/// Pengaturan eksekusi transaksi.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionConfig {
+    /// Kalau benar, engine menyusun dan menyimulasikan transaksi tapi TIDAK
+    /// pernah mengirimnya.
+    ///
+    /// Menyala secara bawaan, dan itu disengaja. Proyek ini belum pernah
+    /// mengirim satu transaksi pun ke rantai. Mengirim sungguhan harus jadi
+    /// tindakan sadar yang dinyalakan user, bukan bawaan yang kebetulan aktif
+    /// lalu memindahkan dana pada percobaan pertama.
+    pub dry_run: bool,
+}
+
+impl Default for ExecutionConfig {
+    fn default() -> Self {
+        Self { dry_run: true }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -298,6 +320,19 @@ mod tests {
         let mut cfg = Config::default();
         cfg.server.host = "bukan-ip".into();
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn dry_run_menyala_secara_bawaan() {
+        // Kalau uji ini gagal, engine akan mengirim transaksi sungguhan pada
+        // percobaan pertama di mesin bersih. Lihat komentar di ExecutionConfig.
+        assert!(Config::default().execution.dry_run);
+        assert!(ExecutionConfig::default().dry_run);
+
+        // Dan config yang tidak menyebut bagian execution sama sekali tetap
+        // mendapat dry run menyala, bukan mati.
+        let cfg: Config = toml::from_str("[server]\nhost = \"127.0.0.1\"\nport = 8787").unwrap();
+        assert!(cfg.execution.dry_run, "bagian yang hilang harus tetap aman");
     }
 
     #[test]
