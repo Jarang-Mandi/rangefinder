@@ -68,6 +68,26 @@ pernah terpicu untuk token kedua dan seterusnya. Pakai History API ditambah
 world bisa melihat DOM iframe yang same origin, tapi **tidak** bisa melihat
 variabel JavaScript halaman. Manifest wajib memakai `world: "MAIN"`.
 
+## Harga terakhir hanya ada di struktur internal
+
+Tidak ada API publik untuk membaca lilin terakhir. Yang berhasil:
+
+```js
+chart.getSeries().data().m_bars.last().value
+// [waktu, open, high, low, close, volume, ...]
+```
+
+`getSeries()` sendiri mengembalikan objek yang `Object.keys` dan prototipenya
+tidak menampilkan method apa pun, jadi menebak dari introspeksi tidak membantu.
+Yang membuka jalan adalah memeriksa hasil `data()`, yang memperlihatkan
+`m_bars`.
+
+Nilainya array, bukan objek, jadi urutan indeksnya yang menentukan arti. Karena
+itu pembacanya wajib memeriksa `high >= max(open, close)` dan
+`low <= min(open, close)`. Kalau urutan indeksnya berubah di versi Charting
+Library berikutnya, pemeriksaan itu yang akan menangkapnya, bukan pengguna yang
+menemukan garisnya salah tempat.
+
 ## Chart tanpa data saat riset
 
 Saat pengujian, chart tidak menampilkan lilin sama sekali, kemungkinan karena

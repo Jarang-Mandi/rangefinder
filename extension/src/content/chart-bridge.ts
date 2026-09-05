@@ -34,6 +34,7 @@ type Side = "upper" | "lower";
 interface ChartApi {
   symbol(): string;
   resolution(): string;
+  getSeries(): unknown;
   dataReady(cb: () => void): boolean;
   getVisibleRange(): { from: number; to: number };
   getVisiblePriceRange(): { from: number; to: number };
@@ -50,6 +51,62 @@ interface TradingViewApi {
   activeChart(): ChartApi;
   subscribe(event: string, handler: (id: string, type: string) => void): void;
   unsubscribe(event: string, handler: (id: string, type: string) => void): void;
+}
+
+/** Satu lilin, dalam satuan yang sedang dipakai chart. */
+interface LastBar {
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+/**
+ * Baca lilin terakhir dari penyimpanan internal Charting Library.
+ *
+ * KENAPA INI PENTING
+ * Chart bekerja dalam market cap USD sedangkan pool bekerja dalam WETH. Untuk
+ * menempatkan garis pada nilai yang benar, kita butuh kurs ETH ke USD. Alih
+ * alih mengambilnya dari sumber luar yang bisa meleset dari chart, kurs itu
+ * diturunkan dari chart itu sendiri:
+ *
+ *   eth_usd = mcap_chart / (total_supply x harga_token_dalam_weth)
+ *
+ * Cara ini menjamin garis mendarat persis di tempat yang ditunjukkan skala
+ * chart, karena kalibrasinya memakai angka chart yang sama.
+ *
+ * JALUR AKSESNYA TIDAK RESMI
+ * `getSeries().data().m_bars.last().value` adalah struktur internal, bukan API
+ * publik Charting Library, jadi ia bisa berubah kapan saja tanpa peringatan.
+ * Karena itu kegagalannya dilaporkan, bukan dibiarkan diam, dan panel harus
+ * bisa tetap berguna tanpanya.
+ *
+ * Bentuk nilainya `[waktu, open, high, low, close, volume, ...]`, diverifikasi
+ * langsung pada 5 September 2026: close 937.234.340 cocok dengan judul halaman
+ * yang menampilkan $938.86M pada saat yang hampir sama.
+ */
+function readLastBar(chart: ChartApi): LastBar | null {
+  try {
+    const series = chart.getSeries() as unknown as {
+      data(): { m_bars: { last(): { value: number[] } } };
+    };
+    const value = series.data().m_bars.last().value;
+    if (!Array.isArray(value) || value.length < 5) return null;
+
+    const [time, open, high, low, close, volume] = value;
+    // Penjaga kewarasan. Kalau urutan indeksnya berubah, angkanya tidak akan
+    // lagi konsisten sebagai OHLC, dan lebih baik melaporkan tidak tahu
+    // daripada menempatkan garis di tempat yang salah.
+    const konsisten =
+      high >= Math.max(open, close) && low <= Math.min(open, close) && close > 0;
+    if (!konsisten) return null;
+
+    return { time, open, high, low, close, volume: volume ?? 0 };
+  } catch {
+    return null;
+  }
 }
 
 /** Entity id garis milik kita. Jangan pernah menyimpulkan dari getAllShapes. */
@@ -237,6 +294,39 @@ async function attach() {
   }
 
   post({ kind: "token_page", token, url: location.href });
+  startPriceReporting();
+}
+
+/** Timer pelaporan harga. Disimpan supaya bisa dihentikan saat pindah token. */
+let priceTimer: number | null = null;
+
+/**
+ * Laporkan lilin terakhir secara berkala.
+ *
+ * Satu detik cukup: chart 1 menit tidak berubah lebih cepat dari itu, dan
+ * pelaporan yang lebih sering hanya membebani jalur pesan tanpa menambah
+ * ketelitian.
+ */
+function startPriceReporting() {
+  stopPriceReporting();
+  const kirim = () => {
+    if (!api) return;
+    const bar = readLastBar(api.activeChart());
+    if (bar) {
+      post({ kind: "chart_price", token: currentToken, symbol: safe(() => api!.activeChart().symbol()), bar });
+    } else {
+      post({ kind: "chart_price_unavailable", token: currentToken });
+    }
+  };
+  kirim();
+  priceTimer = window.setInterval(kirim, 1_000);
+}
+
+function stopPriceReporting() {
+  if (priceTimer !== null) {
+    window.clearInterval(priceTimer);
+    priceTimer = null;
+  }
 }
 
 /**
@@ -249,6 +339,7 @@ function watchNavigation() {
   const check = () => {
     if (location.href === last) return;
     last = location.href;
+    stopPriceReporting();
     clearLines();
     api = null;
     void attach();

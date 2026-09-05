@@ -87,6 +87,36 @@ const c = f.contentWindow.tradingViewApi.activeChart();
 });
 ```
 
+### Membaca harga terakhir dari chart
+
+Charting Library tidak menyediakan API publik untuk membaca lilin terakhir.
+Jalurnya ada, tapi lewat struktur internal:
+
+```js
+const bars = chart.getSeries().data().m_bars;
+const [time, open, high, low, close, volume] = bars.last().value;
+```
+
+Diverifikasi 5 September 2026 pada PONS: `close` bernilai 937.234.340
+sementara judul halaman menampilkan $938.86M pada saat yang hampir sama, dan
+`high` serta `low` konsisten mengapit `open` dan `close`.
+
+**Kenapa ini dibutuhkan.** Chart bekerja dalam market cap USD, pool bekerja
+dalam WETH. Untuk menempatkan garis pada nilai yang benar, kurs ETH ke USD
+diturunkan dari chart itu sendiri, bukan dari sumber luar:
+
+```
+eth_usd = mcap_chart / (total_supply x harga_token_dalam_weth)
+```
+
+Dengan begitu garis mendarat persis di tempat yang ditunjukkan skala chart,
+karena kalibrasinya memakai angka chart yang sama. Sumber harga luar akan
+selalu sedikit meleset dari chart dan membuat garis bergeser.
+
+**Ini jalur tidak resmi.** `m_bars` bisa berubah kapan saja. Karena itu
+pembacanya memeriksa kewarasan OHLC dan melaporkan kegagalan secara eksplisit,
+bukan diam diam mengembalikan angka yang salah.
+
 ### Jebakan yang sudah memakan waktu
 
 **`createShape` mengembalikan Promise.** Menyimpan hasilnya tanpa `await` lalu

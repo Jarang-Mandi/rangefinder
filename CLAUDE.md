@@ -129,7 +129,7 @@ bytecode yang tidak cocok dengan yang dipin.
 | 0 | Spesifikasi, repo, dokumen | selesai |
 | 1 | Engine: config, pairing, keystore, chain, api, xtask | **selesai dan terverifikasi jalan** |
 | 1 | Ekstensi: manifest, side panel, jembatan chart | selesai, typecheck bersih, build menghasilkan dist yang bisa dimuat |
-| 2 | Injeksi chart dan matematika satuan | **berjalan**. Penemuan pool, protokol token, dan tab Range sudah ada. Garis di chart yang digerakkan engine belum |
+| 2 | Injeksi chart dan matematika satuan | **berjalan**. Penemuan pool, protokol token, tab Range, dan pembacaan harga chart sudah ada. Yang belum: kalibrasi kurs di engine, dan garis yang digerakkan engine lalu bisa digeser balik |
 | 3 | Eksekusi V3 | belum |
 | 4 | Eksekusi V4 dan zap | belum |
 | 5 | Positions, PnL, notifikasi | belum |
