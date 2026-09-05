@@ -94,6 +94,15 @@ async fn session(socket: WebSocket, state: AppState) {
                                 // supaya loop ini tidak terhenti menunggu jaringan.
                                 state.spawn_token_lookup(address);
                             }
+                            Ok(ClientMessage::ChartPrice { address, mcap_usd }) => {
+                                state.on_chart_price(&address, mcap_usd).await;
+                            }
+                            Ok(ClientMessage::SelectPool { pool_id }) => {
+                                state.on_select_pool(pool_id).await;
+                            }
+                            Ok(ClientMessage::SetRange { lower_mcap, upper_mcap }) => {
+                                state.on_set_range(lower_mcap, upper_mcap).await;
+                            }
                             Ok(ClientMessage::Ping) => {
                                 // Denyut juga memundurkan kunci otomatis, karena
                                 // panel yang terbuka berarti user masih bekerja.

@@ -27,6 +27,18 @@ pub enum ClientMessage {
     /// Pencariannya menyentuh jaringan dan bisa makan beberapa detik, jadi
     /// dijalankan di tugas terpisah dan jawabannya datang belakangan.
     SubscribeToken { address: String },
+
+    /// Market cap yang sedang ditampilkan chart gmgn.
+    ///
+    /// Inilah yang mengkalibrasi kurs ETH ke USD. Datang tiap detik dari
+    /// content script selama halaman token terbuka.
+    ChartPrice { address: String, mcap_usd: f64 },
+
+    /// User memilih pool lain dari daftar.
+    SelectPool { pool_id: String },
+
+    /// User menggeser garis. Batasnya dalam market cap USD, satuan chart.
+    SetRange { lower_mcap: f64, upper_mcap: f64 },
 }
 
 /// Pesan dari engine ke panel.
@@ -44,6 +56,8 @@ pub enum ServerMessage {
     Pong,
     /// Hasil pencarian pool untuk satu token.
     TokenState(Box<TokenState>),
+    /// Range dalam tiga satuan sekaligus, hasil kalibrasi dan snap tick.
+    RangeView(Box<crate::range::RangeView>),
     /// Kejadian yang layak diberitahukan ke user. Lihat PRD 3.7.
     Alert {
         level: AlertLevel,

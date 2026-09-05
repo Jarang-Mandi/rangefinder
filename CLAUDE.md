@@ -57,6 +57,7 @@ engine/                 biner `rangefinder`, plus pustaka `rangefinder_engine`
   src/math/             konversi mcap ke tick, snap grid, matematika likuiditas
   src/pools/            penemuan pool V3 dan V4, penyaringan, pemeringkatan
     abi.rs              ikatan ABI baca saja. Tidak ada alamat di sini
+  src/range/            kalibrasi kurs dari chart, tiga satuan, snap tick
   src/store/            redb, penyimpanan lokal
   src/wallet/           manajemen wallet
     keystore.rs         Argon2id plus AES-256-GCM
@@ -92,6 +93,9 @@ tersandung:
 | Orientasi token membalik arah tick | `math/mod.rs` | Kalau memecoin adalah token1, harga naik berarti tick turun, dan batas atas bawah bertukar. Terlihat masuk akal saat salah |
 | Pool tanpa likuiditas harus dibuang | `pools/mod.rs::usable_pools` | Pool kosong tetap menjawab `slot0` dengan harga dari saat ia dibuat. Pada PONS/WETH selisihnya 37 kali lipat dari pool yang benar benar likuid |
 | Penyaringan pool hanya di engine | `pools` dan `App.tsx` | Panel menampilkan apa adanya. Dua tempat yang menyaring akan menyimpang |
+| Konversi satuan hanya di engine | `range` dan `math` | Panel tidak menghitung apa pun. Angka di layar harus sama persis dengan yang tercatat on chain |
+| Kurs ETH diturunkan dari chart | `math::calibrate_eth_usd` | Sumber luar selalu sedikit meleset dari gmgn, dan garis ikut bergeser |
+| Sisi tampilan bertukar saat memecoin token1 | `range::build_view` | Tick yang lebih besar berarti harga memecoin lebih rendah. Batas atas dan bawah harus ditukar sebelum ditampilkan |
 
 ## Alur start engine
 
@@ -129,7 +133,7 @@ bytecode yang tidak cocok dengan yang dipin.
 | 0 | Spesifikasi, repo, dokumen | selesai |
 | 1 | Engine: config, pairing, keystore, chain, api, xtask | **selesai dan terverifikasi jalan** |
 | 1 | Ekstensi: manifest, side panel, jembatan chart | selesai, typecheck bersih, build menghasilkan dist yang bisa dimuat |
-| 2 | Injeksi chart dan matematika satuan | **berjalan**. Penemuan pool, protokol token, tab Range, dan pembacaan harga chart sudah ada. Yang belum: kalibrasi kurs di engine, dan garis yang digerakkan engine lalu bisa digeser balik |
+| 2 | Injeksi chart dan matematika satuan | **hampir selesai**. Penemuan pool, kalibrasi kurs dari chart, konversi tiga satuan, snap tick beserta laporan drift, dan lingkaran penuh panel ke chart ke engine sudah jalan. Yang tersisa hanya uji integrasi terhadap snapshot gmgn, dan itu syarat sebelum fase 3 |
 | 3 | Eksekusi V3 | belum |
 | 4 | Eksekusi V4 dan zap | belum |
 | 5 | Positions, PnL, notifikasi | belum |

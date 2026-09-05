@@ -853,6 +853,9 @@ Panel ke engine:
 | `ping` | denyut, sekaligus memundurkan kunci otomatis | 1 |
 | `unlock_wallet` | `{ passphrase }`, lewat HTTP bukan WebSocket | 1 |
 | `subscribe_token` | `{ address }` | 2 |
+| `chart_price` | `{ address, mcapUsd }`, market cap yang sedang ditampilkan chart. Inilah yang mengkalibrasi kurs ETH ke USD | 2 |
+| `select_pool` | `{ poolId }`, user memilih pool lain dari daftar | 2 |
+| `set_range` | `{ lowerMcap, upperMcap }`, user menggeser garis. Batas dalam market cap USD karena itu satuan chart | 2 |
 | `quote_range` | `{ pool, tickLower, tickUpper, sizeUsd, sourceToken }` | 3 |
 | `open_position` | `{ quoteId }` | 3 |
 | `rebalance` | `{ positionId, tickLower, tickUpper }` | 3 |
@@ -869,6 +872,7 @@ Engine ke panel:
 | `pong` | balasan denyut | 1 |
 | `alert` | `{ level, code, message, positionId }` | 1 |
 | `token_state` | `{ address, meta, pools[], selectedPoolId, error }`, jawaban atas `subscribe_token`. Daftar `pools` sudah disaring dan diurutkan, pool tanpa likuiditas tidak pernah ikut | 2 |
+| `range_view` | `{ poolId, tickSpacing, ethUsd, current, lower, upper, widthPct, inRange, warnings[] }`. Tiap batas memuat `tick`, `priceWeth`, `priceUsd`, `mcapUsd`, dan `driftBps`, yaitu selisih akibat pembulatan ke grid tick | 2 |
 | `price_tick` | `{ address, priceUsd, priceWeth, mcapUsd }` | 2 |
 | `range_quote` | `{ quoteId, feeApr, expectedHoursInRange, ilBreakevenHours, crowdedLiquidityUsd, ourSharePct, amount0, amount1, swapNeeded, priceImpact, gasEstimate, warnings[] }` | 3 |
 | `tx_status` | `{ txId, stage, hash, error }` | 3 |

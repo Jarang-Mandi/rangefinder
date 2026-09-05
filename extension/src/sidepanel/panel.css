@@ -126,6 +126,63 @@
   color: var(--warn);
 }
 
+.range-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  margin-top: var(--s2);
+}
+
+.range-table th {
+  text-align: right;
+  font-weight: 500;
+  color: var(--text-muted);
+  padding-bottom: 4px;
+}
+
+.range-table th:first-child {
+  text-align: left;
+}
+
+.range-table td {
+  padding: 5px 0 5px 6px;
+  border-top: 1px solid var(--border);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.range-table td:first-child {
+  text-align: left;
+  padding-left: 0;
+}
+
+.range-table tr.current td {
+  color: var(--text-muted);
+}
+
+.bound-dot {
+  display: inline-block;
+  width: 8px;
+  height: 2px;
+  border-radius: 1px;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+.bound-dot.upper {
+  background: var(--upper);
+}
+
+.bound-dot.lower {
+  background: var(--lower);
+}
+
+.warn-line {
+  margin: var(--s2) 0 0;
+  color: var(--warn);
+  font-size: 11px;
+}
+
 .pool-row {
   display: flex;
   align-items: center;

@@ -14,10 +14,12 @@ import {
   DEFAULT_ENGINE_ORIGIN,
   WS_SUBPROTOCOL,
   asEngineStatus,
+  asRangeView,
   asTokenState,
   type ClientMessage,
   type EnginePing,
   type EngineStatus,
+  type RangeView,
   type ServerMessage,
   type TokenState,
 } from "./protocol";
@@ -34,6 +36,7 @@ interface Handlers {
   onStatus: (status: EngineStatus) => void;
   onAlert: (level: string, code: string, message: string) => void;
   onTokenState?: (token: TokenState) => void;
+  onRangeView?: (view: RangeView) => void;
 }
 
 const HEARTBEAT_MS = 20_000;
@@ -145,6 +148,11 @@ export class EngineClient {
         this.handlers.onTokenState?.(token);
         return;
       }
+      const view = asRangeView(msg);
+      if (view) {
+        this.handlers.onRangeView?.(view);
+        return;
+      }
       if (msg.type === "alert") {
         this.handlers.onAlert(msg.level, msg.code, msg.message);
       }
@@ -186,6 +194,25 @@ export class EngineClient {
    */
   subscribeToken(address: string) {
     this.send({ type: "subscribe_token", address });
+  }
+
+  /**
+   * Laporkan market cap yang sedang ditampilkan chart.
+   *
+   * Inilah yang mengkalibrasi kurs ETH ke USD di engine. Tanpa laporan ini,
+   * engine tidak bisa menyusun tampilan range sama sekali.
+   */
+  reportChartPrice(address: string, mcapUsd: number) {
+    this.send({ type: "chart_price", address, mcap_usd: mcapUsd });
+  }
+
+  selectPool(poolId: string) {
+    this.send({ type: "select_pool", pool_id: poolId });
+  }
+
+  /** Batas dalam market cap USD, karena itu satuan yang dipakai chart. */
+  setRange(lowerMcap: number, upperMcap: number) {
+    this.send({ type: "set_range", lower_mcap: lowerMcap, upper_mcap: upperMcap });
   }
 
   private startHeartbeat() {

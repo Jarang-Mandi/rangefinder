@@ -52,6 +52,32 @@ pub struct AppState {
     /// Hasil gate G1 dari saat start, disimpan supaya panel bisa menampilkannya
     /// tanpa memanggil RPC ulang setiap kali.
     pub registry_checks: Arc<Vec<crate::chain::RegistryCheck>>,
+    /// Token yang sedang dilihat user beserta pool terpilihnya.
+    ///
+    /// Satu slot saja, karena side panel hanya menampilkan satu token pada satu
+    /// waktu. Kalau nanti panel bisa memantau beberapa token sekaligus, ini
+    /// yang berubah jadi map.
+    pub active: Arc<tokio::sync::RwLock<Option<ActiveToken>>>,
+}
+
+/// Keadaan token yang sedang aktif di panel.
+#[derive(Debug, Clone)]
+pub struct ActiveToken {
+    pub meta: crate::pools::TokenMeta,
+    pub pools: Vec<crate::pools::PoolInfo>,
+    pub selected_pool_id: String,
+    pub quote_decimals: u8,
+    /// Batas yang diminta user dalam market cap USD. `None` berarti pakai
+    /// range bawaan.
+    pub requested: Option<(f64, f64)>,
+    /// Market cap terakhir yang dilaporkan chart.
+    pub chart_mcap_usd: Option<f64>,
+}
+
+impl ActiveToken {
+    pub fn selected_pool(&self) -> Option<&crate::pools::PoolInfo> {
+        self.pools.iter().find(|p| p.id == self.selected_pool_id)
+    }
 }
 
 impl AppState {
@@ -147,8 +173,109 @@ impl AppState {
         }
 
         out.selected_pool_id = usable.first().map(|p| p.id.clone());
+
+        // Simpan sebagai token aktif supaya laporan harga dari chart yang
+        // datang berikutnya punya konteks untuk dikalibrasi.
+        if let (Some(meta), Some(selected)) = (out.meta.clone(), out.selected_pool_id.clone()) {
+            *self.active.write().await = Some(ActiveToken {
+                meta,
+                pools: usable.clone(),
+                selected_pool_id: selected,
+                quote_decimals: self
+                    .registry
+                    .tokens
+                    .get("weth")
+                    .map(|t| t.decimals)
+                    .unwrap_or(18),
+                requested: None,
+                chart_mcap_usd: None,
+            });
+        }
+
         out.pools = usable;
         out
+    }
+
+    /// Catat market cap dari chart, lalu kirim ulang tampilan range.
+    ///
+    /// Kalibrasi kurs bergantung sepenuhnya pada angka ini, jadi laporan yang
+    /// tidak masuk akal diabaikan diam diam ketimbang merusak tampilan.
+    pub async fn on_chart_price(&self, address: &str, mcap_usd: f64) {
+        if !(mcap_usd.is_finite() && mcap_usd > 0.0) {
+            return;
+        }
+
+        {
+            let mut guard = self.active.write().await;
+            let Some(active) = guard.as_mut() else { return };
+            // Laporan untuk token lain berarti panel dan chart sedang tidak
+            // menunjuk hal yang sama. Diabaikan sampai keduanya sepakat.
+            if !active.meta.address.eq_ignore_ascii_case(address) {
+                return;
+            }
+            active.chart_mcap_usd = Some(mcap_usd);
+        }
+
+        self.broadcast_range_view().await;
+    }
+
+    pub async fn on_select_pool(&self, pool_id: String) {
+        {
+            let mut guard = self.active.write().await;
+            let Some(active) = guard.as_mut() else { return };
+            if !active.pools.iter().any(|p| p.id == pool_id) {
+                return;
+            }
+            active.selected_pool_id = pool_id;
+            // Grid tick tiap pool berbeda, jadi batas yang diminta user pada
+            // pool lama tidak lagi berlaku apa adanya. Dibiarkan supaya niat
+            // user tetap terjaga, dan snap yang menyesuaikannya.
+        }
+        self.broadcast_range_view().await;
+    }
+
+    pub async fn on_set_range(&self, lower_mcap: f64, upper_mcap: f64) {
+        if !(lower_mcap.is_finite() && upper_mcap.is_finite()) {
+            return;
+        }
+        let (lo, hi) = if lower_mcap <= upper_mcap {
+            (lower_mcap, upper_mcap)
+        } else {
+            // User menyeret garis bawah melewati garis atas. Keduanya bertukar
+            // peran, sesuai acceptance criteria di PRD 3.3.
+            (upper_mcap, lower_mcap)
+        };
+
+        {
+            let mut guard = self.active.write().await;
+            let Some(active) = guard.as_mut() else { return };
+            active.requested = Some((lo, hi));
+        }
+        self.broadcast_range_view().await;
+    }
+
+    async fn broadcast_range_view(&self) {
+        let guard = self.active.read().await;
+        let Some(active) = guard.as_ref() else { return };
+        let Some(pool) = active.selected_pool() else { return };
+        let Some(mcap) = active.chart_mcap_usd else { return };
+
+        match crate::range::build_view(
+            pool,
+            &active.meta,
+            active.quote_decimals,
+            mcap,
+            active.requested,
+        ) {
+            Ok(view) => {
+                let _ = self
+                    .events
+                    .send(protocol::ServerMessage::RangeView(Box::new(view)));
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "tampilan range belum bisa disusun");
+            }
+        }
     }
 
     pub fn registry_summary(&self) -> RegistrySummary {

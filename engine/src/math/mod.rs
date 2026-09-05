@@ -121,6 +121,79 @@ fn pool_price_from_memecoin_weth(price_weth: f64, o: PoolOrientation) -> Option<
     })
 }
 
+/// Harga memecoin dalam WETH dari harga mentah pool.
+///
+/// Kebalikan dari jalur yang dipakai `price_weth_to_tick`, dan ini yang dipakai
+/// saat membaca keadaan pool dari `slot0`. Pembalikan akibat orientasi token
+/// ditangani di sini juga, sehingga pemanggil selalu berpikir dalam harga
+/// memecoin.
+pub fn raw_price_to_price_weth(raw_price: f64, o: PoolOrientation) -> Option<f64> {
+    if !raw_price.is_finite() || raw_price <= 0.0 {
+        return None;
+    }
+    let human = raw_price * 10f64.powi(-o.decimal_shift());
+    if !human.is_finite() || human <= 0.0 {
+        return None;
+    }
+    let price = if o.memecoin_is_token0 {
+        human
+    } else {
+        1.0 / human
+    };
+    price.is_finite().then_some(price)
+}
+
+/// Turunkan kurs ETH ke USD dari chart, bukan dari sumber luar.
+///
+/// Chart menampilkan market cap dalam USD, sedangkan pool memberi harga dalam
+/// WETH. Membandingkan keduanya menghasilkan kurs yang tersirat:
+///
+/// ```text
+/// eth_usd = mcap_usd / (total_supply x price_weth)
+/// ```
+///
+/// KENAPA BUKAN SUMBER LUAR
+/// Sumber harga mana pun akan sedikit berbeda dari yang dipakai gmgn, dan
+/// selisih sekecil apa pun membuat garis mendarat di tempat yang bukan
+/// ditunjukkan skala chart. Kalibrasi dari chart itu sendiri menghilangkan
+/// seluruh kelas masalah itu.
+pub fn calibrate_eth_usd(mcap_usd: f64, total_supply: f64, price_weth: f64) -> Option<f64> {
+    if !(mcap_usd.is_finite() && mcap_usd > 0.0) {
+        return None;
+    }
+    if !(total_supply.is_finite() && total_supply > 0.0) {
+        return None;
+    }
+    if !(price_weth.is_finite() && price_weth > 0.0) {
+        return None;
+    }
+    let eth_usd = mcap_usd / (total_supply * price_weth);
+    (eth_usd.is_finite() && eth_usd > 0.0).then_some(eth_usd)
+}
+
+/// Market cap USD dari harga memecoin dalam WETH.
+pub fn price_weth_to_mcap(price_weth: f64, eth_usd: f64, total_supply: f64) -> Option<f64> {
+    let usd = price_weth_to_usd(price_weth, eth_usd)?;
+    price_usd_to_mcap(usd, total_supply)
+}
+
+/// Harga USD dari harga dalam WETH.
+pub fn price_weth_to_usd(price_weth: f64, eth_usd: f64) -> Option<f64> {
+    if !(price_weth.is_finite() && price_weth > 0.0) {
+        return None;
+    }
+    if !(eth_usd.is_finite() && eth_usd > 0.0) {
+        return None;
+    }
+    Some(price_weth * eth_usd)
+}
+
+/// Harga memecoin dalam WETH dari market cap yang dibaca di chart.
+pub fn mcap_to_price_weth(mcap_usd: f64, total_supply: f64, eth_usd: f64) -> Option<f64> {
+    let usd = mcap_to_price_usd(mcap_usd, total_supply)?;
+    price_usd_to_weth(usd, eth_usd)
+}
+
 /// Tick dari harga memecoin dalam WETH, belum di-snap.
 pub fn price_weth_to_tick(price_weth: f64, o: PoolOrientation) -> Option<i32> {
     let human = pool_price_from_memecoin_weth(price_weth, o)?;
@@ -410,6 +483,60 @@ mod tests {
         let kembali_mcap = price_usd_to_mcap(kembali_weth * eth_usd, total_supply).unwrap();
         let selisih = (kembali_mcap - 239_220.0).abs() / 239_220.0;
         assert!(selisih < 1e-3, "market cap kembali sebagai {kembali_mcap}");
+    }
+
+    #[test]
+    fn harga_mentah_kembali_ke_harga_weth() {
+        for o in [orientasi_token0(), orientasi_token1()] {
+            let harga_weth = 3.5e-6;
+            let tick = price_weth_to_tick(harga_weth, o).unwrap();
+            let dari_tick = tick_to_price_weth(tick, o).unwrap();
+
+            // Bentuk harga mentah dari tick, lalu putar balik lewat jalur pool.
+            let raw = 1.0001f64.powi(tick);
+            let dari_raw = raw_price_to_price_weth(raw, o).unwrap();
+
+            let selisih = (dari_raw - dari_tick).abs() / dari_tick;
+            assert!(
+                selisih < 1e-6,
+                "jalur raw dan jalur tick harus sepakat, selisih {selisih}"
+            );
+        }
+    }
+
+    #[test]
+    fn kalibrasi_kurs_dari_chart() {
+        // Angka nyata dari PONS: market cap 937,23 juta, suplai 1 miliar.
+        let mcap = 937_234_340.0;
+        let suplai = 1e9;
+        // Kalau harga memecoin 3,8e-4 WETH, kursnya sekitar 2466.
+        let price_weth = 3.8e-4;
+        let eth_usd = calibrate_eth_usd(mcap, suplai, price_weth).unwrap();
+        assert!((eth_usd - 2466.4).abs() < 1.0, "kurs tersirat {eth_usd}");
+
+        // Kalibrasi harus konsisten: kembali ke market cap semula.
+        let kembali = price_weth_to_mcap(price_weth, eth_usd, suplai).unwrap();
+        assert!((kembali - mcap).abs() / mcap < 1e-9);
+    }
+
+    #[test]
+    fn kalibrasi_menolak_masukan_tidak_masuk_akal() {
+        assert!(calibrate_eth_usd(0.0, 1e9, 1e-4).is_none());
+        assert!(calibrate_eth_usd(1e6, 0.0, 1e-4).is_none());
+        assert!(calibrate_eth_usd(1e6, 1e9, 0.0).is_none());
+        assert!(calibrate_eth_usd(f64::NAN, 1e9, 1e-4).is_none());
+        assert!(calibrate_eth_usd(-1.0, 1e9, 1e-4).is_none());
+    }
+
+    #[test]
+    fn mcap_bolak_balik_lewat_weth() {
+        let suplai = 1e9;
+        let eth_usd = 2500.0;
+        let mcap = 8.5e8;
+
+        let weth = mcap_to_price_weth(mcap, suplai, eth_usd).unwrap();
+        let kembali = price_weth_to_mcap(weth, eth_usd, suplai).unwrap();
+        assert!((kembali - mcap).abs() / mcap < 1e-9);
     }
 
     #[test]

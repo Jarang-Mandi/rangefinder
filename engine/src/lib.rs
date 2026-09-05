@@ -14,6 +14,7 @@ pub mod config;
 pub mod error;
 pub mod math;
 pub mod pools;
+pub mod range;
 pub mod store;
 pub mod telemetry;
 pub mod wallet;

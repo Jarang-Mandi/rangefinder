@@ -29,6 +29,8 @@ import {
   isEvmAddress,
   type EngineStatus,
   type PoolInfo,
+  type RangeBound,
+  type RangeView,
   type TokenState,
 } from "../shared/protocol";
 
@@ -52,8 +54,15 @@ export function App() {
   const [tab, setTab] = useState<TabId>("range");
   const [tokenState, setTokenState] = useState<TokenState | null>(null);
   const [tokenLoading, setTokenLoading] = useState(false);
+  const [rangeView, setRangeView] = useState<RangeView | null>(null);
 
   const clientRef = useRef<EngineClient | null>(null);
+  /** Tab gmgn yang sedang menampilkan chart. Tujuan perintah gambar garis. */
+  const gmgnTabRef = useRef<number | null>(null);
+  /** Alamat token yang sedang aktif, dipakai saat meneruskan harga chart. */
+  const addressRef = useRef<string | null>(null);
+  /** Garis terakhir yang dikirim, supaya tidak menggambar ulang tanpa alasan. */
+  const drawnRef = useRef<string>("");
 
   useEffect(() => {
     chrome.storage.local.get(TOKEN_KEY).then((stored) => {
@@ -75,7 +84,10 @@ export function App() {
       onTokenState: (t) => {
         setTokenState(t);
         setTokenLoading(false);
+        setRangeView(null);
+        drawnRef.current = "";
       },
+      onRangeView: setRangeView,
       onAlert: (level, code, message) => {
         // Fase 5 memindahkan ini ke toast di halaman gmgn beserta suaranya,
         // sesuai PRD 3.7. Untuk sekarang cukup tercatat di konsol panel.
@@ -103,6 +115,9 @@ export function App() {
 
     setTokenLoading(true);
     setTokenState(null);
+    setRangeView(null);
+    drawnRef.current = "";
+    addressRef.current = clean;
     clientRef.current?.subscribeToken(clean);
 
     if (navigate) {
@@ -113,19 +128,85 @@ export function App() {
     }
   }, []);
 
-  // Jalan masuk kedua: user membuka halaman token gmgn sendiri. Service worker
-  // memberi tahu panel, dan panel memuat tokennya tanpa diminta.
+  /**
+   * Semua kabar dari halaman gmgn masuk lewat satu pintu.
+   *
+   * Tiga jenis yang ditangani: user membuka halaman token sendiri, chart
+   * melaporkan harga terakhirnya, dan user menggeser garis.
+   */
   useEffect(() => {
     const listener = (message: unknown) => {
       const m = message as Record<string, unknown> | null;
-      if (!m || m.target !== "sidepanel" || m.kind !== "token_page") return;
-      const url = typeof m.url === "string" ? m.url : "";
-      const found = url.match(/\/token\/(0x[a-fA-F0-9]{40})/);
-      if (found) loadToken(found[1], false);
+      if (!m || m.target !== "sidepanel") return;
+
+      if (typeof m.tabId === "number") gmgnTabRef.current = m.tabId;
+
+      switch (m.kind) {
+        case "token_page": {
+          const url = typeof m.url === "string" ? m.url : "";
+          const found = url.match(/\/token\/(0x[a-fA-F0-9]{40})/);
+          if (found) loadToken(found[1], false);
+          break;
+        }
+        case "chart_price": {
+          // Kalibrasi kurs bergantung pada angka ini. Diteruskan apa adanya,
+          // engine yang memutuskan apakah masuk akal.
+          const bar = m.bar as { close?: number } | undefined;
+          const address = addressRef.current;
+          if (bar && typeof bar.close === "number" && address) {
+            clientRef.current?.reportChartPrice(address, bar.close);
+          }
+          break;
+        }
+        case "chart_line_moved": {
+          // Satu garis bergerak, tapi engine butuh keduanya. Sisi yang tidak
+          // bergerak diambil dari tampilan terakhir.
+          const side = m.side;
+          const price = m.price;
+          if (typeof price !== "number" || !latestViewRef.current) break;
+          const v = latestViewRef.current;
+          const lower = side === "lower" ? price : v.lower.mcap_usd;
+          const upper = side === "upper" ? price : v.upper.mcap_usd;
+          clientRef.current?.setRange(lower, upper);
+          break;
+        }
+      }
     };
     chrome.runtime.onMessage.addListener(listener);
     return () => chrome.runtime.onMessage.removeListener(listener);
   }, [loadToken]);
+
+  // Ref supaya listener di atas selalu melihat tampilan terbaru tanpa harus
+  // dipasang ulang setiap kali range berubah.
+  const latestViewRef = useRef<RangeView | null>(null);
+  latestViewRef.current = rangeView;
+
+  /**
+   * Gambar garis di chart setiap kali engine mengirim tampilan baru.
+   *
+   * Perbandingan dengan gambar terakhir mencegah penggambaran ulang saat
+   * engine mengirim nilai yang sama, yang terjadi tiap detik karena laporan
+   * harga chart datang berkala.
+   */
+  useEffect(() => {
+    const tabId = gmgnTabRef.current;
+    if (!rangeView || tabId === null) return;
+
+    const sidik = `${rangeView.lower.tick}:${rangeView.upper.tick}:${rangeView.pool_id}`;
+    if (sidik === drawnRef.current) return;
+    drawnRef.current = sidik;
+
+    void chrome.tabs
+      .sendMessage(tabId, {
+        target: "gmgn-chart",
+        kind: "draw_lines",
+        upperPrice: rangeView.upper.mcap_usd,
+        lowerPrice: rangeView.lower.mcap_usd,
+      })
+      .catch(() => {
+        // Tab gmgn sudah tertutup atau berpindah. Bukan kondisi error.
+      });
+  }, [rangeView]);
 
   const savePairing = useCallback(async (value: string) => {
     await chrome.storage.local.set({ [TOKEN_KEY]: value });
@@ -169,6 +250,8 @@ export function App() {
             token={tokenState}
             loadingToken={tokenLoading}
             onLoadToken={loadToken}
+            rangeView={rangeView}
+            onSelectPool={(id) => clientRef.current?.selectPool(id)}
             onForget={forgetPairing}
           />
         ) : (
@@ -255,6 +338,8 @@ function RangeTab({
   token,
   loadingToken,
   onLoadToken,
+  rangeView,
+  onSelectPool,
   onForget,
 }: {
   status: EngineStatus | null;
@@ -264,6 +349,8 @@ function RangeTab({
   token: TokenState | null;
   loadingToken: boolean;
   onLoadToken: (address: string, navigate: boolean) => void;
+  rangeView: RangeView | null;
+  onSelectPool: (poolId: string) => void;
   onForget: () => void;
 }) {
   const [showEngine, setShowEngine] = useState(false);
@@ -283,7 +370,9 @@ function RangeTab({
       <AddressInput onSubmit={(a) => onLoadToken(a, true)} busy={loadingToken} />
 
       {loadingToken ? <p class="phase-note">Mencari pool di chain.</p> : null}
-      {token ? <TokenCard token={token} /> : null}
+      {token ? (
+        <TokenCard token={token} rangeView={rangeView} onSelectPool={onSelectPool} />
+      ) : null}
 
       <section class="card">
         <div class="section-title">
@@ -346,14 +435,20 @@ function AddressInput({
   );
 }
 
-function TokenCard({ token }: { token: TokenState }) {
-  const [selected, setSelected] = useState<string | null>(token.selected_pool_id);
-
-  // Token berganti berarti pilihan lama tidak berlaku lagi.
-  const active =
-    token.pools.find((p) => p.id === selected) ??
-    token.pools.find((p) => p.id === token.selected_pool_id) ??
-    token.pools[0];
+function TokenCard({
+  token,
+  rangeView,
+  onSelectPool,
+}: {
+  token: TokenState;
+  rangeView: RangeView | null;
+  onSelectPool: (poolId: string) => void;
+}) {
+  // Pool aktif ditentukan engine, bukan panel, supaya tidak ada dua sumber
+  // kebenaran. Selama tampilan range belum datang, pilihan awal dari
+  // token_state yang dipakai.
+  const activeId = rangeView?.pool_id ?? token.selected_pool_id;
+  const active = token.pools.find((p) => p.id === activeId) ?? token.pools[0];
 
   if (token.error && token.pools.length === 0) {
     return (
@@ -393,7 +488,7 @@ function TokenCard({ token }: { token: TokenState }) {
               key={p.id}
               pool={p}
               active={active?.id === p.id}
-              onSelect={() => setSelected(p.id)}
+              onSelect={() => onSelectPool(p.id)}
             />
           ))}
         </div>
@@ -404,7 +499,17 @@ function TokenCard({ token }: { token: TokenState }) {
         </p>
       </section>
 
-      {active ? <RangeCard pool={active} /> : null}
+      {rangeView ? (
+        <RangeCard view={rangeView} />
+      ) : active ? (
+        <section class="card">
+          <h2>Range</h2>
+          <p class="muted" style="margin: var(--s2) 0 0">
+            Menunggu harga dari chart gmgn. Buka halaman token di gmgn supaya
+            kurs bisa dikalibrasi.
+          </p>
+        </section>
+      ) : null}
     </>
   );
 }
@@ -435,38 +540,108 @@ function PoolRow({
 }
 
 /**
- * Ringkasan tick untuk pool terpilih.
+ * Range dalam tiga satuan sekaligus, sesuai acceptance criteria di PRD 3.3.
  *
- * Fase 2 menampilkan keadaan pool. Garis yang bisa digeser di chart, konversi
- * ke market cap, dan proyeksi fee menyusul setelah jembatan chart tersambung
- * penuh ke engine.
+ * Semua angka datang dari engine. Panel tidak menghitung apa pun di sini,
+ * termasuk konversi satuan, supaya tidak ada dua tempat yang bisa menyimpang.
  */
-function RangeCard({ pool }: { pool: PoolInfo }) {
+function RangeCard({ view }: { view: RangeView }) {
   return (
     <section class="card">
-      <h2>Range</h2>
-      <div class="row" style="margin-top: var(--s2)">
-        <span class="label">Tick sekarang</span>
-        <span class="value num">{pool.tick.toLocaleString("id-ID")}</span>
+      <div class="section-title">
+        <h2>Range</h2>
+        <span class="chip">
+          <span class={`dot ${view.in_range ? "ok" : "warn"}`} />
+          {view.in_range ? "di dalam" : "di luar"}
+        </span>
+      </div>
+
+      <table class="range-table">
+        <thead>
+          <tr>
+            <th></th>
+            <th>Market cap</th>
+            <th>Harga USD</th>
+            <th>Tick</th>
+          </tr>
+        </thead>
+        <tbody>
+          <BoundRow label="Atas" bound={view.upper} tone="upper" />
+          <tr class="current">
+            <td class="label">Sekarang</td>
+            <td class="num">{formatCompact(view.current.mcap_usd)}</td>
+            <td class="num">{formatUsd(view.current.price_usd)}</td>
+            <td class="num">{view.current.tick.toLocaleString("id-ID")}</td>
+          </tr>
+          <BoundRow label="Bawah" bound={view.lower} tone="lower" />
+        </tbody>
+      </table>
+
+      <div class="row" style="margin-top: var(--s3)">
+        <span class="label">Lebar</span>
+        <span class="value num">{view.width_pct.toFixed(1)} persen</span>
       </div>
       <div class="row">
         <span class="label">Tick spacing</span>
-        <span class="value num">{pool.tick_spacing}</span>
+        <span class="value num">{view.tick_spacing}</span>
       </div>
       <div class="row">
-        <span class="label">Harga pool</span>
-        <span class="value num">{pool.raw_price.toExponential(4)}</span>
+        <span class="label">Kurs tersirat</span>
+        <span class="value num">{formatUsd(view.eth_usd)} per ETH</span>
       </div>
-      <div class="row">
-        <span class="label">Likuiditas</span>
-        <span class="value num">{formatCompact(Number(pool.liquidity))}</span>
-      </div>
+
+      {view.warnings.map((w) => (
+        <p key={w} class="warn-line">
+          {w}
+        </p>
+      ))}
+
       <p class="hint">
-        Harga pool adalah token1 per token0 pada satuan terkecil. Konversi ke
-        market cap dan garis yang bisa digeser menyusul.
+        Angka yang ditampilkan adalah hasil pembulatan ke grid tick, bukan yang
+        digeser. Kurs diturunkan dari chart, bukan dari sumber luar.
       </p>
     </section>
   );
+}
+
+function BoundRow({
+  label,
+  bound,
+  tone,
+}: {
+  label: string;
+  bound: RangeBound;
+  tone: "upper" | "lower";
+}) {
+  const drift = Math.abs(bound.drift_bps) >= 1;
+  return (
+    <tr>
+      <td class="label">
+        <span class={`bound-dot ${tone}`} />
+        {label}
+      </td>
+      <td class="num">
+        {formatCompact(bound.mcap_usd)}
+        {drift ? (
+          <span class="muted" style="font-size: 10px">
+            {" "}
+            {bound.drift_bps > 0 ? "+" : ""}
+            {bound.drift_bps.toFixed(0)} bp
+          </span>
+        ) : null}
+      </td>
+      <td class="num">{formatUsd(bound.price_usd)}</td>
+      <td class="num">{bound.tick.toLocaleString("id-ID")}</td>
+    </tr>
+  );
+}
+
+function formatUsd(n: number): string {
+  if (!Number.isFinite(n)) return "-";
+  if (n >= 1) return `$${n.toLocaleString("id-ID", { maximumFractionDigits: 2 })}`;
+  // Harga memecoin sering punya banyak nol di depan, jadi angka pentingnya
+  // yang dipertahankan, bukan jumlah desimalnya.
+  return `$${n.toPrecision(4)}`;
 }
 
 function ChainCard({ status }: { status: EngineStatus }) {

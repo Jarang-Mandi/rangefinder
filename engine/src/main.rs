@@ -109,6 +109,7 @@ async fn main() -> Result<()> {
         events,
         started_at: Instant::now(),
         registry_checks: Arc::new(registry_checks),
+        active: Arc::new(tokio::sync::RwLock::new(None)),
     };
 
     spawn_health_loop(state.clone());

@@ -105,17 +105,67 @@ export interface TokenState {
   error: string | null;
 }
 
+/** Satu batas range, dalam tiga satuan sekaligus. */
+export interface RangeBound {
+  tick: number;
+  price_weth: number;
+  price_usd: number;
+  mcap_usd: number;
+  /** Selisih akibat pembulatan ke grid tick, dalam basis poin. */
+  drift_bps: number;
+}
+
+export interface CurrentPrice {
+  tick: number;
+  price_weth: number;
+  price_usd: number;
+  mcap_usd: number;
+}
+
+/**
+ * Hasil kalibrasi dan snap tick dari engine.
+ *
+ * Panel menampilkan angka ini apa adanya. Semua konversi satuan dikerjakan
+ * engine, karena dua tempat yang menghitung hal yang sama pasti menyimpang, dan
+ * pada proyek yang mengirim transaksi itu berarti angka di layar berbeda dari
+ * yang tercatat on chain.
+ */
+export interface RangeView {
+  pool_id: string;
+  tick_spacing: number;
+  /** Kurs yang tersirat dari chart, bukan dari sumber luar. */
+  eth_usd: number;
+  current: CurrentPrice;
+  lower: RangeBound;
+  upper: RangeBound;
+  width_pct: number;
+  in_range: boolean;
+  warnings: string[];
+}
+
 export type ServerMessage =
   | { type: "hello"; engine_version: string; protocol_version: number }
   | ({ type: "engine_status" } & Partial<EngineStatus>)
   | { type: "pong" }
   | ({ type: "token_state" } & Partial<TokenState>)
+  | ({ type: "range_view" } & Partial<RangeView>)
   | { type: "alert"; level: AlertLevel; code: string; message: string };
 
 export type ClientMessage =
   | { type: "get_status" }
   | { type: "ping" }
-  | { type: "subscribe_token"; address: string };
+  | { type: "subscribe_token"; address: string }
+  | { type: "chart_price"; address: string; mcap_usd: number }
+  | { type: "select_pool"; pool_id: string }
+  | { type: "set_range"; lower_mcap: number; upper_mcap: number };
+
+export function asRangeView(msg: unknown): RangeView | null {
+  if (!msg || typeof msg !== "object") return null;
+  const m = msg as Record<string, unknown>;
+  if (m.type !== "range_view") return null;
+  const { type: _type, ...rest } = m;
+  return rest as unknown as RangeView;
+}
 
 export function asTokenState(msg: unknown): TokenState | null {
   if (!msg || typeof msg !== "object") return null;
