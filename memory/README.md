@@ -1,4 +1,5 @@
-# Memori repo
+
+| `003-rpc-rate-limit.md` | RPC membatasi laju, dan bahaya menelan kegagalan jadi nol |# Memori repo
 
 Catatan per topik yang tumbuh seiring waktu. Isinya jebakan yang sudah
 ditemukan, kesalahan yang pernah dibuat, dan alasan sebuah pendekatan
@@ -36,3 +37,4 @@ setiap agent.
 | --- | --- |
 | `001-toolchain-windows.md` | Kenapa build gagal di mesin ini dan apa yang sudah dicoba |
 | `002-tradingview-gmgn.md` | Jebakan saat menyentuh chart gmgn |
+| `003-rpc-rate-limit.md` | RPC membatasi laju, dan bahaya menelan kegagalan jadi nol |

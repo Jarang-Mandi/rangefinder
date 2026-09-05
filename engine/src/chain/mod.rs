@@ -129,11 +129,32 @@ impl ChainClient {
         Self::provider_for(&endpoint)
     }
 
+    /// Bangun penyedia dengan percobaan ulang otomatis.
+    ///
+    /// RPC publik Robinhood Chain membatasi laju dan menjawab 429 pada
+    /// pemakaian yang sepenuhnya wajar, misalnya membaca saldo beberapa token
+    /// berturut turut. Tanpa lapisan ini, kegagalan rate limit terlihat seperti
+    /// kegagalan sungguhan, dan pemanggil yang menelannya akan melaporkan
+    /// keadaan yang salah, misalnya saldo nol padahal sebenarnya ada.
+    ///
+    /// Ini pernah terjadi dan sempat menyesatkan. Lihat memory/003.
     fn provider_for(url: &str) -> Result<impl Provider> {
+        use alloy::rpc::client::ClientBuilder;
+        use alloy::transports::layers::RetryBackoffLayer;
+
         let parsed = url
             .parse()
             .with_context(|| format!("URL RPC `{url}` tidak valid"))?;
-        Ok(ProviderBuilder::new().connect_http(parsed))
+
+        // Lima percobaan, jeda awal 200 ms, dan anggaran laju yang longgar.
+        // Angka ini dipilih supaya lonjakan pendek seperti membaca beberapa
+        // saldo sekaligus tetap lewat, tanpa membuat kegagalan sungguhan
+        // menggantung lama.
+        let client = ClientBuilder::default()
+            .layer(RetryBackoffLayer::new(5, 200, 1_000))
+            .http(parsed);
+
+        Ok(ProviderBuilder::new().connect_client(client))
     }
 
     /// Satu putaran pemeriksaan kesehatan. Memperbarui state internal.

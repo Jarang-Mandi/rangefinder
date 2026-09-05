@@ -67,6 +67,7 @@ engine/                 biner `rangefinder`, plus pustaka `rangefinder_engine`
     simulate.rs         gate G4 dan G5, eth_call plus asersi invarian
     limits.rs           gate G6, pembatas nilai dan slippage
     verify.rs           gate G7, baca ulang posisi lalu bandingkan
+    pipeline.rs         perakitan seluruh gate jadi satu alur membuka posisi
   src/store/            redb, penyimpanan lokal
   src/wallet/           manajemen wallet
     keystore.rs         Argon2id plus AES-256-GCM
@@ -77,8 +78,9 @@ engine/                 biner `rangefinder`, plus pustaka `rangefinder_engine`
     routes.rs           handler HTTP
     ws.rs               WebSocket ke panel
 
-xtask/                  `cargo xtask verify`, `docs-check`, dan `golden`
+xtask/                  verify, docs-check, golden, dryrun
   src/golden.rs         pengambil golden vector dari transaksi sungguhan
+  src/dryrun.rs         jalankan pipeline penuh terhadap pool sungguhan
 extension/              ekstensi Chrome MV3
 docs/                   PRD, keputusan, kontrak gmgn, alamat chain, runbook
 memory/                 catatan per topik yang tumbuh seiring waktu

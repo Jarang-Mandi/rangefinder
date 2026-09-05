@@ -5,6 +5,7 @@
 //! cargo xtask verify --pin        periksa lalu tulis code_hash ke chain.toml
 //! cargo xtask docs-check          hanya periksa kesesuaian kode dengan dokumen
 //! cargo xtask golden [jumlah]     ambil golden vector dari transaksi sungguhan
+//! cargo xtask dryrun <token>      jalankan seluruh pipeline tanpa mengirim
 //! ```
 //!
 //! INVARIAN
@@ -16,6 +17,7 @@
 //!   seluruh komentar di berkas itu, padahal komentarnya memuat peringatan
 //!   penting tentang UniversalRouter yang merupakan fork.
 
+mod dryrun;
 mod golden;
 
 use std::path::{Path, PathBuf};
@@ -43,6 +45,17 @@ fn main() -> Result<()> {
             let ok = check_docs(&root)?;
             finish(ok)
         }
+        "dryrun" => {
+            let token = args.get(1).cloned().unwrap_or_default();
+            if token.is_empty() {
+                eprintln!("cara pakai: cargo xtask dryrun <alamat_token> [alamat_pengirim]");
+                std::process::exit(2);
+            }
+            let from = args.get(2).cloned();
+            let rt = tokio::runtime::Runtime::new()?;
+            let ok = rt.block_on(dryrun::run(&root, &token, from.as_deref()))?;
+            finish(ok)
+        }
         "golden" => {
             let jumlah = args
                 .get(1)
@@ -53,7 +66,7 @@ fn main() -> Result<()> {
             finish(ok)
         }
         other => {
-            eprintln!("perintah `{other}` tidak dikenal. Yang ada: verify, docs-check, golden");
+            eprintln!("perintah `{other}` tidak dikenal. Yang ada: verify, docs-check, golden, dryrun");
             std::process::exit(2);
         }
     }

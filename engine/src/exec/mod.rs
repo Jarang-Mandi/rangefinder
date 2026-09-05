@@ -11,5 +11,6 @@ pub mod abi_write;
 pub mod calldata;
 pub mod golden;
 pub mod limits;
+pub mod pipeline;
 pub mod simulate;
 pub mod verify;
