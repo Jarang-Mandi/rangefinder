@@ -82,10 +82,29 @@ async fn verify_chain(root: &Path, pin: bool) -> Result<bool> {
 
     let client = ChainClient::new(cfg.rpc.clone());
 
-    let health = client.check_health().await;
+    // RPC publik dibatasi laju dan chain-nya memang sering tersendat, jadi satu
+    // kegagalan bukan alasan menggagalkan verifikasi. Tanpa percobaan ulang,
+    // perintah ini gagal secara acak, dan perintah yang gagal secara acak akan
+    // berhenti dipercaya lalu dilewati orang.
+    const PERCOBAAN: u32 = 3;
+    let mut health = client.check_health().await;
+    for percobaan in 1..PERCOBAAN {
+        if health.healthy {
+            break;
+        }
+        eprintln!(
+            "  RPC belum sehat ({}), mencoba lagi {} dari {}",
+            health.error.as_deref().unwrap_or("alasan tidak diketahui"),
+            percobaan + 1,
+            PERCOBAAN
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        health = client.check_health().await;
+    }
+
     if !health.healthy {
         eprintln!(
-            "  RPC tidak sehat: {}",
+            "  RPC tidak sehat setelah {PERCOBAAN} percobaan: {}",
             health.error.as_deref().unwrap_or("alasan tidak diketahui")
         );
         eprintln!("  Verifikasi registry butuh RPC yang jalan. Coba lagi nanti.");
