@@ -22,6 +22,11 @@ pub enum ClientMessage {
     GetStatus,
     /// Denyut untuk menjaga koneksi dan memundurkan kunci otomatis.
     Ping,
+    /// Minta engine mencari pool untuk sebuah token dan mengirim `token_state`.
+    ///
+    /// Pencariannya menyentuh jaringan dan bisa makan beberapa detik, jadi
+    /// dijalankan di tugas terpisah dan jawabannya datang belakangan.
+    SubscribeToken { address: String },
 }
 
 /// Pesan dari engine ke panel.
@@ -37,6 +42,8 @@ pub enum ServerMessage {
     EngineStatus(Box<EngineStatus>),
     /// Balasan denyut.
     Pong,
+    /// Hasil pencarian pool untuk satu token.
+    TokenState(Box<TokenState>),
     /// Kejadian yang layak diberitahukan ke user. Lihat PRD 3.7.
     Alert {
         level: AlertLevel,
@@ -64,6 +71,22 @@ pub struct EngineStatus {
     pub can_execute: bool,
     /// Alasan `can_execute` bernilai salah, supaya panel tidak perlu menebak.
     pub blocked_reasons: Vec<String>,
+}
+
+/// Keadaan satu token beserta pool yang bisa dipakai.
+///
+/// `pools` sudah disaring dan diurutkan oleh `pools::usable_pools`, jadi panel
+/// tidak perlu tahu bahwa pool kosong itu ada. Kalau pencariannya gagal,
+/// `error` terisi dan `pools` kosong, bukan pesan gagal yang menggantikan
+/// seluruh muatan.
+#[derive(Debug, Clone, Serialize)]
+pub struct TokenState {
+    pub address: String,
+    pub meta: Option<crate::pools::TokenMeta>,
+    pub pools: Vec<crate::pools::PoolInfo>,
+    /// Pool peringkat teratas, dipilih otomatis supaya panel punya titik awal.
+    pub selected_pool_id: Option<String>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

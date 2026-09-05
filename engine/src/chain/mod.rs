@@ -119,6 +119,16 @@ impl ChainClient {
         tracing::warn!(endpoint = %self.cfg.http[*idx], "beralih ke RPC cadangan");
     }
 
+    /// Penyedia RPC untuk endpoint yang sedang aktif.
+    ///
+    /// Dipakai modul lain yang perlu memanggil kontrak. Endpoint yang dipilih
+    /// mengikuti failover, sehingga pemanggil tidak perlu tahu ada berapa
+    /// endpoint cadangan.
+    pub async fn provider(&self) -> Result<impl Provider> {
+        let endpoint = self.current_endpoint().await;
+        Self::provider_for(&endpoint)
+    }
+
     fn provider_for(url: &str) -> Result<impl Provider> {
         let parsed = url
             .parse()

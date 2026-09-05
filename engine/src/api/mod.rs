@@ -72,6 +72,85 @@ impl AppState {
         }
     }
 
+    /// Cari pool untuk sebuah token di tugas terpisah, lalu siarkan hasilnya.
+    ///
+    /// Dijalankan terpisah karena pencariannya menyentuh jaringan dan bisa
+    /// makan beberapa detik. Kalau dikerjakan di dalam loop WebSocket, panel
+    /// akan berhenti menerima status selama itu.
+    pub fn spawn_token_lookup(&self, address: String) {
+        let state = self.clone();
+        tokio::spawn(async move {
+            let result = state.build_token_state(address).await;
+            let _ = state
+                .events
+                .send(protocol::ServerMessage::TokenState(Box::new(result)));
+        });
+    }
+
+    async fn build_token_state(&self, address: String) -> protocol::TokenState {
+        let mut out = protocol::TokenState {
+            address: address.clone(),
+            meta: None,
+            pools: Vec::new(),
+            selected_pool_id: None,
+            error: None,
+        };
+
+        let token: alloy::primitives::Address = match address.parse() {
+            Ok(a) => a,
+            Err(_) => {
+                out.error = Some(format!("`{address}` bukan alamat EVM yang valid"));
+                return out;
+            }
+        };
+
+        let weth = match self
+            .registry
+            .tokens
+            .get("weth")
+            .and_then(|t| t.address.parse::<alloy::primitives::Address>().ok())
+        {
+            Some(a) => a,
+            None => {
+                out.error = Some("alamat WETH tidak ada atau tidak valid di chain.toml".into());
+                return out;
+            }
+        };
+
+        let provider = match self.chain.provider().await {
+            Ok(p) => p,
+            Err(e) => {
+                out.error = Some(format!("RPC tidak bisa dipakai: {e}"));
+                return out;
+            }
+        };
+
+        match crate::pools::token_meta(&provider, token).await {
+            Ok(m) => out.meta = Some(m),
+            Err(e) => {
+                // Metadata gagal biasanya berarti alamatnya bukan ERC20. Tidak
+                // ada gunanya melanjutkan ke pencarian pool.
+                out.error = Some(format!("{e}"));
+                return out;
+            }
+        }
+
+        let found = crate::pools::discover_all(&provider, &self.registry, token, weth).await;
+        let usable = crate::pools::usable_pools(found);
+
+        if usable.is_empty() {
+            out.error = Some(
+                "tidak ada pool dengan likuiditas untuk pasangan ini. \
+                 Pool kosong sengaja tidak ditampilkan karena harganya tidak bisa dipercaya"
+                    .into(),
+            );
+        }
+
+        out.selected_pool_id = usable.first().map(|p| p.id.clone());
+        out.pools = usable;
+        out
+    }
+
     pub fn registry_summary(&self) -> RegistrySummary {
         use crate::chain::RegistryStatus::*;
         let checks = self.registry_checks.as_ref();

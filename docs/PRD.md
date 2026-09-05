@@ -868,6 +868,7 @@ Engine ke panel:
 | `engine_status` | `{ engineVersion, uptimeSecs, chain, wallet, registry, canExecute, blockedReasons[] }` | 1 |
 | `pong` | balasan denyut | 1 |
 | `alert` | `{ level, code, message, positionId }` | 1 |
+| `token_state` | `{ address, meta, pools[], selectedPoolId, error }`, jawaban atas `subscribe_token`. Daftar `pools` sudah disaring dan diurutkan, pool tanpa likuiditas tidak pernah ikut | 2 |
 | `price_tick` | `{ address, priceUsd, priceWeth, mcapUsd }` | 2 |
 | `range_quote` | `{ quoteId, feeApr, expectedHoursInRange, ilBreakevenHours, crowdedLiquidityUsd, ourSharePct, amount0, amount1, swapNeeded, priceImpact, gasEstimate, warnings[] }` | 3 |
 | `tx_status` | `{ txId, stage, hash, error }` | 3 |

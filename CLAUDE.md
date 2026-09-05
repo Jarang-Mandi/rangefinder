@@ -55,6 +55,8 @@ engine/                 biner `rangefinder`, plus pustaka `rangefinder_engine`
   src/error.rs          EngineError dan pemetaannya ke HTTP
   src/telemetry.rs      tracing
   src/math/             konversi mcap ke tick, snap grid, matematika likuiditas
+  src/pools/            penemuan pool V3 dan V4, penyaringan, pemeringkatan
+    abi.rs              ikatan ABI baca saja. Tidak ada alamat di sini
   src/store/            redb, penyimpanan lokal
   src/wallet/           manajemen wallet
     keystore.rs         Argon2id plus AES-256-GCM
@@ -88,6 +90,8 @@ tersandung:
 | Token tidak pernah lewat query string | `api/ws.rs` | Karena itu token dititipkan di subprotocol WebSocket |
 | Setiap pesan protokol ada di PRD 7.3 | `api/protocol.rs` | Ditegakkan `cargo xtask docs-check` |
 | Orientasi token membalik arah tick | `math/mod.rs` | Kalau memecoin adalah token1, harga naik berarti tick turun, dan batas atas bawah bertukar. Terlihat masuk akal saat salah |
+| Pool tanpa likuiditas harus dibuang | `pools/mod.rs::usable_pools` | Pool kosong tetap menjawab `slot0` dengan harga dari saat ia dibuat. Pada PONS/WETH selisihnya 37 kali lipat dari pool yang benar benar likuid |
+| Penyaringan pool hanya di engine | `pools` dan `App.tsx` | Panel menampilkan apa adanya. Dua tempat yang menyaring akan menyimpang |
 
 ## Alur start engine
 
@@ -125,7 +129,7 @@ bytecode yang tidak cocok dengan yang dipin.
 | 0 | Spesifikasi, repo, dokumen | selesai |
 | 1 | Engine: config, pairing, keystore, chain, api, xtask | **selesai dan terverifikasi jalan** |
 | 1 | Ekstensi: manifest, side panel, jembatan chart | selesai, typecheck bersih, build menghasilkan dist yang bisa dimuat |
-| 2 | Injeksi chart dan matematika satuan | belum |
+| 2 | Injeksi chart dan matematika satuan | **berjalan**. Penemuan pool, protokol token, dan tab Range sudah ada. Garis di chart yang digerakkan engine belum |
 | 3 | Eksekusi V3 | belum |
 | 4 | Eksekusi V4 dan zap | belum |
 | 5 | Positions, PnL, notifikasi | belum |

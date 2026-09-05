@@ -126,6 +126,34 @@
   color: var(--warn);
 }
 
+.pool-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  background: var(--bg);
+}
+
+.pool-row.active {
+  border-color: var(--accent);
+  background: var(--surface-raised);
+}
+
+.pool-main {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.pool-meta {
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 .phase-note {
   color: var(--text-muted);
   padding: var(--s5) 0;

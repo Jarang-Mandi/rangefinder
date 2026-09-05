@@ -89,6 +89,11 @@ async fn session(socket: WebSocket, state: AppState) {
                                     break;
                                 }
                             }
+                            Ok(ClientMessage::SubscribeToken { address }) => {
+                                // Jawabannya datang lewat siaran, bukan di sini,
+                                // supaya loop ini tidak terhenti menunggu jaringan.
+                                state.spawn_token_lookup(address);
+                            }
                             Ok(ClientMessage::Ping) => {
                                 // Denyut juga memundurkan kunci otomatis, karena
                                 // panel yang terbuka berarti user masih bekerja.

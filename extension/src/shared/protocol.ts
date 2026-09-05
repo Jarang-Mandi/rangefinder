@@ -65,13 +65,74 @@ export interface EngineStatus {
   blocked_reasons: string[];
 }
 
+export type PoolVersion = "v3" | "v4";
+
+export interface PoolInfo {
+  version: PoolVersion;
+  /** Alamat pool untuk V3, atau poolId heksadesimal untuk V4. */
+  id: string;
+  token0: string;
+  token1: string;
+  fee: number;
+  tick_spacing: number;
+  hooks: string | null;
+  sqrt_price_x96: string;
+  tick: number;
+  liquidity: string;
+  /** Harga mentah token1 per token0 pada satuan terkecil. */
+  raw_price: number;
+}
+
+export interface TokenMeta {
+  address: string;
+  symbol: string;
+  decimals: number;
+  total_supply: number;
+}
+
+/**
+ * Jawaban atas `subscribe_token`.
+ *
+ * `pools` sudah disaring engine, pool tanpa likuiditas tidak pernah ikut,
+ * karena harganya berasal dari saat pool dibuat dan bisa meleset puluhan kali
+ * lipat. Panel tidak perlu tahu pool itu ada.
+ */
+export interface TokenState {
+  address: string;
+  meta: TokenMeta | null;
+  pools: PoolInfo[];
+  selected_pool_id: string | null;
+  error: string | null;
+}
+
 export type ServerMessage =
   | { type: "hello"; engine_version: string; protocol_version: number }
-  | { type: "engine_status" } & Partial<EngineStatus>
+  | ({ type: "engine_status" } & Partial<EngineStatus>)
   | { type: "pong" }
+  | ({ type: "token_state" } & Partial<TokenState>)
   | { type: "alert"; level: AlertLevel; code: string; message: string };
 
-export type ClientMessage = { type: "get_status" } | { type: "ping" };
+export type ClientMessage =
+  | { type: "get_status" }
+  | { type: "ping" }
+  | { type: "subscribe_token"; address: string };
+
+export function asTokenState(msg: unknown): TokenState | null {
+  if (!msg || typeof msg !== "object") return null;
+  const m = msg as Record<string, unknown>;
+  if (m.type !== "token_state") return null;
+  const { type: _type, ...rest } = m;
+  return rest as unknown as TokenState;
+}
+
+/** Alamat EVM yang bentuknya benar. Checksum tidak diperiksa di sini. */
+export function isEvmAddress(value: string): boolean {
+  return /^0x[a-fA-F0-9]{40}$/.test(value.trim());
+}
+
+export function gmgnTokenUrl(address: string): string {
+  return `https://gmgn.ai/robinhood/token/${address.trim().toLowerCase()}`;
+}
 
 /**
  * Bentuk `engine_status` di kabel adalah EngineStatus yang diratakan bersama

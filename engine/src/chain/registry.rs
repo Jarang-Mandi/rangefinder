@@ -28,6 +28,13 @@ pub struct ChainMeta {
     pub explorer: String,
     #[serde(default)]
     pub block_time_ms: u64,
+    /// Blok saat protokol dipasang di chain ini.
+    ///
+    /// Dipakai sebagai batas bawah saat memindai log `Initialize` milik
+    /// PoolManager V4. Tanpa batas ini, pemindaian akan menyapu dari blok nol
+    /// dan ditolak RPC publik.
+    #[serde(default)]
+    pub deploy_block: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

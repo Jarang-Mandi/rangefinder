@@ -13,6 +13,7 @@ pub mod chain;
 pub mod config;
 pub mod error;
 pub mod math;
+pub mod pools;
 pub mod store;
 pub mod telemetry;
 pub mod wallet;

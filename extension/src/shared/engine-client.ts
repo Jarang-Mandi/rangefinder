@@ -14,10 +14,12 @@ import {
   DEFAULT_ENGINE_ORIGIN,
   WS_SUBPROTOCOL,
   asEngineStatus,
+  asTokenState,
   type ClientMessage,
   type EnginePing,
   type EngineStatus,
   type ServerMessage,
+  type TokenState,
 } from "./protocol";
 
 export type ConnectionState =
@@ -31,6 +33,7 @@ interface Handlers {
   onState: (state: ConnectionState, detail?: string) => void;
   onStatus: (status: EngineStatus) => void;
   onAlert: (level: string, code: string, message: string) => void;
+  onTokenState?: (token: TokenState) => void;
 }
 
 const HEARTBEAT_MS = 20_000;
@@ -137,6 +140,11 @@ export class EngineClient {
         this.handlers.onStatus(status);
         return;
       }
+      const token = asTokenState(msg);
+      if (token) {
+        this.handlers.onTokenState?.(token);
+        return;
+      }
       if (msg.type === "alert") {
         this.handlers.onAlert(msg.level, msg.code, msg.message);
       }
@@ -168,6 +176,16 @@ export class EngineClient {
 
   requestStatus() {
     this.send({ type: "get_status" });
+  }
+
+  /**
+   * Minta engine mencari pool untuk sebuah token.
+   *
+   * Jawabannya datang belakangan lewat `onTokenState`, bukan sebagai nilai
+   * balik, karena pencariannya menyentuh rantai dan bisa makan beberapa detik.
+   */
+  subscribeToken(address: string) {
+    this.send({ type: "subscribe_token", address });
   }
 
   private startHeartbeat() {

@@ -1,9 +1,9 @@
 /**
  * Side panel Rangefinder.
  *
- * Fase 1 mengisi kerangka navigasi empat tab sesuai PRD 3.2, tapi hanya tab
- * Range yang punya isi, yaitu status engine. Tab lain menyebutkan fase berapa
- * mereka akan hidup, bukan menampilkan tampilan palsu.
+ * Kerangka navigasi empat tab sesuai PRD 3.2. Tab Range berisi alur token,
+ * yaitu memuat pool dan menampilkan keadaan tick. Tab lain menyebutkan fase
+ * berapa mereka akan hidup, bukan menampilkan tampilan palsu.
  *
  * INVARIAN
  * - Token pairing hanya disimpan di `chrome.storage.local`, tidak pernah masuk
@@ -11,6 +11,11 @@
  * - Panel tidak pernah menyimpulkan sendiri boleh eksekusi atau tidak. Nilai
  *   `can_execute` dan `blocked_reasons` datang dari engine, karena engine yang
  *   memegang aturan sebenarnya. Lihat PRD 7.3.
+ * - Panel juga tidak menyaring pool sendiri. Daftar yang datang dari engine
+ *   sudah bersih dari pool tanpa likuiditas, dan panel menampilkannya apa
+ *   adanya supaya tidak ada dua tempat yang memutuskan hal yang sama.
+ * - Dua jalan masuk token wajib bekerja: menempel alamat di panel, dan user
+ *   membuka sendiri halaman token di gmgn. Lihat PRD 3.3.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
@@ -18,7 +23,14 @@ import {
   EngineClient,
   type ConnectionState,
 } from "../shared/engine-client";
-import { DEFAULT_ENGINE_ORIGIN, type EngineStatus } from "../shared/protocol";
+import {
+  DEFAULT_ENGINE_ORIGIN,
+  gmgnTokenUrl,
+  isEvmAddress,
+  type EngineStatus,
+  type PoolInfo,
+  type TokenState,
+} from "../shared/protocol";
 
 const TOKEN_KEY = "rangefinder.pairingToken";
 
@@ -38,6 +50,8 @@ export function App() {
   const [stateDetail, setStateDetail] = useState<string>();
   const [status, setStatus] = useState<EngineStatus | null>(null);
   const [tab, setTab] = useState<TabId>("range");
+  const [tokenState, setTokenState] = useState<TokenState | null>(null);
+  const [tokenLoading, setTokenLoading] = useState(false);
 
   const clientRef = useRef<EngineClient | null>(null);
 
@@ -58,6 +72,10 @@ export function App() {
         setStateDetail(detail);
       },
       onStatus: setStatus,
+      onTokenState: (t) => {
+        setTokenState(t);
+        setTokenLoading(false);
+      },
       onAlert: (level, code, message) => {
         // Fase 5 memindahkan ini ke toast di halaman gmgn beserta suaranya,
         // sesuai PRD 3.7. Untuk sekarang cukup tercatat di konsol panel.
@@ -72,6 +90,42 @@ export function App() {
       clientRef.current = null;
     };
   }, [token]);
+
+  /**
+   * Minta engine memuat sebuah token, dan arahkan tab gmgn ke halamannya.
+   *
+   * Dipakai dua jalan masuk sekaligus: user menempel alamat di panel, dan user
+   * membuka sendiri halaman token di gmgn. Lihat PRD 3.3.
+   */
+  const loadToken = useCallback((address: string, navigate: boolean) => {
+    const clean = address.trim();
+    if (!isEvmAddress(clean)) return;
+
+    setTokenLoading(true);
+    setTokenState(null);
+    clientRef.current?.subscribeToken(clean);
+
+    if (navigate) {
+      void chrome.runtime.sendMessage({
+        target: "navigate-gmgn",
+        url: gmgnTokenUrl(clean),
+      });
+    }
+  }, []);
+
+  // Jalan masuk kedua: user membuka halaman token gmgn sendiri. Service worker
+  // memberi tahu panel, dan panel memuat tokennya tanpa diminta.
+  useEffect(() => {
+    const listener = (message: unknown) => {
+      const m = message as Record<string, unknown> | null;
+      if (!m || m.target !== "sidepanel" || m.kind !== "token_page") return;
+      const url = typeof m.url === "string" ? m.url : "";
+      const found = url.match(/\/token\/(0x[a-fA-F0-9]{40})/);
+      if (found) loadToken(found[1], false);
+    };
+    chrome.runtime.onMessage.addListener(listener);
+    return () => chrome.runtime.onMessage.removeListener(listener);
+  }, [loadToken]);
 
   const savePairing = useCallback(async (value: string) => {
     await chrome.storage.local.set({ [TOKEN_KEY]: value });
@@ -112,6 +166,9 @@ export function App() {
             state={state}
             detail={stateDetail}
             client={clientRef.current}
+            token={tokenState}
+            loadingToken={tokenLoading}
+            onLoadToken={loadToken}
             onForget={forgetPairing}
           />
         ) : (
@@ -195,14 +252,22 @@ function RangeTab({
   state,
   detail,
   client,
+  token,
+  loadingToken,
+  onLoadToken,
   onForget,
 }: {
   status: EngineStatus | null;
   state: ConnectionState;
   detail?: string;
   client: EngineClient | null;
+  token: TokenState | null;
+  loadingToken: boolean;
+  onLoadToken: (address: string, navigate: boolean) => void;
   onForget: () => void;
 }) {
+  const [showEngine, setShowEngine] = useState(false);
+
   if (!status) {
     return (
       <p class="phase-note">
@@ -215,11 +280,192 @@ function RangeTab({
 
   return (
     <div class="stack">
-      <ChainCard status={status} />
-      <WalletCard status={status} client={client} />
-      <RegistryCard status={status} />
-      <EngineCard status={status} onForget={onForget} />
+      <AddressInput onSubmit={(a) => onLoadToken(a, true)} busy={loadingToken} />
+
+      {loadingToken ? <p class="phase-note">Mencari pool di chain.</p> : null}
+      {token ? <TokenCard token={token} /> : null}
+
+      <section class="card">
+        <div class="section-title">
+          <h2>Status engine</h2>
+          <button class="chip" style="cursor: pointer" onClick={() => setShowEngine((v) => !v)}>
+            {showEngine ? "tutup" : "buka"}
+          </button>
+        </div>
+        {showEngine ? (
+          <div class="stack" style="margin-top: var(--s3)">
+            <ChainCard status={status} />
+            <WalletCard status={status} client={client} />
+            <RegistryCard status={status} />
+            <EngineCard status={status} onForget={onForget} />
+          </div>
+        ) : (
+          <p class="muted" style="margin: 0">
+            Chain {status.chain.healthy ? "sehat" : "bermasalah"}, wallet{" "}
+            {!status.wallet.exists ? "belum ada" : status.wallet.locked ? "terkunci" : "terbuka"},
+            registry {status.registry.verified} dari {status.registry.total}.
+          </p>
+        )}
+      </section>
     </div>
+  );
+}
+
+function AddressInput({
+  onSubmit,
+  busy,
+}: {
+  onSubmit: (address: string) => void;
+  busy: boolean;
+}) {
+  const [value, setValue] = useState("");
+  const valid = isEvmAddress(value);
+  const kotor = value.trim().length > 0 && !valid;
+
+  return (
+    <section class="card">
+      <h2>Token</h2>
+      <div class="stack" style="margin-top: var(--s2)">
+        <input
+          type="text"
+          value={value}
+          placeholder="Tempel contract address"
+          spellcheck={false}
+          onInput={(e) => setValue((e.target as HTMLInputElement).value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && valid) onSubmit(value);
+          }}
+        />
+        <button class="primary" disabled={!valid || busy} onClick={() => onSubmit(value)}>
+          {busy ? "Mencari" : "Buka di gmgn"}
+        </button>
+      </div>
+      {kotor ? <p class="error">Bukan alamat EVM. Harus 0x diikuti 40 karakter heksadesimal.</p> : null}
+      <p class="hint">Membuka halaman token di gmgn juga memuatnya di sini otomatis.</p>
+    </section>
+  );
+}
+
+function TokenCard({ token }: { token: TokenState }) {
+  const [selected, setSelected] = useState<string | null>(token.selected_pool_id);
+
+  // Token berganti berarti pilihan lama tidak berlaku lagi.
+  const active =
+    token.pools.find((p) => p.id === selected) ??
+    token.pools.find((p) => p.id === token.selected_pool_id) ??
+    token.pools[0];
+
+  if (token.error && token.pools.length === 0) {
+    return (
+      <section class="card">
+        <h2>{token.meta?.symbol ?? shortAddress(token.address)}</h2>
+        <p class="error">{token.error}</p>
+      </section>
+    );
+  }
+
+  return (
+    <>
+      <section class="card">
+        <div class="section-title">
+          <h2>{token.meta?.symbol ?? "Token"}</h2>
+          <span class="chip">{shortAddress(token.address)}</span>
+        </div>
+        <div class="row">
+          <span class="label">Suplai</span>
+          <span class="value num">{formatCompact(token.meta?.total_supply ?? 0)}</span>
+        </div>
+        <div class="row">
+          <span class="label">Desimal</span>
+          <span class="value num">{token.meta?.decimals ?? "-"}</span>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="section-title">
+          <h2>Pool</h2>
+          <span class="chip">{token.pools.length} layak</span>
+        </div>
+
+        <div class="stack" style="margin-top: var(--s2)">
+          {token.pools.map((p) => (
+            <PoolRow
+              key={p.id}
+              pool={p}
+              active={active?.id === p.id}
+              onSelect={() => setSelected(p.id)}
+            />
+          ))}
+        </div>
+
+        <p class="hint">
+          Pool tanpa likuiditas tidak ditampilkan. Harganya berasal dari saat pool
+          dibuat dan bisa meleset puluhan kali lipat.
+        </p>
+      </section>
+
+      {active ? <RangeCard pool={active} /> : null}
+    </>
+  );
+}
+
+function PoolRow({
+  pool,
+  active,
+  onSelect,
+}: {
+  pool: PoolInfo;
+  active: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button class={`pool-row${active ? " active" : ""}`} onClick={onSelect}>
+      <span class="pool-main">
+        <span class="chip">{pool.version.toUpperCase()}</span>
+        <span class="num">{(pool.fee / 10_000).toFixed(2)} persen</span>
+      </span>
+      <span class="pool-meta muted num">
+        spacing {pool.tick_spacing}
+        {pool.hooks && pool.hooks !== "0x0000000000000000000000000000000000000000"
+          ? " · hook"
+          : ""}
+      </span>
+    </button>
+  );
+}
+
+/**
+ * Ringkasan tick untuk pool terpilih.
+ *
+ * Fase 2 menampilkan keadaan pool. Garis yang bisa digeser di chart, konversi
+ * ke market cap, dan proyeksi fee menyusul setelah jembatan chart tersambung
+ * penuh ke engine.
+ */
+function RangeCard({ pool }: { pool: PoolInfo }) {
+  return (
+    <section class="card">
+      <h2>Range</h2>
+      <div class="row" style="margin-top: var(--s2)">
+        <span class="label">Tick sekarang</span>
+        <span class="value num">{pool.tick.toLocaleString("id-ID")}</span>
+      </div>
+      <div class="row">
+        <span class="label">Tick spacing</span>
+        <span class="value num">{pool.tick_spacing}</span>
+      </div>
+      <div class="row">
+        <span class="label">Harga pool</span>
+        <span class="value num">{pool.raw_price.toExponential(4)}</span>
+      </div>
+      <div class="row">
+        <span class="label">Likuiditas</span>
+        <span class="value num">{formatCompact(Number(pool.liquidity))}</span>
+      </div>
+      <p class="hint">
+        Harga pool adalah token1 per token0 pada satuan terkecil. Konversi ke
+        market cap dan garis yang bisa digeser menyusul.
+      </p>
+    </section>
   );
 }
 
@@ -533,6 +779,17 @@ function registryLabel(s: string): string {
 
 function shortAddress(a: string): string {
   return a.length > 12 ? `${a.slice(0, 6)}...${a.slice(-4)}` : a;
+}
+
+/** Angka besar dalam bentuk ringkas, karena side panel sempit. */
+function formatCompact(n: number): string {
+  if (!Number.isFinite(n)) return "-";
+  const abs = Math.abs(n);
+  if (abs >= 1e12) return `${(n / 1e12).toFixed(2)} T`;
+  if (abs >= 1e9) return `${(n / 1e9).toFixed(2)} M`;
+  if (abs >= 1e6) return `${(n / 1e6).toFixed(2)} jt`;
+  if (abs >= 1e3) return `${(n / 1e3).toFixed(2)} rb`;
+  return n.toLocaleString("id-ID", { maximumFractionDigits: 4 });
 }
 
 function formatDuration(secs: number): string {
