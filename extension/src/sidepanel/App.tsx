@@ -527,7 +527,12 @@ function PoolRow({
     <button class={`pool-row${active ? " active" : ""}`} onClick={onSelect}>
       <span class="pool-main">
         <span class="chip">{pool.version.toUpperCase()}</span>
-        <span class="num">{(pool.fee / 10_000).toFixed(2)} persen</span>
+        <span class="num">
+          {/* Pool dynamic fee tidak punya besaran fee yang bisa ditampilkan.
+              Angkanya di PoolKey hanya penanda, dan menampilkannya sebagai
+              persen akan tertulis 838,86 persen. */}
+          {pool.dynamic_fee ? "fee dinamis" : `${(pool.fee / 10_000).toFixed(2)} persen`}
+        </span>
       </span>
       <span class="pool-meta muted num">
         spacing {pool.tick_spacing}

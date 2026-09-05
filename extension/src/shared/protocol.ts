@@ -73,7 +73,16 @@ export interface PoolInfo {
   id: string;
   token0: string;
   token1: string;
+  /**
+   * Angka fee apa adanya dari pool.
+   *
+   * Untuk pool V4 dengan dynamic fee, ini penanda `0x800000` yaitu 8388608,
+   * bukan besaran fee. Periksa `dynamic_fee` sebelum menampilkannya sebagai
+   * persen, kalau tidak akan tertulis 838,86 persen.
+   */
   fee: number;
+  /** Benar kalau fee ditentukan hook saat swap, bukan tetap. */
+  dynamic_fee: boolean;
   tick_spacing: number;
   hooks: string | null;
   sqrt_price_x96: string;

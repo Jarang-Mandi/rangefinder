@@ -27,6 +27,9 @@
 //! `sqrtPriceX96` yang dikirim ke rantai TIDAK boleh dihitung dari sini, dan
 //! wajib memakai matematika bilangan bulat pada modul eksekusi.
 
+pub mod liquidity_math;
+pub mod tick_math;
+
 /// Batas tick Uniswap V3 dan V4.
 pub const MIN_TICK: i32 = -887_272;
 pub const MAX_TICK: i32 = 887_272;

@@ -284,6 +284,7 @@ mod tests {
             token0: "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73".into(),
             token1: "0x39dbed3a2bd333467115de45665cc57f813c4571".into(),
             fee: 3_000,
+            dynamic_fee: false,
             tick_spacing: 60,
             hooks: None,
             sqrt_price_x96: "0".into(),

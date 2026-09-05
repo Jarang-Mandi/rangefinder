@@ -30,6 +30,26 @@ use crate::chain::registry::Registry;
 /// spacing yang sudah didaftarkan, dan keempat ini yang ada di semua chain.
 pub const V3_FEE_TIERS: [u32; 4] = [100, 500, 3_000, 10_000];
 
+/// Penanda dynamic fee pada V4.
+///
+/// Kalau bit ini menyala, angka fee di PoolKey BUKAN besaran fee. Fee
+/// sebenarnya ditentukan hook saat swap terjadi, jadi tidak bisa diketahui dari
+/// keadaan pool saja.
+///
+/// Ditemukan dari data sungguhan: pool V4 di Robinhood Chain melaporkan fee
+/// 8388608, yaitu 0x800000 persis. Tanpa penanganan ini, pemeringkatan berbasis
+/// fee akan menganggapnya 838 persen dan menempatkannya di puncak daftar.
+pub const DYNAMIC_FEE_FLAG: u32 = 0x80_0000;
+
+/// Fee yang diasumsikan untuk pool dynamic fee saat memeringkat.
+///
+/// Nilai konservatif, setara 0,3 persen. Ini hanya untuk urutan tampilan.
+/// Angka sebenarnya baru diketahui saat kutipan diminta ke quoter, dan itu
+/// yang dipakai untuk keputusan.
+pub const ASSUMED_DYNAMIC_FEE: u32 = 3_000;
+
+pub const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
+
 #[derive(Debug, Clone, Serialize)]
 pub struct TokenMeta {
     pub address: String,
@@ -53,7 +73,11 @@ pub struct PoolInfo {
     pub id: String,
     pub token0: String,
     pub token1: String,
+    /// Angka fee apa adanya dari pool. Untuk V4 dengan dynamic fee, ini penanda
+    /// `0x800000`, bukan besaran fee. Periksa `dynamic_fee` sebelum memakainya.
     pub fee: u32,
+    /// Benar kalau fee ditentukan hook saat swap, bukan tetap.
+    pub dynamic_fee: bool,
     pub tick_spacing: i32,
     /// Alamat hook. Nol berarti tanpa hook. Hanya relevan untuk V4.
     pub hooks: Option<String>,
@@ -171,6 +195,7 @@ async fn read_v3_pool<P: Provider>(
         token0: token0.to_string(),
         token1: token1.to_string(),
         fee,
+        dynamic_fee: false,
         tick_spacing: tick_spacing.as_i32(),
         hooks: None,
         sqrt_price_x96: sqrt.to_string(),
@@ -239,13 +264,16 @@ pub async fn discover_v4<P: Provider>(
         let liquidity = view.getLiquidity(pool_id).call().await.unwrap_or(0);
 
         let sqrt = U256::from(slot0.sqrtPriceX96);
+        let fee = decoded.fee.to::<u32>();
+        let dynamic_fee = fee & DYNAMIC_FEE_FLAG != 0;
 
         out.push(PoolInfo {
             version: PoolVersion::V4,
             id: format!("0x{}", hex::encode(pool_id)),
             token0: decoded.currency0.to_string(),
             token1: decoded.currency1.to_string(),
-            fee: decoded.fee.to::<u32>(),
+            fee,
+            dynamic_fee,
             tick_spacing: decoded.tickSpacing.as_i32(),
             hooks: Some(decoded.hooks.to_string()),
             sqrt_price_x96: sqrt.to_string(),
@@ -316,7 +344,7 @@ pub fn usable_pools(mut pools: Vec<PoolInfo>) -> Vec<PoolInfo> {
     pools.sort_by(|a, b| {
         let skor = |p: &PoolInfo| {
             let l = p.liquidity.parse::<f64>().unwrap_or(0.0);
-            l * p.fee as f64
+            l * ranking_fee(p) as f64
         };
         skor(b)
             .partial_cmp(&skor(a))
@@ -324,6 +352,30 @@ pub fn usable_pools(mut pools: Vec<PoolInfo>) -> Vec<PoolInfo> {
     });
 
     pools
+}
+
+/// Fee yang dipakai untuk memeringkat.
+///
+/// Untuk pool dynamic fee, angka fee di PoolKey adalah penanda, bukan besaran.
+/// Memakainya apa adanya akan membacanya sebagai 838 persen dan menaruh pool
+/// itu di puncak daftar tanpa alasan.
+pub fn ranking_fee(p: &PoolInfo) -> u32 {
+    if p.dynamic_fee {
+        ASSUMED_DYNAMIC_FEE
+    } else {
+        p.fee
+    }
+}
+
+/// Benar kalau pool memakai hook selain alamat nol.
+///
+/// Hook bisa mengubah fee, membatasi siapa yang boleh menambah likuiditas, atau
+/// memungut potongan. Keputusan boleh tidaknya dipakai ada di gate risiko,
+/// bukan di sini. Lihat PRD 5.4.
+pub fn has_hook(p: &PoolInfo) -> bool {
+    p.hooks
+        .as_deref()
+        .is_some_and(|h| !h.eq_ignore_ascii_case(ZERO_ADDRESS))
 }
 
 #[cfg(test)]
@@ -337,6 +389,7 @@ mod tests {
             token0: "0x0".into(),
             token1: "0x1".into(),
             fee,
+            dynamic_fee: false,
             tick_spacing: 60,
             hooks: None,
             sqrt_price_x96: "0".into(),
@@ -380,6 +433,39 @@ mod tests {
         ];
         let hasil = usable_pools(pools);
         assert_eq!(hasil[0].id, "mahal");
+    }
+
+    #[test]
+    fn penanda_dynamic_fee_tidak_dibaca_sebagai_besaran() {
+        // Angka nyata dari pool V4 di Robinhood Chain. Tanpa penanganan khusus,
+        // 8388608 akan dibaca sebagai 838 persen dan memenangi seluruh daftar.
+        let mut dinamis = pool("dinamis", DYNAMIC_FEE_FLAG, "1000", 1.0);
+        dinamis.dynamic_fee = true;
+        assert_eq!(ranking_fee(&dinamis), ASSUMED_DYNAMIC_FEE);
+
+        let tetap = pool("tetap", 10_000, "1000", 1.0);
+        assert_eq!(ranking_fee(&tetap), 10_000);
+
+        // Pool fee tetap 1 persen harus mengalahkan pool dynamic fee pada
+        // likuiditas yang sama, karena asumsinya hanya 0,3 persen.
+        let hasil = usable_pools(vec![dinamis, tetap]);
+        assert_eq!(hasil[0].id, "tetap");
+    }
+
+    #[test]
+    fn hook_dikenali_dari_alamat() {
+        let mut tanpa = pool("tanpa", 3_000, "1", 1.0);
+        assert!(!has_hook(&tanpa), "hooks None berarti tanpa hook");
+
+        tanpa.hooks = Some(ZERO_ADDRESS.to_string());
+        assert!(!has_hook(&tanpa), "alamat nol berarti tanpa hook");
+
+        tanpa.hooks = Some("0x2380aBf72C17aABAb76480244759AC7E2932EEcC".into());
+        assert!(has_hook(&tanpa));
+
+        // Huruf besar kecil tidak boleh berpengaruh pada perbandingan alamat.
+        tanpa.hooks = Some(ZERO_ADDRESS.to_uppercase().replace("0X", "0x"));
+        assert!(!has_hook(&tanpa));
     }
 
     #[test]
@@ -473,6 +559,42 @@ mod tests {
             assert!(p.raw_price > 0.0, "harga mentah harus positif");
             assert!(p.tick_spacing > 0, "tick spacing harus positif");
         }
+
+        // Verifikasi tick math kita terhadap keadaan pool yang sebenarnya.
+        //
+        // Kontrak Uniswap menjamin tick pada slot0 adalah tick terbesar yang
+        // sqrtPriceX96-nya tidak melampaui harga sekarang. Kalau tabel
+        // konstanta TickMath kita salah di satu bit saja, ketaksamaan ini akan
+        // gagal pada pool yang ticknya menyentuh bit itu. Ini pemeriksaan
+        // independen terhadap data produksi, bukan terhadap asumsi kita
+        // sendiri.
+        use crate::math::tick_math::{get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio};
+        use alloy::primitives::U256;
+
+        for p in &pools {
+            let sqrt: U256 = p.sqrt_price_x96.parse().expect("sqrtPriceX96 harus angka");
+            let bawah = get_sqrt_ratio_at_tick(p.tick).expect("tick pool harus sah");
+            let atas = get_sqrt_ratio_at_tick(p.tick + 1).expect("tick berikutnya harus sah");
+
+            assert!(
+                bawah <= sqrt && sqrt < atas,
+                "pool {} tick {}: sqrtPriceX96 {} tidak berada di antara {} dan {}",
+                p.id,
+                p.tick,
+                sqrt,
+                bawah,
+                atas
+            );
+
+            // Dan sebaliknya, pembacaan balik harus menghasilkan tick yang sama.
+            assert_eq!(
+                get_tick_at_sqrt_ratio(sqrt).expect("harga pool harus dalam rentang"),
+                p.tick,
+                "pool {} membaca balik tick yang berbeda",
+                p.id
+            );
+        }
+        println!("tick math cocok dengan {} pool sungguhan di chain", pools.len());
     }
 
     #[test]
