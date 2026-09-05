@@ -81,9 +81,24 @@ dipertaruhkan.
 cargo xtask verify        periksa registry terhadap chain, lalu dokumen
 cargo xtask verify --pin  sekaligus mengunci code_hash yang belum dipin
 cargo xtask docs-check    hanya periksa kesesuaian kode dengan dokumen
-cargo test                seluruh uji unit
+cargo test                seluruh uji unit engine
 cargo clippy --all-targets
 ```
+
+Sisi ekstensi:
+
+```
+cd extension
+npm test                  uji jembatan chart terhadap snapshot gmgn
+npm run typecheck
+npm run build
+```
+
+`npm test` memakai test runner bawaan Node, tanpa dependensi tambahan. Yang
+dijaga adalah hal hal yang paling mungkin rusak diam diam saat gmgn
+memperbarui bundle: bentuk URL token, pola id iframe chart, jalur akses lilin
+terakhir, dan penentuan tingkat degradasi. Snapshotnya ada di
+`extension/fixtures/gmgn-token-page.html`, beserta cara memperbaruinya.
 
 Jalankan `cargo xtask verify` sebelum setiap commit yang menyentuh
 `chain.toml`, `engine/src/api/protocol.rs`, atau dokumen di `docs/`.

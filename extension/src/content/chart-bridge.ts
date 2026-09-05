@@ -21,8 +21,17 @@
  *   dokumen, jadi navigasi dideteksi lewat History API, bukan lewat `load`.
  */
 
+import {
+  IFRAME_SELECTOR,
+  REQUIRED_CHART_METHODS,
+  capabilityTier,
+  methodsPresent,
+  readLastBar,
+  sideOfShape,
+  tokenFromPath,
+} from "./chart-logic";
+
 const CHANNEL = "rangefinder";
-const IFRAME_SELECTOR = 'iframe[id^="tradingview_"]';
 const READY_TIMEOUT_MS = 15_000;
 const POLL_MS = 50;
 
@@ -53,62 +62,6 @@ interface TradingViewApi {
   unsubscribe(event: string, handler: (id: string, type: string) => void): void;
 }
 
-/** Satu lilin, dalam satuan yang sedang dipakai chart. */
-interface LastBar {
-  time: number;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume: number;
-}
-
-/**
- * Baca lilin terakhir dari penyimpanan internal Charting Library.
- *
- * KENAPA INI PENTING
- * Chart bekerja dalam market cap USD sedangkan pool bekerja dalam WETH. Untuk
- * menempatkan garis pada nilai yang benar, kita butuh kurs ETH ke USD. Alih
- * alih mengambilnya dari sumber luar yang bisa meleset dari chart, kurs itu
- * diturunkan dari chart itu sendiri:
- *
- *   eth_usd = mcap_chart / (total_supply x harga_token_dalam_weth)
- *
- * Cara ini menjamin garis mendarat persis di tempat yang ditunjukkan skala
- * chart, karena kalibrasinya memakai angka chart yang sama.
- *
- * JALUR AKSESNYA TIDAK RESMI
- * `getSeries().data().m_bars.last().value` adalah struktur internal, bukan API
- * publik Charting Library, jadi ia bisa berubah kapan saja tanpa peringatan.
- * Karena itu kegagalannya dilaporkan, bukan dibiarkan diam, dan panel harus
- * bisa tetap berguna tanpanya.
- *
- * Bentuk nilainya `[waktu, open, high, low, close, volume, ...]`, diverifikasi
- * langsung pada 5 September 2026: close 937.234.340 cocok dengan judul halaman
- * yang menampilkan $938.86M pada saat yang hampir sama.
- */
-function readLastBar(chart: ChartApi): LastBar | null {
-  try {
-    const series = chart.getSeries() as unknown as {
-      data(): { m_bars: { last(): { value: number[] } } };
-    };
-    const value = series.data().m_bars.last().value;
-    if (!Array.isArray(value) || value.length < 5) return null;
-
-    const [time, open, high, low, close, volume] = value;
-    // Penjaga kewarasan. Kalau urutan indeksnya berubah, angkanya tidak akan
-    // lagi konsisten sebagai OHLC, dan lebih baik melaporkan tidak tahu
-    // daripada menempatkan garis di tempat yang salah.
-    const konsisten =
-      high >= Math.max(open, close) && low <= Math.min(open, close) && close > 0;
-    if (!konsisten) return null;
-
-    return { time, open, high, low, close, volume: volume ?? 0 };
-  } catch {
-    return null;
-  }
-}
-
 /** Entity id garis milik kita. Jangan pernah menyimpulkan dari getAllShapes. */
 const lines: Partial<Record<Side, string>> = {};
 let api: TradingViewApi | null = null;
@@ -122,8 +75,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Alamat token dari URL. `null` kalau halaman ini bukan halaman token. */
 function tokenFromUrl(): string | null {
-  const m = location.pathname.match(/^\/([a-z0-9]+)\/token\/(0x[a-fA-F0-9]{40}|[A-Za-z0-9]{32,44})$/);
-  return m ? m[2] : null;
+  return tokenFromPath(location.pathname);
 }
 
 async function waitForApi(): Promise<TradingViewApi | null> {
@@ -162,26 +114,14 @@ async function waitForApi(): Promise<TradingViewApi | null> {
  * diam.
  */
 function probe(chart: ChartApi | null) {
-  const required = [
-    "createShape",
-    "getShapeById",
-    "getAllShapes",
-    "removeEntity",
-    "getVisiblePriceRange",
-    "getVisibleRange",
-  ] as const;
-
-  const present = chart
-    ? required.filter((m) => typeof (chart as unknown as Record<string, unknown>)[m] === "function")
-    : [];
-
-  const tier = !chart ? 3 : present.length === required.length ? 1 : 2;
+  const present = methodsPresent(chart);
+  const tier = capabilityTier(present, chart !== null);
 
   post({
     kind: "chart_capabilities",
     tier,
     methodsPresent: present,
-    methodsMissing: required.filter((m) => !present.includes(m)),
+    methodsMissing: REQUIRED_CHART_METHODS.filter((m) => !present.includes(m)),
     symbol: safe(() => chart?.symbol()),
     resolution: safe(() => chart?.resolution()),
     token: currentToken,
@@ -249,9 +189,7 @@ function clearLines() {
 }
 
 function sideOf(id: string): Side | null {
-  if (lines.upper === id) return "upper";
-  if (lines.lower === id) return "lower";
-  return null;
+  return sideOfShape(id, lines);
 }
 
 function onDrawingEvent(id: string, type: string) {
@@ -377,7 +315,3 @@ window.addEventListener("message", (event) => {
 
 watchNavigation();
 void attach();
-
-// Menjadikan berkas ini modul, bukan skrip global, supaya konstanta di dalamnya
-// tidak bertabrakan dengan berkas content script lain saat pemeriksaan tipe.
-export {};

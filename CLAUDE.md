@@ -133,7 +133,7 @@ bytecode yang tidak cocok dengan yang dipin.
 | 0 | Spesifikasi, repo, dokumen | selesai |
 | 1 | Engine: config, pairing, keystore, chain, api, xtask | **selesai dan terverifikasi jalan** |
 | 1 | Ekstensi: manifest, side panel, jembatan chart | selesai, typecheck bersih, build menghasilkan dist yang bisa dimuat |
-| 2 | Injeksi chart dan matematika satuan | **hampir selesai**. Penemuan pool, kalibrasi kurs dari chart, konversi tiga satuan, snap tick beserta laporan drift, dan lingkaran penuh panel ke chart ke engine sudah jalan. Yang tersisa hanya uji integrasi terhadap snapshot gmgn, dan itu syarat sebelum fase 3 |
+| 2 | Injeksi chart dan matematika satuan | **selesai**. Penemuan pool, kalibrasi kurs dari chart, konversi tiga satuan, snap tick beserta laporan drift, lingkaran penuh panel ke chart ke engine, dan uji integrasi terhadap snapshot gmgn |
 | 3 | Eksekusi V3 | belum |
 | 4 | Eksekusi V4 dan zap | belum |
 | 5 | Positions, PnL, notifikasi | belum |
@@ -145,9 +145,10 @@ bytecode yang tidak cocok dengan yang dipin.
 Diverifikasi langsung, bukan diasumsikan:
 
 ```
-cargo test          51 lolos, 0 gagal
-cargo clippy        bersih
-cargo xtask verify  HIJAU, registry 17 dari 17 cocok, dokumen lengkap
+cargo test               68 lolos, 0 gagal
+cargo clippy             bersih
+cargo xtask verify       HIJAU, registry 17 dari 17 cocok, dokumen lengkap
+npm test  (extension)    17 lolos, uji terhadap snapshot gmgn
 ```
 
 Engine dijalankan sungguhan terhadap Robinhood Chain: RPC sehat, gate G1 lolos

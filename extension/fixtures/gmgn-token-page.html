@@ -1,0 +1,56 @@
+<!doctype html>
+<!--
+  Snapshot struktur halaman token gmgn.ai.
+
+  BUKAN salinan utuh halaman. Ini versi ringkas yang hanya memuat bagian yang
+  benar benar diandalkan jembatan chart, supaya uji regresi tetap kecil dan
+  jelas apa yang sedang dijaga.
+
+  Diambil dari https://gmgn.ai/robinhood/token/0x39dbed3a2bd333467115de45665cc57f813c4571
+  pada 5 September 2026.
+
+  YANG DIJAGA BERKAS INI
+  - Pola id iframe chart, yaitu `tradingview_<hash>`.
+  - Bentuk tautan halaman token, yaitu /<chain>/token/<alamat>.
+
+  CARA MEMPERBARUI
+  Buka halaman token mana pun di gmgn, lalu di konsol jalankan:
+
+    const f = document.querySelector('iframe[id^="tradingview_"]');
+    ({ id: f && f.id, url: location.pathname });
+
+  Kalau pola idnya berubah, perbarui berkas ini dan `IFRAME_SELECTOR` di
+  chart-logic.ts bersamaan, lalu catat perubahannya di memory/002.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>PONS $938.86M | GMGN.AI</title>
+  </head>
+  <body>
+    <nav>
+      <a href="/robinhood/token/0x39dbed3a2bd333467115de45665cc57f813c4571">PONS</a>
+      <a href="/trend?chain=robinhood">Trending</a>
+    </nav>
+
+    <!-- Chart. Charting Library membuat iframe ini sendiri setelah bundle
+         dimuat, jadi jembatan chart menunggunya dengan MutationObserver. -->
+    <div class="chart-container">
+      <iframe
+        id="tradingview_e6ba9"
+        name="tradingview_e6ba9"
+        frameborder="0"
+        allowtransparency="true"
+        scrolling="no"
+      ></iframe>
+    </div>
+
+    <div class="token-stats">
+      <span>Price $0.938</span>
+      <span>Liq $6.4M</span>
+      <span>24h Vol $113.4M</span>
+      <span>Total supply 1B</span>
+      <span>Total Tax 0.3% / 0.3%</span>
+    </div>
+  </body>
+</html>
