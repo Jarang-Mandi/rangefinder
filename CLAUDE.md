@@ -64,6 +64,9 @@ engine/                 biner `rangefinder`, plus pustaka `rangefinder_engine`
     abi_write.rs        ABI sisi tulis. Terpisah tegas dari ABI baca
     calldata.rs         gate G2, pembangun calldata bertipe
     golden.rs           gate G3, perbandingan terhadap transaksi sungguhan
+    simulate.rs         gate G4 dan G5, eth_call plus asersi invarian
+    limits.rs           gate G6, pembatas nilai dan slippage
+    verify.rs           gate G7, baca ulang posisi lalu bandingkan
   src/store/            redb, penyimpanan lokal
   src/wallet/           manajemen wallet
     keystore.rs         Argon2id plus AES-256-GCM
@@ -74,7 +77,8 @@ engine/                 biner `rangefinder`, plus pustaka `rangefinder_engine`
     routes.rs           handler HTTP
     ws.rs               WebSocket ke panel
 
-xtask/                  `cargo xtask verify` dan `docs-check`
+xtask/                  `cargo xtask verify`, `docs-check`, dan `golden`
+  src/golden.rs         pengambil golden vector dari transaksi sungguhan
 extension/              ekstensi Chrome MV3
 docs/                   PRD, keputusan, kontrak gmgn, alamat chain, runbook
 memory/                 catatan per topik yang tumbuh seiring waktu
@@ -106,6 +110,9 @@ tersandung:
 | Perkalian 256 bit meluap | `liquidity_math::mul_div` | Semua perkalian lewat 512 bit. Luapan di sini baru terlihat saat dana sudah bergerak |
 | Golden vector tidak boleh diperbarui supaya lulus | `exec/golden.rs` | Kalau perbandingan gagal, yang salah builder-nya. Memperbarui fixture menyembunyikan kesalahan |
 | Fee V4 bisa berupa penanda, bukan besaran | `pools::ranking_fee` | `0x800000` berarti dynamic fee. Dibaca apa adanya akan tertulis 838 persen |
+| Dry run menyala secara bawaan | `config::ExecutionConfig` | Engine harus bisa dipasang di mesin bersih tanpa memindahkan dana pada percobaan pertama |
+| Simulasi berhasil belum cukup | `exec/simulate.rs` | Transaksi bisa lolos sambil melakukan hal yang berbeda dari niat kita. G5 yang menangkapnya |
+| Receipt sukses belum cukup | `exec/verify.rs` | Token yang tertukar tetap menghasilkan posisi dan transaksi yang sukses. Hanya pembacaan ulang yang membuktikannya benar |
 
 ## Alur start engine
 
