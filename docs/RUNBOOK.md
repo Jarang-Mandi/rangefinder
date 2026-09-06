@@ -121,6 +121,27 @@ Jalankan `cargo xtask verify` sebelum setiap commit yang menyentuh
 
 ## Kalau ada yang salah
 
+### PowerShell bilang "cargo is not recognized"
+
+Rustup tidak selalu menambahkan `~\.cargo\bin` ke PATH user, dan di mesin ini
+memang tidak tertambah. Periksa dan perbaiki:
+
+```powershell
+$cargo = "$env:USERPROFILE\.cargo\bin"
+$userPath = [Environment]::GetEnvironmentVariable('Path','User')
+if (($userPath -split ';') -notcontains $cargo) {
+  [Environment]::SetEnvironmentVariable('Path', $userPath.TrimEnd(';') + ';' + $cargo, 'User')
+}
+```
+
+Perubahan PATH tidak berlaku pada jendela yang sudah terbuka, jadi **tutup
+terminalnya lalu buka yang baru**. Untuk jendela yang sedang jalan, tambahkan
+sementara:
+
+```powershell
+$env:Path += ";$env:USERPROFILE\.cargo\bin"
+```
+
 ### Engine menolak start dengan "gate G1 gagal"
 
 Bytecode di salah satu alamat tidak cocok dengan yang dipin. Ini disengaja
