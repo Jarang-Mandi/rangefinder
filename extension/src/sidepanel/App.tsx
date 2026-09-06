@@ -690,6 +690,8 @@ function WalletCard({
 }) {
   const w = status.wallet;
   const [passphrase, setPassphrase] = useState("");
+  const [importing, setImporting] = useState(false);
+  const [privateKey, setPrivateKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
 
@@ -703,6 +705,7 @@ function WalletCard({
         body: JSON.stringify(body ?? {}),
       });
       setPassphrase("");
+      setPrivateKey("");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -771,19 +774,66 @@ function WalletCard({
             Pakai wallet terpisah khusus operasi ini. Pembatas nominal bawaannya
             tidak terbatas, jadi pengamannya adalah isi wallet itu sendiri.
           </p>
+
           <input
             type="password"
             value={passphrase}
             placeholder="Passphrase baru, minimal 8 karakter"
             onInput={(e) => setPassphrase((e.target as HTMLInputElement).value)}
           />
+
+          <label class="toggle">
+            <input
+              type="checkbox"
+              checked={importing}
+              onChange={(e) => {
+                setImporting((e.target as HTMLInputElement).checked);
+                setPrivateKey("");
+              }}
+            />
+            Impor kunci privat yang sudah ada
+          </label>
+
+          {importing ? (
+            <>
+              <input
+                type="password"
+                value={privateKey}
+                placeholder="0x diikuti 64 karakter heksadesimal"
+                spellcheck={false}
+                onInput={(e) => setPrivateKey((e.target as HTMLInputElement).value)}
+              />
+              <p class="muted" style="margin: 0">
+                Kunci dikirim ke engine di mesin ini saja, lalu langsung
+                dienkripsi ke keystore. Ia tidak pernah ditulis sebagai teks
+                biasa dan tidak pernah keluar dari mesin.
+              </p>
+            </>
+          ) : (
+            <p class="muted" style="margin: 0">
+              Engine akan membuat kunci acak. Setelah itu kirim ETH dan token ke
+              alamat yang muncul.
+            </p>
+          )}
+
           <button
             class="primary"
-            disabled={busy || passphrase.length < 8}
-            onClick={() => void act("/v1/wallet/create", { passphrase })}
+            disabled={busy || passphrase.length < 8 || (importing && !isPrivateKey(privateKey))}
+            onClick={() =>
+              void act("/v1/wallet/create", {
+                passphrase,
+                ...(importing ? { private_key: privateKey.trim() } : {}),
+              })
+            }
           >
-            Buat wallet
+            {importing ? "Impor wallet" : "Buat wallet"}
           </button>
+
+          {importing && privateKey.trim() && !isPrivateKey(privateKey) ? (
+            <p class="error">
+              Kunci privat harus 0x diikuti 64 karakter heksadesimal.
+            </p>
+          ) : null}
         </div>
       ) : null}
 
@@ -955,6 +1005,16 @@ function registryLabel(s: string): string {
     default:
       return s;
   }
+}
+
+/**
+ * Kunci privat secp256k1 yang bentuknya benar.
+ *
+ * Hanya memeriksa bentuk, bukan keabsahan kurva. Engine yang memutuskan itu,
+ * dan pesannya akan spesifik kalau kuncinya tidak sah.
+ */
+function isPrivateKey(v: string): boolean {
+  return /^0x[a-fA-F0-9]{64}$/.test(v.trim());
 }
 
 function shortAddress(a: string): string {
