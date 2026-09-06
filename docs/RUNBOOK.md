@@ -10,6 +10,37 @@ Cara menjalankan Rangefinder, dan apa yang dilakukan saat ada yang salah.
 - Node 22 atau lebih baru untuk membangun ekstensi.
 - Chrome dengan mode pengembang aktif.
 
+## Lokasi instalasi Rust
+
+Rust di mesin ini **tidak** dipasang di lokasi bawaan `%USERPROFILE%`, melainkan
+di disk D, karena C hanya menyisakan sekitar 8 GB sedangkan toolchain plus cache
+registry memakan hampir 3,5 GB.
+
+| Variabel | Nilai |
+| --- | --- |
+| `RUSTUP_HOME` | `D:\Rust\rustup` |
+| `CARGO_HOME` | `D:\Rust\cargo` |
+| PATH | memuat `D:\Rust\cargo\bin`, bukan `%USERPROFILE%\.cargo\bin` |
+
+Ketiganya diatur sebagai variabel lingkungan tingkat user. Kalau suatu saat
+hilang, misalnya setelah pasang ulang Windows atau rustup, kembalikan dengan:
+
+```powershell
+[Environment]::SetEnvironmentVariable('CARGO_HOME',  'D:\Rust\cargo',  'User')
+[Environment]::SetEnvironmentVariable('RUSTUP_HOME', 'D:\Rust\rustup', 'User')
+$p = ([Environment]::GetEnvironmentVariable('Path','User') -split ';' |
+      Where-Object { $_ -and $_ -notlike '*\.cargo\bin' })
+if ($p -notcontains 'D:\Rust\cargo\bin') { $p += 'D:\Rust\cargo\bin' }
+[Environment]::SetEnvironmentVariable('Path', ($p -join ';'), 'User')
+```
+
+Lalu tutup terminal dan buka yang baru. Periksa dengan `rustup show`, barisnya
+harus berbunyi `rustup home: D:\Rust\rustup`.
+
+**Jangan menghapus `RUSTUP_HOME` atau `CARGO_HOME` tanpa memindahkan isinya
+kembali.** Tanpa kedua variabel itu, rustup akan mencari di `%USERPROFILE%` yang
+sudah kosong, lalu menawarkan pemasangan ulang dari nol.
+
 ## Menjalankan engine
 
 ```
@@ -123,24 +154,23 @@ Jalankan `cargo xtask verify` sebelum setiap commit yang menyentuh
 
 ### PowerShell bilang "cargo is not recognized"
 
-Rustup tidak selalu menambahkan `~\.cargo\bin` ke PATH user, dan di mesin ini
-memang tidak tertambah. Periksa dan perbaiki:
+Perubahan PATH tidak berlaku pada jendela yang sudah terbuka, jadi kalau baru
+saja diatur, **tutup terminalnya lalu buka yang baru**. Untuk jendela yang
+sedang jalan, tambahkan sementara:
 
 ```powershell
-$cargo = "$env:USERPROFILE\.cargo\bin"
-$userPath = [Environment]::GetEnvironmentVariable('Path','User')
-if (($userPath -split ';') -notcontains $cargo) {
-  [Environment]::SetEnvironmentVariable('Path', $userPath.TrimEnd(';') + ';' + $cargo, 'User')
-}
+$env:Path += ';D:\Rust\cargo\bin'
 ```
 
-Perubahan PATH tidak berlaku pada jendela yang sudah terbuka, jadi **tutup
-terminalnya lalu buka yang baru**. Untuk jendela yang sedang jalan, tambahkan
-sementara:
+Kalau memang belum pernah diatur, periksa ketiganya sekaligus:
 
 ```powershell
-$env:Path += ";$env:USERPROFILE\.cargo\bin"
+[Environment]::GetEnvironmentVariable('CARGO_HOME','User')   # D:\Rust\cargo
+[Environment]::GetEnvironmentVariable('RUSTUP_HOME','User')  # D:\Rust\rustup
+([Environment]::GetEnvironmentVariable('Path','User')) -split ';'
 ```
+
+Cara memasang ulang ketiganya ada di bagian Lokasi instalasi Rust di atas.
 
 ### Engine menolak start dengan "gate G1 gagal"
 

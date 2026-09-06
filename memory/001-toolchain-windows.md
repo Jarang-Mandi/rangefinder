@@ -106,8 +106,11 @@ apa.
 Akar masalahnya: rustup membundel `dlltool.exe` di
 
 ```
-~/.rustup/toolchains/stable-x86_64-pc-windows-gnu/lib/rustlib/x86_64-pc-windows-gnu/bin/self-contained/
+$RUSTUP_HOME/toolchains/stable-x86_64-pc-windows-gnu/lib/rustlib/x86_64-pc-windows-gnu/bin/self-contained/
 ```
+
+Ditulis sebagai `$RUSTUP_HOME`, bukan `~/.rustup`, karena Rust di mesin ini
+kemudian dipindahkan ke `D:\Rust\rustup`. Lihat memory/004.
 
 tapi **tidak membundel `as.exe`** yang dipanggil dlltool. Menjalankan dlltool
 manual mengonfirmasinya:

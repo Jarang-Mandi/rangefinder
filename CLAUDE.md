@@ -29,6 +29,13 @@ digeser diinjeksi ke chart TradingView milik gmgn.ai.
 Rust stable dengan target msvc, dan Node 22 untuk ekstensi. Tidak ada prasyarat
 lain. `cargo build`, `cargo test`, dan `cargo xtask verify` jalan apa adanya.
 
+**Rust tidak dipasang di lokasi bawaan.** `RUSTUP_HOME` menunjuk
+`D:\Rust\rustup` dan `CARGO_HOME` menunjuk `D:\Rust\cargo`, karena disk C hanya
+menyisakan sekitar 8 GB. Kalau `cargo` tiba tiba tidak dikenali atau rustup
+menawarkan pemasangan ulang dari nol, kedua variabel itu yang hilang, bukan
+Rust-nya. Cara mengembalikannya ada di `docs/RUNBOOK.md` bagian Lokasi
+instalasi Rust.
+
 Mesin ini sempat kelihatan tidak punya toolchain C, dan repo sempat berisi
 penyiasatan raw-dylib untuk target GNU. Semua itu sudah dihapus setelah
 ternyata MSVC memang sudah terpasang, hanya di `Program Files (x86)`, dan yang
