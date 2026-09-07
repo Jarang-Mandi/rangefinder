@@ -39,3 +39,4 @@ setiap agent.
 | `003-rpc-rate-limit.md` | RPC membatasi laju, dan bahaya menelan kegagalan jadi nol |
 | `004-rust-di-disk-d.md` | Rust dipindah ke D, dan jebakan saat memindahkannya |
 | `005-pasangan-token-dan-fee-jebakan.md` | Token lawan tidak boleh ditebak, dan pool ber-fee ekstrem |
+| `006-kecepatan-pencarian-pool.md` | Kenapa pencarian pool lambat, dan kenapa paralel justru memperburuk |

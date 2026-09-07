@@ -30,24 +30,54 @@ pub async fn run(repo_root: &Path, token_arg: &str) -> Result<bool> {
     let client = ChainClient::new(cfg.rpc.clone());
     let provider = client.provider().await?;
 
-    let meta = pools::token_meta(&provider, token).await?;
-    println!("  token   {} ({}), {} desimal", meta.symbol, token, meta.decimals);
-    println!();
+    // Cache yang sama dengan yang dipakai engine, supaya angka waktu di sini
+    // mewakili apa yang benar benar dirasakan user di panel.
+    let store = rangefinder_engine::store::Store::open(&rangefinder_engine::config::data_dir()?)?;
 
-    let semua = pools::discover_v4_any(&provider, &registry, token).await?;
-    println!("  {} pool V4 ditemukan", semua.len());
+    let t0 = std::time::Instant::now();
+    let meta = pools::token_meta_via(&provider, &registry, token).await?;
+    let semua = pools::discover_v4_cached(
+        &provider,
+        &registry,
+        Some(&store),
+        token,
+        pools::ModePencarian::Penuh,
+    )
+    .await?;
+    println!(
+        "  token   {} ({}), {} desimal",
+        meta.symbol, token, meta.decimals
+    );
+    println!();
+    println!(
+        "  {} pool V4 ditemukan   [{} ms]",
+        semua.len(),
+        t0.elapsed().as_millis()
+    );
 
     let lawan = pools::counterparties(&semua, &token.to_string());
+    let alamat_lawan: Vec<alloy::primitives::Address> = lawan
+        .iter()
+        .filter_map(|(a, _)| a.parse().ok())
+        .collect();
+    let t1 = std::time::Instant::now();
+    let meta_lawan = pools::token_meta_batch(&provider, &registry, &alamat_lawan).await?;
     println!();
-    println!("  Berpasangan dengan:");
-    for (alamat, jumlah) in &lawan {
-        let simbol = match alamat.parse::<Address>() {
-            Ok(a) => pools::token_meta(&provider, a)
-                .await
-                .map(|m| m.symbol)
-                .unwrap_or_else(|_| "?".into()),
-            Err(_) => "?".into(),
-        };
+    println!("  Berpasangan dengan:   [{} ms]", t1.elapsed().as_millis());
+    for (i, (alamat, jumlah)) in lawan.iter().enumerate() {
+        let simbol = meta_lawan
+            .get(i)
+            .and_then(|m| m.as_ref())
+            .map(|m| m.symbol.clone())
+            .unwrap_or_else(|| {
+                // Alamat nol berarti ETH asli di V4, bukan token yang gagal
+                // dibaca. Ia memang tidak punya `symbol()`.
+                if alamat.eq_ignore_ascii_case(pools::ZERO_ADDRESS) {
+                    "ETH".into()
+                } else {
+                    "?".into()
+                }
+            });
         println!("    {alamat}  {simbol:<10} {jumlah} pool");
     }
 

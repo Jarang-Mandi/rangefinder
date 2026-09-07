@@ -112,6 +112,12 @@ export interface QuoteGroup {
   quote: string;
   quote_symbol: string;
   quote_decimals: number;
+  /**
+   * Benar kalau token lawannya kutipan yang dikenal rantai ini, yaitu ETH asli
+   * atau salah satu entri tokens di chain.toml. Kelompok kanonik didahulukan
+   * saat memilih pasar utama.
+   */
+  canonical: boolean;
   pools: PoolInfo[];
 }
 
@@ -185,6 +191,7 @@ export type ClientMessage =
   | { type: "subscribe_token"; address: string }
   | { type: "chart_price"; address: string; mcap_usd: number }
   | { type: "select_pool"; pool_id: string }
+  | { type: "select_quote"; quote: string }
   | { type: "set_range"; lower_mcap: number; upper_mcap: number };
 
 export function asRangeView(msg: unknown): RangeView | null {

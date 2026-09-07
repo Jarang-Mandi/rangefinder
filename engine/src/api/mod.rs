@@ -64,6 +64,13 @@ pub struct AppState {
 #[derive(Debug, Clone)]
 pub struct ActiveToken {
     pub meta: crate::pools::TokenMeta,
+    /// Semua kelompok pasangan yang ditemukan, bukan hanya yang terpilih.
+    ///
+    /// Disimpan supaya user bisa berpindah pasangan tanpa memindai ulang.
+    /// Pemindaian itu bagian termahal dari seluruh alur, dan memaksanya
+    /// hanya untuk berganti tab akan terasa seperti alat yang macet.
+    pub quotes: Vec<crate::pools::QuoteGroup>,
+    pub selected_quote: String,
     pub pools: Vec<crate::pools::PoolInfo>,
     pub selected_pool_id: String,
     pub quote_decimals: u8,
@@ -100,20 +107,58 @@ impl AppState {
 
     /// Cari pool untuk sebuah token di tugas terpisah, lalu siarkan hasilnya.
     ///
-    /// Dijalankan terpisah karena pencariannya menyentuh jaringan dan bisa
-    /// makan beberapa detik. Kalau dikerjakan di dalam loop WebSocket, panel
-    /// akan berhenti menerima status selama itu.
+    /// DUA TAHAP, KARENA MENUNGGU ITU MAHAL
+    /// Tahap pertama hanya membaca keadaan pool yang kuncinya sudah tersimpan.
+    /// Ia tidak memindai log sama sekali, jadi biayanya satu permintaan dan
+    /// panel sudah punya sesuatu untuk ditampilkan dalam waktu di bawah
+    /// setengah detik. Tahap kedua memindai blok yang belum pernah dilihat lalu
+    /// menyiarkan ulang kalau ada yang berubah.
+    ///
+    /// Kalau token ini belum pernah dibuka, tahap pertama tidak menghasilkan
+    /// apa apa dan panel langsung menunggu tahap kedua. Itu keadaan yang memang
+    /// tidak bisa dihindari: pool V4 hanya bisa ditemukan lewat log, dan log
+    /// harus dipindai sekali.
+    ///
+    /// Harga dan likuiditas TIDAK pernah datang dari cache. Yang disimpan hanya
+    /// kunci pool, yang memang tidak pernah berubah. Lihat `pools::cache`.
     pub fn spawn_token_lookup(&self, address: String) {
         let state = self.clone();
         tokio::spawn(async move {
-            let result = state.build_token_state(address).await;
-            let _ = state
-                .events
-                .send(protocol::ServerMessage::TokenState(Box::new(result)));
+            let cepat = state
+                .build_token_state(address.clone(), crate::pools::ModePencarian::CacheSaja)
+                .await;
+
+            // Cache kosong berarti tidak ada yang bisa ditampilkan lebih awal.
+            // Menyiarkan keadaan kosong justru akan menampilkan pesan "tidak ada
+            // pool" sesaat sebelum hasil sebenarnya datang, dan itu keliru.
+            let punya_isi = !cepat.pools.is_empty();
+            let sidik_awal = sidik_pool(&cepat);
+            if punya_isi {
+                let _ = state
+                    .events
+                    .send(protocol::ServerMessage::TokenState(Box::new(cepat)));
+            }
+
+            let penuh = state
+                .build_token_state(address, crate::pools::ModePencarian::Penuh)
+                .await;
+
+            // Siarkan ulang hanya kalau memang ada bedanya. Panel yang menerima
+            // dua kiriman identik akan menggambar ulang garis chart tanpa
+            // alasan, dan itu terlihat seperti kedipan.
+            if !punya_isi || sidik_pool(&penuh) != sidik_awal {
+                let _ = state
+                    .events
+                    .send(protocol::ServerMessage::TokenState(Box::new(penuh)));
+            }
         });
     }
 
-    async fn build_token_state(&self, address: String) -> protocol::TokenState {
+    async fn build_token_state(
+        &self,
+        address: String,
+        mode: crate::pools::ModePencarian,
+    ) -> protocol::TokenState {
         let mut out = protocol::TokenState {
             address: address.clone(),
             meta: None,
@@ -140,20 +185,37 @@ impl AppState {
             }
         };
 
-        match crate::pools::token_meta(&provider, token).await {
-            Ok(m) => out.meta = Some(m),
+        // Metadata token, pool V3, dan keadaan pool V4 dibaca dalam satu
+        // permintaan. Pasangannya TIDAK ditebak: token bisa berpasangan dengan
+        // stablecoin, ETH asli, atau apa pun. Menebak WETH pernah membuat kita
+        // melaporkan nol pool padahal ada puluhan. Lihat pools::muat_token.
+        let snapshot = match crate::pools::muat_token(
+            &provider,
+            &self.registry,
+            Some(&self.store),
+            token,
+            mode,
+        )
+        .await
+        {
+            Ok(s) => s,
             Err(e) => {
-                // Metadata gagal biasanya berarti alamatnya bukan ERC20. Tidak
-                // ada gunanya melanjutkan ke pencarian pool.
-                out.error = Some(format!("{e}"));
+                out.error = Some(format!("pencarian pool gagal: {e}"));
                 return out;
             }
-        }
+        };
 
-        // Pasangannya TIDAK ditebak. Token bisa berpasangan dengan stablecoin,
-        // ETH asli, atau apa pun. Menebak WETH pernah membuat kita melaporkan
-        // nol pool padahal ada puluhan. Lihat pools::discover_for_token.
-        let groups = crate::pools::discover_for_token(&provider, &self.registry, token).await;
+        // Tanpa desimal, seluruh perhitungan harga salah. Itu biasanya berarti
+        // alamatnya bukan ERC20, dan tidak ada gunanya melanjutkan.
+        let Some(meta) = snapshot.meta else {
+            out.error = Some(format!(
+                "{address} tidak menjawab decimals(), apakah ini ERC20?"
+            ));
+            return out;
+        };
+        out.meta = Some(meta);
+
+        let groups = snapshot.quotes;
 
         if groups.is_empty() {
             out.error = Some(
@@ -189,6 +251,8 @@ impl AppState {
         if let (Some(meta), Some(selected)) = (out.meta.clone(), out.selected_pool_id.clone()) {
             *self.active.write().await = Some(ActiveToken {
                 meta,
+                quotes: groups.clone(),
+                selected_quote: terpilih.quote.clone(),
                 pools: terpilih.pools.clone(),
                 selected_pool_id: selected,
                 // Desimal kutipan ikut pasangan terpilih, bukan diandaikan 18.
@@ -238,6 +302,54 @@ impl AppState {
             // pool lama tidak lagi berlaku apa adanya. Dibiarkan supaya niat
             // user tetap terjaga, dan snap yang menyesuaikannya.
         }
+        self.broadcast_range_view().await;
+    }
+
+    /// Pindah ke pasangan token lawan yang lain.
+    ///
+    /// Tidak menyentuh jaringan sama sekali. Seluruh kelompok sudah ada di
+    /// memori sejak token dimuat, jadi berpindah pasangan hanya memilih
+    /// ulang dari data yang sama. Desimal kutipan ikut berpindah, karena
+    /// itu yang menentukan skala seluruh harga.
+    pub async fn on_select_quote(&self, quote: String) {
+        let keadaan = {
+            let mut guard = self.active.write().await;
+            let Some(active) = guard.as_mut() else { return };
+
+            let Some(kelompok) = active
+                .quotes
+                .iter()
+                .find(|g| g.quote.eq_ignore_ascii_case(&quote))
+                .cloned()
+            else {
+                return;
+            };
+            if kelompok.pools.is_empty() {
+                return;
+            }
+
+            active.selected_quote = kelompok.quote.clone();
+            active.quote_decimals = kelompok.quote_decimals;
+            active.selected_pool_id = kelompok.pools[0].id.clone();
+            active.pools = kelompok.pools.clone();
+            // Batas yang diminta user dinyatakan dalam market cap USD, jadi
+            // ia tetap berlaku setelah berpindah pasangan. Yang berubah
+            // hanya grid tick, dan snap yang menyesuaikannya.
+
+            protocol::TokenState {
+                address: active.meta.address.clone(),
+                meta: Some(active.meta.clone()),
+                quotes: active.quotes.clone(),
+                pools: active.pools.clone(),
+                selected_quote: Some(active.selected_quote.clone()),
+                selected_pool_id: Some(active.selected_pool_id.clone()),
+                error: None,
+            }
+        };
+
+        let _ = self
+            .events
+            .send(protocol::ServerMessage::TokenState(Box::new(keadaan)));
         self.broadcast_range_view().await;
     }
 
@@ -379,3 +491,19 @@ pub const WS_SUBPROTOCOL: &str = "rangefinder";
 
 /// Status HTTP untuk penolakan WebSocket, dipisah supaya bisa diuji.
 pub const WS_UNAUTHORIZED: StatusCode = StatusCode::UNAUTHORIZED;
+
+/// Sidik jari daftar pool, dipakai untuk memutuskan perlu siaran ulang atau tidak.
+///
+/// Harga sengaja TIDAK ikut, karena harga berubah setiap blok dan panel tidak
+/// perlu digambar ulang untuk itu. Yang penting hanya apakah kumpulan pool dan
+/// pilihannya berubah.
+fn sidik_pool(state: &protocol::TokenState) -> String {
+    let mut bagian: Vec<&str> = state.pools.iter().map(|p| p.id.as_str()).collect();
+    bagian.sort_unstable();
+    format!(
+        "{}|{}|{}",
+        state.selected_quote.as_deref().unwrap_or(""),
+        state.selected_pool_id.as_deref().unwrap_or(""),
+        bagian.join(",")
+    )
+}

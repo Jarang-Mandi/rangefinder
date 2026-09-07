@@ -120,6 +120,10 @@ tersandung:
 | Token lawan tidak pernah ditebak | `pools/mod.rs::discover_for_token` | FIG punya 33 pool USDG, 5 pool ETH asli, dan nol pool WETH. Pencarian yang mengandaikan WETH melaporkan token ramai itu tidak punya pool |
 | Desimal kutipan ikut kelompoknya | `pools::QuoteGroup` dan `api/mod.rs` | USDG berdesimal 6. Menganggapnya 18 menggeser seluruh harga 10^12 |
 | Pool fee nol atau di atas 10 persen dibuang | `pools/mod.rs::implausible_fee` | Skor likuiditas dikali fee memenangkan pool fee 80 persen yang tidak pernah ditukar siapa pun, dan pool fee 0 persen memegang likuiditas terbesar sambil membayar LP nol |
+| Cache hanya menyimpan kunci pool | `pools/cache.rs` | PoolKey tidak pernah berubah, harga dan likuiditas berubah tiap blok. Menyimpan harga berarti suatu saat mengirim transaksi berdasarkan angka basi |
+| `scanned_to` hanya maju kalau pemindaian benar benar selesai | `pools::pindai_dan_gabung` | Memajukannya setelah kegagalan berarti blok yang terlewat tidak pernah dipindai lagi, dan poolnya hilang selamanya |
+| Desimal kutipan tidak pernah ditebak | `pools::kenali_quote` | Lawan yang tidak dikenal dibaca on chain, dan kalau gagal kelompoknya dibuang. Menebak 18 pada USDG menggeser harga sepuluh triliun kali |
+| Satu permintaan berat pada satu waktu | `pools::pindai_dan_gabung` | Dua getLogs berbarengan membuat yang kedua kena 429 lalu backoff, dan totalnya lima kali lebih lambat daripada berurutan |
 | Konversi satuan hanya di engine | `range` dan `math` | Panel tidak menghitung apa pun. Angka di layar harus sama persis dengan yang tercatat on chain |
 | Kurs ETH diturunkan dari chart | `math::calibrate_eth_usd` | Sumber luar selalu sedikit meleset dari gmgn, dan garis ikut bergeser |
 | Sisi tampilan bertukar saat memecoin token1 | `range::build_view` | Tick yang lebih besar berarti harga memecoin lebih rendah. Batas atas dan bawah harus ditukar sebelum ditampilkan |

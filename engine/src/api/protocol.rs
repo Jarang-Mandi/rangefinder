@@ -37,6 +37,14 @@ pub enum ClientMessage {
     /// User memilih pool lain dari daftar.
     SelectPool { pool_id: String },
 
+    /// User berpindah ke pasangan token lawan yang lain.
+    ///
+    /// Satu token bisa punya pasar terhadap beberapa token sekaligus, dan
+    /// yang dipilihkan otomatis belum tentu yang diinginkan. Berpindah
+    /// kelompok mengganti daftar pool sekaligus desimal kutipan, jadi ia
+    /// tidak bisa diselesaikan di sisi panel.
+    SelectQuote { quote: String },
+
     /// User menggeser garis. Batasnya dalam market cap USD, satuan chart.
     SetRange { lower_mcap: f64, upper_mcap: f64 },
 }

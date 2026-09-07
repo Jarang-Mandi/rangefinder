@@ -447,6 +447,64 @@ Pool dynamic fee dikecualikan dari aturan ini, karena angka feenya adalah penand
 
 Perintah `cargo xtask pairs <alamat>` menampilkan seluruh rincian ini, termasuk apa yang dibuang beserta alasannya. Penyaringan yang tidak terlihat adalah persis bagaimana bug pasangan WETH bisa bertahan tanpa ketahuan.
 
+### 4.3c Kenapa pool muncul seketika
+
+Zenith LP menampilkan puluhan pool sebuah token tanpa jeda, sedangkan versi pertama Rangefinder butuh 38 detik untuk token yang sama. Selisihnya bukan pada kecerdasan melainkan pada jumlah perjalanan bolak balik ke RPC. Empat perubahan menutup jarak itu, dan semuanya diukur, bukan ditebak.
+
+**Satu, gabungkan panggilan lewat Multicall3.** Membaca `getSlot0` dan `getLiquidity` untuk 39 pool berarti 78 permintaan berurutan. Pada RPC publik dengan latensi sekitar 350 ms itu 25 detik. Multicall3 mengeksekusi seluruhnya dalam satu `eth_call`, dan hasilnya 380 ms. Metadata token, pencarian pool V3, dan pembacaan pool V4 sekarang berada dalam satu batch yang sama.
+
+**Dua, jangan memecah pemindaian log tanpa alasan.** Nilai awal 500.000 blok per permintaan dipilih karena takut ditolak. Pengukuran langsung menunjukkan batas sebenarnya jauh lebih longgar:
+
+| Rentang satu permintaan | Hasil |
+| --- | --- |
+| 3 juta blok | berhasil, 1016 ms |
+| 10 juta blok | `log query timed out` |
+| 48 juta blok | `log query timed out` |
+
+Seluruh jendela mundur muat dalam satu permintaan, jadi memecahnya hanya menambah latensi sekaligus memancing rate limit.
+
+**Tiga, hormati batas laju alih alih melawannya.** Dua arah pemindaian sempat dijalankan berbarengan supaya lebih cepat, dan hasilnya justru lebih lambat:
+
+| Cara | Hasil |
+| --- | --- |
+| berurutan | 1102 ms, keduanya berhasil |
+| berbarengan | yang lolos 658 ms, yang satunya kena 429 lalu diulang, total sekitar 5 detik |
+
+Rantai ini memberi satu permintaan berat pada satu waktu.
+
+**Empat, ingat kunci pool.** PoolKey tidak pernah berubah setelah pool dibuat. Yang berubah hanya harga dan likuiditas. Jadi kunci pool disimpan di redb beserta blok terakhir yang sudah dipindai, dan pemuatan berikutnya cukup membaca keadaan, satu permintaan.
+
+Konsekuensinya panel memuat dua tahap, dan `token_state` bisa datang dua kali:
+
+| Tahap | Yang dilakukan | Biaya |
+| --- | --- | --- |
+| 1 | Baca keadaan pool yang kuncinya sudah tersimpan. Tidak menyentuh log sama sekali | satu permintaan, sekitar 400 ms |
+| 2 | Pindai blok yang belum pernah dilihat, gabungkan, baca ulang | dua sampai tiga permintaan |
+
+Kiriman kedua hanya terjadi kalau kumpulan poolnya benar benar berubah. Panel yang menerima dua kiriman identik akan menggambar ulang garis chart tanpa alasan, dan itu terlihat seperti kedipan.
+
+Token yang belum pernah dibuka tidak punya tahap satu, dan itu memang tidak bisa dihindari: pool V4 hanya bisa ditemukan lewat log, dan log harus dipindai sekali.
+
+**Yang tidak pernah di-cache adalah harga dan likuiditas.** Keduanya selalu dibaca ulang dari rantai. Pada alat yang mengirim transaksi, angka basi yang terlihat sah jauh lebih berbahaya daripada menunggu sebentar.
+
+**Hasil terukur** pada FIG di `0xdc4Dd883...`, 39 pool:
+
+| Keadaan | Waktu sampai panel punya isi |
+| --- | --- |
+| versi pertama | 38 detik |
+| setelah Multicall3 | 23,8 detik |
+| setelah rentang log diperlebar | 15,1 detik |
+| setelah pemindaian diserialkan | sekitar 3 detik |
+| dengan kunci pool tersimpan | 400 sampai 700 ms |
+
+### 4.3d Berpindah pasangan tanpa memindai ulang
+
+Seluruh kelompok pasangan disimpan di memori sejak token dimuat, bukan hanya yang terpilih. Menekan pasangan lain di panel mengirim `select_quote`, dan engine memilih ulang dari data yang sama tanpa satu pun permintaan jaringan.
+
+Yang ikut berpindah bukan hanya daftar pool, tapi juga desimal kutipan, dan itu alasan kenapa perpindahan ini tidak boleh diselesaikan di sisi panel. ETH berdesimal 18 sedangkan USDG berdesimal 6, jadi salah membawa desimal menggeser seluruh harga sebesar sepuluh pangkat dua belas.
+
+Token lawan yang tidak ada di `chain.toml` dibaca desimalnya on chain, tidak pernah ditebak 18. Kalau pembacaannya gagal, kelompok itu dibuang alih alih ditampilkan dengan harga yang salah.
+
 ### 4.4 Degradasi bertingkat
 
 Rangefinder bergantung pada internal pihak ketiga yang bisa berubah kapan saja. Empat tingkat, turun otomatis:
@@ -897,6 +955,7 @@ Panel ke engine:
 | `subscribe_token` | `{ address }` | 2 |
 | `chart_price` | `{ address, mcapUsd }`, market cap yang sedang ditampilkan chart. Inilah yang mengkalibrasi kurs ETH ke USD | 2 |
 | `select_pool` | `{ poolId }`, user memilih pool lain dari daftar | 2 |
+| `select_quote` | `{ quote }`, user berpindah ke pasangan token lawan yang lain. Tidak menyentuh jaringan, seluruh kelompok sudah ada di memori sejak token dimuat | 2 |
 | `set_range` | `{ lowerMcap, upperMcap }`, user menggeser garis. Batas dalam market cap USD karena itu satuan chart | 2 |
 | `quote_range` | `{ pool, tickLower, tickUpper, sizeUsd, sourceToken }` | 3 |
 | `open_position` | `{ quoteId }` | 3 |
@@ -913,7 +972,7 @@ Engine ke panel:
 | `engine_status` | `{ engineVersion, uptimeSecs, chain, wallet, registry, canExecute, blockedReasons[] }` | 1 |
 | `pong` | balasan denyut | 1 |
 | `alert` | `{ level, code, message, positionId }` | 1 |
-| `token_state` | `{ address, meta, quotes[], pools[], selectedQuote, selectedPoolId, error }`, jawaban atas `subscribe_token`. `quotes` mengelompokkan pool menurut token lawan, karena satu token bisa berpasangan dengan beberapa token sekaligus. `pools` adalah kelompok terpilih yang diratakan. Semuanya sudah disaring: pool tanpa likuiditas, pool berfee mustahil, dan pool tanpa fee tidak pernah ikut | 2 |
+| `token_state` | `{ address, meta, quotes[], pools[], selectedQuote, selectedPoolId, error }`. Setiap `quote` membawa `{ quote, quoteSymbol, quoteDecimals, canonical, pools[] }`. Dikirim dua kali saat memuat: sekali cepat dari kunci pool yang tersimpan, sekali lagi setelah pemindaian selesai kalau ada yang berubah. Lihat 4.3c | 2 |
 | `range_view` | `{ poolId, tickSpacing, ethUsd, current, lower, upper, widthPct, inRange, warnings[] }`. Tiap batas memuat `tick`, `priceWeth`, `priceUsd`, `mcapUsd`, dan `driftBps`, yaitu selisih akibat pembulatan ke grid tick | 2 |
 | `price_tick` | `{ address, priceUsd, priceWeth, mcapUsd }` | 2 |
 | `range_quote` | `{ quoteId, feeApr, expectedHoursInRange, ilBreakevenHours, crowdedLiquidityUsd, ourSharePct, amount0, amount1, swapNeeded, priceImpact, gasEstimate, warnings[] }` | 3 |

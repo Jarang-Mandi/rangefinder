@@ -29,6 +29,11 @@ use rangefinder_engine::chain::{registry_gate, ChainClient, RegistryStatus};
 use rangefinder_engine::config::Config;
 
 fn main() -> Result<()> {
+    // Tanpa ini, setiap tracing::warn di dalam engine hilang tanpa jejak saat
+    // dipanggil dari xtask. Itu persis bagaimana bug pasangan WETH bisa
+    // melaporkan nol pool tanpa satu pun pesan. Lihat memory/003 dan 005.
+    rangefinder_engine::telemetry::init();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str).unwrap_or("verify");
     let pin = args.iter().any(|a| a == "--pin");

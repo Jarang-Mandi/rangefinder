@@ -14,6 +14,7 @@
 //! - Alamat kontrak tidak pernah ditulis di sini, semuanya lewat `registry`.
 
 pub mod abi;
+pub mod cache;
 
 use alloy::primitives::{Address, FixedBytes, U256};
 use alloy::providers::Provider;
@@ -75,10 +76,20 @@ pub const MAX_PLAUSIBLE_FEE: u32 = 100_000;
 /// Pool fee nol yang ditemukan pada FIG bahkan punya likuiditas sangat besar,
 /// yang membuatnya menang telak di pemeringkatan mana pun yang tidak menyaring.
 pub fn implausible_fee(p: &PoolInfo) -> bool {
-    if p.dynamic_fee {
+    implausible_fee_raw(p.fee)
+}
+
+/// Sama seperti `implausible_fee`, tapi bekerja langsung dari angka fee.
+///
+/// Dipakai sebelum PoolInfo terbentuk, yaitu saat memutuskan pool mana yang
+/// perlu dibaca keadaannya. Fee adalah bagian dari PoolKey dan tidak pernah
+/// berubah, jadi pool berfee mustahil tidak akan pernah menjadi layak, dan
+/// membacanya hanya memperlambat tanpa mengubah hasil apa pun.
+pub fn implausible_fee_raw(fee: u32) -> bool {
+    if fee & DYNAMIC_FEE_FLAG != 0 {
         return false;
     }
-    p.fee == 0 || p.fee > MAX_PLAUSIBLE_FEE
+    fee == 0 || fee > MAX_PLAUSIBLE_FEE
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -130,6 +141,91 @@ pub fn raw_price_from_sqrt_x96(sqrt_price_x96: U256) -> f64 {
     ratio * ratio
 }
 
+/// Baca metadata beberapa token sekaligus dalam satu permintaan.
+///
+/// Hasilnya sejajar dengan masukan. Token yang tidak menjawab `decimals()`
+/// dikembalikan sebagai `None`, karena tanpa desimal seluruh perhitungan harga
+/// menjadi salah dan menebaknya 18 lebih berbahaya daripada mengaku tidak tahu.
+///
+/// Simbol boleh gagal. Banyak memecoin memakai `bytes32` alih alih `string`,
+/// dan itu bukan alasan untuk menolak tokennya.
+pub async fn token_meta_batch<P: Provider>(
+    provider: &P,
+    registry: &Registry,
+    alamat: &[Address],
+) -> Result<Vec<Option<TokenMeta>>> {
+    if alamat.is_empty() {
+        return Ok(Vec::new());
+    }
+    let multicall = registry.contract("common", "multicall3")?;
+
+    let mut calls = Vec::with_capacity(alamat.len() * 3);
+    for a in alamat {
+        calls.push(crate::chain::multicall::encode(
+            *a,
+            &abi::IERC20::decimalsCall {},
+        ));
+        calls.push(crate::chain::multicall::encode(
+            *a,
+            &abi::IERC20::totalSupplyCall {},
+        ));
+        calls.push(crate::chain::multicall::encode(
+            *a,
+            &abi::IERC20::symbolCall {},
+        ));
+    }
+
+    let hasil = crate::chain::multicall::batch_call(provider, multicall, calls).await?;
+
+    let mut out = Vec::with_capacity(alamat.len());
+    for (i, a) in alamat.iter().enumerate() {
+        let decimals = crate::chain::multicall::decode::<abi::IERC20::decimalsCall>(
+            hasil.get(i * 3).and_then(|x| x.as_ref()),
+        );
+        let Some(decimals) = decimals else {
+            out.push(None);
+            continue;
+        };
+        let supply = crate::chain::multicall::decode::<abi::IERC20::totalSupplyCall>(
+            hasil.get(i * 3 + 1).and_then(|x| x.as_ref()),
+        );
+        let symbol = crate::chain::multicall::decode::<abi::IERC20::symbolCall>(
+            hasil.get(i * 3 + 2).and_then(|x| x.as_ref()),
+        )
+        .unwrap_or_else(|| "?".to_string());
+
+        let divisor = 10f64.powi(decimals as i32);
+        let total_supply = supply
+            .map(|s| s.to_string().parse::<f64>().unwrap_or(f64::NAN) / divisor)
+            .unwrap_or(f64::NAN);
+
+        out.push(Some(TokenMeta {
+            address: a.to_string(),
+            symbol,
+            decimals,
+            total_supply,
+        }));
+    }
+
+    Ok(out)
+}
+
+/// Baca metadata satu token.
+///
+/// Lewat jalur batch supaya hanya ada satu tempat yang tahu cara membaca ERC20,
+/// dan supaya biayanya satu round trip, bukan tiga.
+pub async fn token_meta_via<P: Provider>(
+    provider: &P,
+    registry: &Registry,
+    address: Address,
+) -> Result<TokenMeta> {
+    let mut hasil = token_meta_batch(provider, registry, &[address]).await?;
+    hasil
+        .pop()
+        .flatten()
+        .with_context(|| format!("{address} tidak menjawab decimals(), apakah ini ERC20?"))
+}
+
 pub async fn token_meta<P: Provider>(provider: &P, address: Address) -> Result<TokenMeta> {
     let erc20 = abi::IERC20::new(address, provider);
 
@@ -173,68 +269,148 @@ pub async fn discover_v3<P: Provider>(
     token_a: Address,
     token_b: Address,
 ) -> Result<Vec<PoolInfo>> {
-    let factory_address = registry.contract("uniswap_v3", "factory")?;
-    let factory = abi::IUniswapV3Factory::new(factory_address, provider);
+    discover_v3_multi(provider, registry, token_a, &[token_b]).await
+}
 
-    let mut out = Vec::new();
+/// Cari pool V3 untuk satu token terhadap banyak token kutipan sekaligus.
+///
+/// KENAPA VERSI BANYAK SEKALIGUS
+/// Versi lama memanggil `getPool` empat kali lalu membaca lima properti per
+/// pool, semuanya berurutan. Untuk dua token kutipan itu sudah 8 sampai 30
+/// permintaan hanya untuk V3, dan pada RPC publik dengan latensi 300 ms artinya
+/// beberapa detik yang sepenuhnya bisa dihindari.
+///
+/// Sekarang seluruh pencarian muat dalam dua permintaan: satu untuk menanyakan
+/// alamat semua pool, satu lagi untuk membaca keadaan pool yang ternyata ada.
+pub async fn discover_v3_multi<P: Provider>(
+    provider: &P,
+    registry: &Registry,
+    token: Address,
+    quotes: &[Address],
+) -> Result<Vec<PoolInfo>> {
+    if quotes.is_empty() {
+        return Ok(Vec::new());
+    }
 
-    for fee in V3_FEE_TIERS {
-        // `uint24` di ABI memetakan ke U24, bukan u32, jadi konversinya eksplisit.
-        let fee_u24 = alloy::primitives::aliases::U24::from(fee);
-        let pool_address = match factory.getPool(token_a, token_b, fee_u24).call().await {
-            Ok(a) => a,
-            Err(e) => {
-                tracing::debug!(fee, error = %e, "getPool gagal, fee tier dilewati");
-                continue;
-            }
-        };
-        if pool_address.is_zero() {
+    let factory = registry.contract("uniswap_v3", "factory")?;
+    let multicall = registry.contract("common", "multicall3")?;
+
+    let mut tanya = Vec::with_capacity(quotes.len() * V3_FEE_TIERS.len());
+    let mut label: Vec<u32> = Vec::with_capacity(tanya.capacity());
+    for quote in quotes {
+        for fee in V3_FEE_TIERS {
+            tanya.push(crate::chain::multicall::encode(
+                factory,
+                &abi::IUniswapV3Factory::getPoolCall {
+                    tokenA: token,
+                    tokenB: *quote,
+                    // `uint24` di ABI memetakan ke U24, bukan u32.
+                    fee: alloy::primitives::aliases::U24::from(fee),
+                },
+            ));
+            label.push(fee);
+        }
+    }
+
+    let jawaban = crate::chain::multicall::batch_call(provider, multicall, tanya).await?;
+
+    let mut ada: Vec<(Address, u32)> = Vec::new();
+    for (i, fee) in label.into_iter().enumerate() {
+        let Some(alamat) = crate::chain::multicall::decode::<abi::IUniswapV3Factory::getPoolCall>(
+            jawaban.get(i).and_then(|x| x.as_ref()),
+        ) else {
             continue;
+        };
+        // Alamat nol berarti fee tier itu memang belum pernah dibuat. Keadaan
+        // normal, bukan kegagalan.
+        if !alamat.is_zero() {
+            ada.push((alamat, fee));
         }
+    }
 
-        match read_v3_pool(provider, pool_address, fee).await {
-            Ok(info) => out.push(info),
-            Err(e) => tracing::warn!(pool = %pool_address, error = %e, "pool V3 gagal dibaca"),
-        }
+    hydrate_v3(provider, multicall, ada).await
+}
+
+/// Baca keadaan setiap pool V3 dalam satu permintaan.
+///
+/// Lima properti per pool, semuanya dalam batch yang sama. Pool yang salah satu
+/// propertinya tidak terbaca dilewati seluruhnya, karena PoolInfo yang separuh
+/// terisi lebih berbahaya daripada pool yang tidak ditampilkan: harga nol akan
+/// lolos penyaring lalu muncul di panel sebagai angka yang terlihat sah.
+async fn hydrate_v3<P: Provider>(
+    provider: &P,
+    multicall: Address,
+    pools: Vec<(Address, u32)>,
+) -> Result<Vec<PoolInfo>> {
+    if pools.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    const PER_POOL: usize = 5;
+    let mut calls = Vec::with_capacity(pools.len() * PER_POOL);
+    for (alamat, _) in &pools {
+        let a = *alamat;
+        calls.push(crate::chain::multicall::encode(
+            a,
+            &abi::IUniswapV3Pool::slot0Call {},
+        ));
+        calls.push(crate::chain::multicall::encode(
+            a,
+            &abi::IUniswapV3Pool::liquidityCall {},
+        ));
+        calls.push(crate::chain::multicall::encode(
+            a,
+            &abi::IUniswapV3Pool::token0Call {},
+        ));
+        calls.push(crate::chain::multicall::encode(
+            a,
+            &abi::IUniswapV3Pool::token1Call {},
+        ));
+        calls.push(crate::chain::multicall::encode(
+            a,
+            &abi::IUniswapV3Pool::tickSpacingCall {},
+        ));
+    }
+
+    let hasil = crate::chain::multicall::batch_call(provider, multicall, calls).await?;
+    let ambil = |i: usize| hasil.get(i).and_then(|x| x.as_ref());
+
+    let mut out = Vec::with_capacity(pools.len());
+    for (n, (alamat, fee)) in pools.into_iter().enumerate() {
+        let dasar = n * PER_POOL;
+        let (Some(slot0), Some(liquidity), Some(token0), Some(token1), Some(tick_spacing)) = (
+            crate::chain::multicall::decode::<abi::IUniswapV3Pool::slot0Call>(ambil(dasar)),
+            crate::chain::multicall::decode::<abi::IUniswapV3Pool::liquidityCall>(ambil(dasar + 1)),
+            crate::chain::multicall::decode::<abi::IUniswapV3Pool::token0Call>(ambil(dasar + 2)),
+            crate::chain::multicall::decode::<abi::IUniswapV3Pool::token1Call>(ambil(dasar + 3)),
+            crate::chain::multicall::decode::<abi::IUniswapV3Pool::tickSpacingCall>(
+                ambil(dasar + 4),
+            ),
+        ) else {
+            tracing::warn!(pool = %alamat, "pool V3 tidak terbaca lengkap, dilewati");
+            continue;
+        };
+
+        let sqrt = U256::from(slot0.sqrtPriceX96);
+        out.push(PoolInfo {
+            version: PoolVersion::V3,
+            id: alamat.to_string(),
+            token0: token0.to_string(),
+            token1: token1.to_string(),
+            fee,
+            dynamic_fee: false,
+            tick_spacing: tick_spacing.as_i32(),
+            hooks: None,
+            sqrt_price_x96: sqrt.to_string(),
+            tick: slot0.tick.as_i32(),
+            liquidity: liquidity.to_string(),
+            raw_price: raw_price_from_sqrt_x96(sqrt),
+        });
     }
 
     Ok(out)
 }
 
-async fn read_v3_pool<P: Provider>(
-    provider: &P,
-    address: Address,
-    fee: u32,
-) -> Result<PoolInfo> {
-    let pool = abi::IUniswapV3Pool::new(address, provider);
-
-    let slot0 = pool.slot0().call().await.context("slot0() gagal")?;
-    let liquidity = pool.liquidity().call().await.context("liquidity() gagal")?;
-    let token0 = pool.token0().call().await.context("token0() gagal")?;
-    let token1 = pool.token1().call().await.context("token1() gagal")?;
-    let tick_spacing = pool
-        .tickSpacing()
-        .call()
-        .await
-        .context("tickSpacing() gagal")?;
-
-    let sqrt = U256::from(slot0.sqrtPriceX96);
-
-    Ok(PoolInfo {
-        version: PoolVersion::V3,
-        id: address.to_string(),
-        token0: token0.to_string(),
-        token1: token1.to_string(),
-        fee,
-        dynamic_fee: false,
-        tick_spacing: tick_spacing.as_i32(),
-        hooks: None,
-        sqrt_price_x96: sqrt.to_string(),
-        tick: slot0.tick.as_i32(),
-        liquidity: liquidity.to_string(),
-        raw_price: raw_price_from_sqrt_x96(sqrt),
-    })
-}
 
 /// Cari pool V4 dengan memindai event `Initialize` milik PoolManager.
 ///
@@ -317,87 +493,646 @@ pub async fn discover_v4<P: Provider>(
     Ok(out)
 }
 
-/// Cari pool V4 untuk satu token, TANPA mengandaikan pasangannya.
+/// Seluruh yang panel butuhkan tentang satu token.
+#[derive(Debug, Clone)]
+pub struct TokenSnapshot {
+    pub meta: Option<TokenMeta>,
+    pub quotes: Vec<QuoteGroup>,
+}
+
+/// Muat metadata token dan seluruh poolnya dengan permintaan sesedikit mungkin.
 ///
-/// KENAPA INI ADA
-/// `discover_v4` menyaring dua currency sekaligus, jadi ia hanya menemukan
-/// pool kalau kita sudah menebak benar token lawannya. Tebakan itu ternyata
-/// sering salah: banyak memecoin di chain ini berpasangan dengan stablecoin,
-/// bukan WETH, dan hasilnya kita melaporkan tidak ada pool padahal ada puluhan.
+/// KENAPA SATU FUNGSI, BUKAN TIGA PANGGILAN TERPISAH
+/// Membaca metadata, menanyakan pool V3, dan membaca keadaan pool V4 adalah
+/// tiga hal yang tidak saling bergantung. Dijalankan terpisah, masing masing
+/// membayar satu perjalanan bolak balik ke RPC publik, sekitar 350 ms setiap
+/// kali, dan panel menunggu lebih dari satu detik untuk pekerjaan yang
+/// sebenarnya bisa selesai dalam satu permintaan.
 ///
-/// Fungsi ini memindai dua kali, sekali dengan token pada posisi currency0 dan
-/// sekali pada currency1, lalu menggabungkan hasilnya. Token lawannya ikut
-/// terbaca dari log, jadi tidak perlu diketahui lebih dulu.
-pub async fn discover_v4_any<P: Provider>(
+/// Multicall3 mengeksekusi semuanya di dalam satu `eth_call`, jadi urutannya
+/// tidak lagi berarti biaya. Yang tersisa hanya satu permintaan lanjutan, dan
+/// itu pun hanya kalau pool V3 benar benar ada.
+///
+/// Pada mode `CacheSaja` fungsi ini tidak menyentuh log sama sekali, sehingga
+/// seluruh pemuatan ulang sebuah token yang pernah dibuka berbiaya satu
+/// permintaan.
+pub async fn muat_token<P: Provider>(
+    provider: &P,
+    registry: &Registry,
+    store: Option<&crate::store::Store>,
+    token: Address,
+    mode: ModePencarian,
+) -> Result<TokenSnapshot> {
+    let state_view = registry.contract("uniswap_v4", "state_view")?;
+    let multicall = registry.contract("common", "multicall3")?;
+    let factory_v3 = registry.contract("uniswap_v3", "factory")?;
+    let alamat_token = token.to_string();
+
+    // Pemindaian log hanya terjadi pada mode penuh, dan hasilnya langsung
+    // digabung ke cache. Setelah ini, kunci pool untuk kedua mode sama saja.
+    let kunci = match mode {
+        ModePencarian::CacheSaja => store
+            .map(|s| cache::baca(s, &alamat_token).keys)
+            .unwrap_or_default(),
+        ModePencarian::Penuh => pindai_dan_gabung(provider, registry, store, token).await?,
+    };
+
+    let quotes: Vec<Address> = registry
+        .tokens
+        .values()
+        .filter_map(|e| {
+            let a = e.address.parse::<Address>().ok()?;
+            (a != token).then_some(a)
+        })
+        .collect();
+
+    // Satu batch untuk tiga urusan sekaligus. Urutannya dicatat lewat penanda
+    // di bawah, bukan dihitung ulang di tempat lain, supaya menambah panggilan
+    // baru tidak diam diam menggeser indeks yang sudah ada.
+    let mut calls = Vec::new();
+
+    let awal_meta = calls.len();
+    calls.push(crate::chain::multicall::encode(
+        token,
+        &abi::IERC20::decimalsCall {},
+    ));
+    calls.push(crate::chain::multicall::encode(
+        token,
+        &abi::IERC20::totalSupplyCall {},
+    ));
+    calls.push(crate::chain::multicall::encode(
+        token,
+        &abi::IERC20::symbolCall {},
+    ));
+
+    let awal_v3 = calls.len();
+    let mut label_v3: Vec<u32> = Vec::new();
+    for quote in &quotes {
+        for fee in V3_FEE_TIERS {
+            calls.push(crate::chain::multicall::encode(
+                factory_v3,
+                &abi::IUniswapV3Factory::getPoolCall {
+                    tokenA: token,
+                    tokenB: *quote,
+                    fee: alloy::primitives::aliases::U24::from(fee),
+                },
+            ));
+            label_v3.push(fee);
+        }
+    }
+
+    let awal_v4 = calls.len();
+    let mut kunci_terpakai: Vec<cache::PoolKeyRecord> = Vec::with_capacity(kunci.len());
+    let mut dilewati_fee = 0usize;
+    for k in kunci {
+        // Fee bagian dari PoolKey dan tidak pernah berubah, jadi pool berfee
+        // mustahil tidak akan pernah menjadi layak. Membacanya hanya menambah
+        // dua panggilan per pool tanpa mengubah hasil.
+        if implausible_fee_raw(k.fee) {
+            dilewati_fee += 1;
+            continue;
+        }
+        let Ok(id) = k.id.parse::<FixedBytes<32>>() else {
+            tracing::warn!(id = %k.id, "poolId di cache tidak berbentuk bytes32, dilewati");
+            continue;
+        };
+        calls.push(crate::chain::multicall::encode(
+            state_view,
+            &abi::IStateView::getSlot0Call { poolId: id },
+        ));
+        calls.push(crate::chain::multicall::encode(
+            state_view,
+            &abi::IStateView::getLiquidityCall { poolId: id },
+        ));
+        kunci_terpakai.push(k);
+    }
+
+    if dilewati_fee > 0 {
+        tracing::debug!(
+            dilewati_fee,
+            "pool berfee mustahil tidak dibaca keadaannya"
+        );
+    }
+
+    let jam = std::time::Instant::now();
+    let hasil = crate::chain::multicall::batch_call(provider, multicall, calls).await?;
+    tracing::debug!(
+        ms = jam.elapsed().as_millis(),
+        panggilan = hasil.len(),
+        "batch gabungan selesai"
+    );
+
+    let ambil = |i: usize| hasil.get(i).and_then(|x| x.as_ref());
+
+    // Metadata. Tanpa desimal, seluruh perhitungan harga salah, jadi token
+    // seperti itu diperlakukan sebagai bukan ERC20 alih alih ditebak 18.
+    let meta = crate::chain::multicall::decode::<abi::IERC20::decimalsCall>(ambil(awal_meta)).map(
+        |decimals| {
+            let supply = crate::chain::multicall::decode::<abi::IERC20::totalSupplyCall>(
+                ambil(awal_meta + 1),
+            );
+            let symbol =
+                crate::chain::multicall::decode::<abi::IERC20::symbolCall>(ambil(awal_meta + 2))
+                    .unwrap_or_else(|| "?".to_string());
+            let divisor = 10f64.powi(decimals as i32);
+            TokenMeta {
+                address: alamat_token.clone(),
+                symbol,
+                decimals,
+                total_supply: supply
+                    .map(|s| s.to_string().parse::<f64>().unwrap_or(f64::NAN) / divisor)
+                    .unwrap_or(f64::NAN),
+            }
+        },
+    );
+
+    // Pool V3 yang ternyata ada. Alamat nol berarti fee tier itu memang belum
+    // pernah dibuat, keadaan normal.
+    let mut v3_ada: Vec<(Address, u32)> = Vec::new();
+    for (i, fee) in label_v3.into_iter().enumerate() {
+        let Some(alamat) = crate::chain::multicall::decode::<abi::IUniswapV3Factory::getPoolCall>(
+            ambil(awal_v3 + i),
+        ) else {
+            continue;
+        };
+        if !alamat.is_zero() {
+            v3_ada.push((alamat, fee));
+        }
+    }
+
+    let mut semua = baca_v4_dari_batch(&hasil, awal_v4, kunci_terpakai);
+
+    // Permintaan kedua hanya kalau ada yang perlu dibaca. Pada rantai ini V3
+    // umumnya kosong, jadi biaya ini biasanya nol.
+    if !v3_ada.is_empty() {
+        match hydrate_v3(provider, multicall, v3_ada).await {
+            Ok(mut v) => semua.append(&mut v),
+            Err(e) => tracing::warn!(error = %e, "pembacaan pool V3 gagal"),
+        }
+    }
+
+    // Token lawan yang tidak ada di chain.toml dibaca on chain, bukan
+    // ditebak. Salinan FIG di 0x41F4... berpasangan dengan tiga puluh token
+    // berbeda, dan menganggap semuanya berdesimal 18 akan menampilkan harga
+    // yang meleset sepuluh pangkat selisihnya untuk setiap pasangan yang
+    // ternyata memakai 6.
+    let dikenal = kenali_lawan_asing(provider, registry, token, &semua).await;
+
+    Ok(TokenSnapshot {
+        meta,
+        quotes: kelompokkan(semua, token, registry, &dikenal),
+    })
+}
+
+/// Baca simbol dan desimal token lawan yang belum dikenal registry.
+///
+/// Satu permintaan untuk semuanya sekaligus. Kalau pembacaannya gagal, token
+/// itu tidak masuk hasil, dan `kelompokkan` akan membuang kelompoknya. Itu
+/// disengaja: pasangan yang desimalnya tidak diketahui tidak bisa dihargai
+/// dengan benar, dan menampilkan harga salah lebih buruk daripada diam.
+async fn kenali_lawan_asing<P: Provider>(
     provider: &P,
     registry: &Registry,
     token: Address,
-) -> Result<Vec<PoolInfo>> {
+    pools: &[PoolInfo],
+) -> std::collections::HashMap<String, TokenMeta> {
+    let t = token.to_string().to_lowercase();
+    let mut asing: Vec<Address> = Vec::new();
+    let mut terlihat: std::collections::HashSet<String> = Default::default();
+
+    for p in pools {
+        let lawan = if p.token0.to_lowercase() == t {
+            &p.token1
+        } else if p.token1.to_lowercase() == t {
+            &p.token0
+        } else {
+            continue;
+        };
+        let kecil = lawan.to_lowercase();
+        if kecil == ZERO_ADDRESS {
+            continue;
+        }
+        if registry
+            .tokens
+            .values()
+            .any(|e| e.address.eq_ignore_ascii_case(lawan))
+        {
+            continue;
+        }
+        if terlihat.insert(kecil) {
+            if let Ok(a) = lawan.parse::<Address>() {
+                asing.push(a);
+            }
+        }
+    }
+
+    if asing.is_empty() {
+        return Default::default();
+    }
+
+    match token_meta_batch(provider, registry, &asing).await {
+        Ok(hasil) => asing
+            .iter()
+            .zip(hasil)
+            .filter_map(|(a, m)| Some((a.to_string().to_lowercase(), m?)))
+            .collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, jumlah = asing.len(), "token lawan asing gagal dibaca");
+            Default::default()
+        }
+    }
+}
+
+/// Pindai log yang belum pernah dilihat lalu gabungkan ke cache.
+///
+/// Mengembalikan seluruh kunci yang diketahui, lama maupun baru.
+async fn pindai_dan_gabung<P: Provider>(
+    provider: &P,
+    registry: &Registry,
+    store: Option<&crate::store::Store>,
+    token: Address,
+) -> Result<Vec<cache::PoolKeyRecord>> {
     let pool_manager = registry.contract("uniswap_v4", "pool_manager")?;
-    let state_view = registry.contract("uniswap_v4", "state_view")?;
-    let view = abi::IStateView::new(state_view, provider);
+    let alamat_token = token.to_string();
 
     let latest = provider
         .get_block_number()
         .await
         .context("gagal membaca blok terakhir")?;
 
-    let mut out = Vec::new();
-    let mut terlihat: Vec<String> = Vec::new();
+    let tersimpan = store
+        .map(|s| cache::baca(s, &alamat_token))
+        .unwrap_or_default();
 
-    // Urutan currency ditentukan alamat, dan kita tidak tahu token ini yang
-    // lebih kecil atau lebih besar, jadi kedua posisi harus dicoba.
-    for sebagai_currency0 in [true, false] {
-        // Batas bawah adalah jendela mundur, bukan deploy_block, karena pool
-        // yang dicari selalu yang baru. Tidak pernah turun di bawah blok
-        // pemasangan protokol.
-        let batas_bawah = latest
-            .saturating_sub(SCAN_LOOKBACK_DEFAULT)
-            .max(registry.chain.deploy_block);
+    // Jendela mundur, bukan deploy_block, karena pool yang dicari selalu yang
+    // baru. Tidak pernah turun di bawah blok pemasangan protokol.
+    let jendela = latest
+        .saturating_sub(SCAN_LOOKBACK_DEFAULT)
+        .max(registry.chain.deploy_block);
 
-        let logs = scan_initialize_logs(
-            provider,
-            pool_manager,
-            token,
-            sebagai_currency0,
-            batas_bawah,
-            latest,
-        )
-        .await?;
+    // Kalau cache masih menyambung dengan jendela sekarang, cukup pindai blok
+    // yang belum pernah dilihat. Kalau ia sudah tertinggal jauh, jendela penuh
+    // dipindai lagi, karena melompati blok berarti kehilangan pool selamanya.
+    let bersambung = tersimpan.scanned_to > 0 && tersimpan.scanned_to + 1 >= jendela;
+    let batas_bawah = if bersambung {
+        (tersimpan.scanned_to + 1).min(latest)
+    } else {
+        jendela
+    };
 
-        for log in logs {
+    let mut baru: Vec<cache::PoolKeyRecord> = Vec::new();
+
+    if batas_bawah <= latest {
+        // KENAPA BERURUTAN, BUKAN BERBARENGAN
+        // Dua pemindaian ini pernah dijalankan berbarengan, dan hasilnya justru
+        // lebih lambat. RPC publik membalas 429 untuk yang kedua, lalu lapisan
+        // percobaan ulang menunggu sebelum mengulang. Diukur langsung pada
+        // jendela tiga juta blok:
+        //
+        //   berurutan   1102 ms, keduanya berhasil
+        //   berbarengan  658 ms untuk yang lolos, yang satunya kena 429 lalu
+        //                diulang, sehingga totalnya sekitar 5 detik
+        //
+        // Rantai ini memberi satu permintaan berat pada satu waktu. Menghormati
+        // itu lebih cepat daripada melawannya.
+        let jam = std::time::Instant::now();
+        let sebagai0 =
+            scan_initialize_logs(provider, pool_manager, token, true, batas_bawah, latest).await?;
+        let sebagai1 =
+            scan_initialize_logs(provider, pool_manager, token, false, batas_bawah, latest).await?;
+        tracing::debug!(
+            ms = jam.elapsed().as_millis(),
+            blok = latest - batas_bawah + 1,
+            inkremental = bersambung,
+            "pemindaian log selesai"
+        );
+
+        for log in sebagai0.into_iter().chain(sebagai1) {
             let Ok(decoded) = abi::Initialize::decode_log(&log.inner) else {
                 continue;
             };
-            let pool_id: FixedBytes<32> = decoded.id;
-            let id = format!("0x{}", hex::encode(pool_id));
-            if terlihat.contains(&id) {
-                continue;
-            }
-            terlihat.push(id.clone());
-
-            let Ok(slot0) = view.getSlot0(pool_id).call().await else {
-                continue;
-            };
-            let liquidity = view.getLiquidity(pool_id).call().await.unwrap_or(0);
-            let sqrt = U256::from(slot0.sqrtPriceX96);
-            let fee = decoded.fee.to::<u32>();
-
-            out.push(PoolInfo {
-                version: PoolVersion::V4,
-                id,
-                token0: decoded.currency0.to_string(),
-                token1: decoded.currency1.to_string(),
-                fee,
-                dynamic_fee: fee & DYNAMIC_FEE_FLAG != 0,
+            baru.push(cache::PoolKeyRecord {
+                id: format!("0x{}", hex::encode(decoded.id)),
+                currency0: decoded.currency0.to_string(),
+                currency1: decoded.currency1.to_string(),
+                fee: decoded.fee.to::<u32>(),
                 tick_spacing: decoded.tickSpacing.as_i32(),
-                hooks: Some(decoded.hooks.to_string()),
-                sqrt_price_x96: sqrt.to_string(),
-                tick: slot0.tick.as_i32(),
-                liquidity: liquidity.to_string(),
-                raw_price: raw_price_from_sqrt_x96(sqrt),
+                hooks: decoded.hooks.to_string(),
             });
         }
+    }
+
+    // `scanned_to` hanya maju kalau pemindaiannya benar benar selesai. Kalau
+    // ada yang gagal, fungsi ini sudah kembali dengan error di atas.
+    Ok(match store {
+        Some(s) => cache::gabung(s, &alamat_token, tersimpan, baru, latest).keys,
+        None => {
+            let mut k = tersimpan.keys;
+            k.extend(baru);
+            k
+        }
+    })
+}
+
+/// Rakit `PoolInfo` V4 dari hasil batch gabungan.
+///
+/// Kegagalan per pool tidak dipalsukan menjadi nol. Likuiditas nol palsu akan
+/// membuat pool sehat terbuang oleh penyaring seolah olah ia memang kosong.
+/// Lihat memory/003.
+fn baca_v4_dari_batch(
+    hasil: &[Option<alloy::primitives::Bytes>],
+    awal: usize,
+    kunci: Vec<cache::PoolKeyRecord>,
+) -> Vec<PoolInfo> {
+    let ambil = |i: usize| hasil.get(i).and_then(|x| x.as_ref());
+    let mut out = Vec::with_capacity(kunci.len());
+    let mut gagal = 0usize;
+
+    for (n, k) in kunci.into_iter().enumerate() {
+        let dasar = awal + n * 2;
+        let (Some(slot0), Some(liquidity)) = (
+            crate::chain::multicall::decode::<abi::IStateView::getSlot0Call>(ambil(dasar)),
+            crate::chain::multicall::decode::<abi::IStateView::getLiquidityCall>(ambil(dasar + 1)),
+        ) else {
+            gagal += 1;
+            continue;
+        };
+
+        let sqrt = U256::from(slot0.sqrtPriceX96);
+        out.push(PoolInfo {
+            version: PoolVersion::V4,
+            id: k.id,
+            token0: k.currency0,
+            token1: k.currency1,
+            fee: k.fee,
+            dynamic_fee: k.fee & DYNAMIC_FEE_FLAG != 0,
+            tick_spacing: k.tick_spacing,
+            hooks: Some(k.hooks),
+            sqrt_price_x96: sqrt.to_string(),
+            tick: slot0.tick.as_i32(),
+            liquidity: liquidity.to_string(),
+            raw_price: raw_price_from_sqrt_x96(sqrt),
+        });
+    }
+
+    if gagal > 0 {
+        tracing::warn!(
+            gagal,
+            terbaca = out.len(),
+            "sebagian pool tidak terbaca lewat multicall, dilewati bukan dianggap kosong"
+        );
+    }
+
+    out
+}
+
+/// Seberapa jauh pencarian pool boleh menyentuh jaringan.
+///
+/// KENAPA ADA DUA MODE
+/// Menemukan pool V4 berarti memindai log, dan satu permintaan `eth_getLogs` ke
+/// RPC publik ini memakan sekitar 700 ms berapa pun lebar rentangnya. Dua arah
+/// berarti 1,4 detik yang harus dibayar sebelum satu pun pool bisa ditampilkan.
+///
+/// Padahal PoolKey tidak pernah berubah. Kalau token ini sudah pernah dibuka,
+/// kunci poolnya sudah kita simpan, dan yang benar benar perlu dibaca ulang
+/// hanya harga serta likuiditas, dan itu muat dalam satu permintaan.
+///
+/// Jadi panel memakai dua tahap: `CacheSaja` untuk menampilkan sesuatu dalam
+/// waktu di bawah setengah detik, lalu `Penuh` di latar untuk menemukan pool
+/// yang baru dibuat sejak terakhir kali.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModePencarian {
+    /// Jangan memindai log sama sekali. Hanya baca keadaan pool yang kuncinya
+    /// sudah tersimpan. Kalau cache kosong, hasilnya juga kosong.
+    CacheSaja,
+    /// Pindai blok yang belum pernah dilihat, lalu baca keadaan semuanya.
+    Penuh,
+}
+
+/// Cari pool V4 untuk satu token, TANPA mengandaikan pasangannya.
+///
+/// KENAPA INI ADA
+/// Pencarian yang menyaring dua currency sekaligus hanya menemukan pool kalau
+/// kita sudah menebak benar token lawannya. Tebakan itu ternyata sering salah:
+/// banyak memecoin di chain ini berpasangan dengan stablecoin, bukan WETH, dan
+/// hasilnya kita melaporkan tidak ada pool padahal ada puluhan.
+///
+/// Versi tanpa cache. Dipakai alat baris perintah dan pengujian. Jalur panel
+/// memakai `discover_v4_cached`.
+pub async fn discover_v4_any<P: Provider>(
+    provider: &P,
+    registry: &Registry,
+    token: Address,
+) -> Result<Vec<PoolInfo>> {
+    discover_v4_cached(provider, registry, None, token, ModePencarian::Penuh).await
+}
+
+/// Sama seperti `discover_v4_any`, tapi mengingat kunci pool yang sudah pernah
+/// ditemukan.
+///
+/// KENAPA CACHE ADA DI SINI
+/// Pemindaian log adalah bagian termahal dari seluruh alur, sekitar satu detik
+/// per arah untuk jendela tiga juta blok. Tanpa cache, biaya itu dibayar ulang
+/// setiap kali user membuka token yang sama, dan itulah kenapa panel terasa
+/// menggantung sementara Zenith LP tampak seketika.
+///
+/// PoolKey tidak pernah berubah setelah pool dibuat, jadi menyimpannya aman.
+/// Yang tidak disimpan adalah harga dan likuiditas: keduanya selalu dibaca
+/// ulang, karena angka basi pada alat yang mengirim transaksi jauh lebih
+/// berbahaya daripada menunggu sebentar.
+pub async fn discover_v4_cached<P: Provider>(
+    provider: &P,
+    registry: &Registry,
+    store: Option<&crate::store::Store>,
+    token: Address,
+    mode: ModePencarian,
+) -> Result<Vec<PoolInfo>> {
+    let pool_manager = registry.contract("uniswap_v4", "pool_manager")?;
+    let state_view = registry.contract("uniswap_v4", "state_view")?;
+    let multicall = registry.contract("common", "multicall3")?;
+    let alamat_token = token.to_string();
+
+    let tersimpan = store
+        .map(|s| cache::baca(s, &alamat_token))
+        .unwrap_or_default();
+
+    // Mode cache tidak menyentuh log sama sekali, jadi ia juga tidak perlu tahu
+    // blok terakhir. Menghilangkan satu round trip di sini terasa langsung,
+    // karena jalur ini yang dipakai saat panel ingin menampilkan sesuatu cepat.
+    if mode == ModePencarian::CacheSaja {
+        if tersimpan.keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        return hydrate_v4(provider, state_view, multicall, tersimpan.keys).await;
+    }
+
+    let latest = provider
+        .get_block_number()
+        .await
+        .context("gagal membaca blok terakhir")?;
+
+    // Jendela mundur, bukan deploy_block, karena pool yang dicari selalu yang
+    // baru. Tidak pernah turun di bawah blok pemasangan protokol.
+    let jendela = latest
+        .saturating_sub(SCAN_LOOKBACK_DEFAULT)
+        .max(registry.chain.deploy_block);
+
+    // Kalau cache masih menyambung dengan jendela sekarang, cukup pindai blok
+    // yang belum pernah dilihat. Kalau ia sudah tertinggal jauh, jendela penuh
+    // dipindai lagi, karena melompati blok berarti kehilangan pool selamanya.
+    let bersambung = tersimpan.scanned_to > 0 && tersimpan.scanned_to + 1 >= jendela;
+    let batas_bawah = if bersambung {
+        (tersimpan.scanned_to + 1).min(latest)
+    } else {
+        jendela
+    };
+
+    let mut baru: Vec<cache::PoolKeyRecord> = Vec::new();
+
+    if batas_bawah <= latest {
+        // KENAPA BERURUTAN, BUKAN BERBARENGAN
+        // Dua pemindaian ini pernah dijalankan berbarengan, dan hasilnya justru
+        // lebih lambat. RPC publik membalas 429 untuk yang kedua, lalu lapisan
+        // percobaan ulang menunggu sebelum mengulang. Diukur langsung pada
+        // jendela tiga juta blok:
+        //
+        //   berurutan   1102 ms, keduanya berhasil
+        //   berbarengan  658 ms untuk yang lolos, yang satunya kena 429 lalu
+        //                diulang, sehingga totalnya sekitar 5 detik
+        //
+        // Rantai ini memberi satu permintaan berat pada satu waktu. Menghormati
+        // itu lebih cepat daripada melawannya.
+        let jam = std::time::Instant::now();
+        let sebagai0 =
+            scan_initialize_logs(provider, pool_manager, token, true, batas_bawah, latest).await?;
+        let sebagai1 =
+            scan_initialize_logs(provider, pool_manager, token, false, batas_bawah, latest).await?;
+        tracing::debug!(
+            ms = jam.elapsed().as_millis(),
+            blok = latest - batas_bawah + 1,
+            inkremental = bersambung,
+            "pemindaian log selesai"
+        );
+
+        for log in sebagai0.into_iter().chain(sebagai1) {
+            let Ok(decoded) = abi::Initialize::decode_log(&log.inner) else {
+                continue;
+            };
+            baru.push(cache::PoolKeyRecord {
+                id: format!("0x{}", hex::encode(decoded.id)),
+                currency0: decoded.currency0.to_string(),
+                currency1: decoded.currency1.to_string(),
+                fee: decoded.fee.to::<u32>(),
+                tick_spacing: decoded.tickSpacing.as_i32(),
+                hooks: decoded.hooks.to_string(),
+            });
+        }
+    }
+
+    // `scanned_to` hanya maju kalau pemindaiannya benar benar selesai. Kalau
+    // ada yang gagal, fungsi ini sudah kembali dengan error di atas.
+    let semua = match store {
+        Some(s) => cache::gabung(s, &alamat_token, tersimpan, baru, latest),
+        None => {
+            let mut c = tersimpan;
+            c.keys.extend(baru);
+            c.scanned_to = latest;
+            c
+        }
+    };
+
+    let jam = std::time::Instant::now();
+    let hasil = hydrate_v4(provider, state_view, multicall, semua.keys).await;
+    tracing::debug!(
+        ms = jam.elapsed().as_millis(),
+        "pembacaan keadaan pool selesai"
+    );
+    hasil
+}
+
+/// Baca keadaan setiap pool V4 dalam satu permintaan.
+///
+/// Kegagalan per pool tidak menjatuhkan yang lain, tapi juga tidak dipalsukan
+/// menjadi nol. Pool yang tidak terbaca dilewati dan dicatat, karena likuiditas
+/// nol palsu akan membuatnya terbuang oleh penyaring seolah olah pool itu
+/// memang kosong. Lihat memory/003.
+async fn hydrate_v4<P: Provider>(
+    provider: &P,
+    state_view: Address,
+    multicall: Address,
+    kunci: Vec<cache::PoolKeyRecord>,
+) -> Result<Vec<PoolInfo>> {
+    if kunci.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Dua panggilan per pool, berselang seling, supaya indeksnya bisa dihitung
+    // langsung dari nomor pool tanpa tabel bantu.
+    let mut calls = Vec::with_capacity(kunci.len() * 2);
+    let mut terpakai: Vec<cache::PoolKeyRecord> = Vec::with_capacity(kunci.len());
+    for k in kunci {
+        let Ok(id) = k.id.parse::<FixedBytes<32>>() else {
+            tracing::warn!(id = %k.id, "poolId di cache tidak berbentuk bytes32, dilewati");
+            continue;
+        };
+        calls.push(crate::chain::multicall::encode(
+            state_view,
+            &abi::IStateView::getSlot0Call { poolId: id },
+        ));
+        calls.push(crate::chain::multicall::encode(
+            state_view,
+            &abi::IStateView::getLiquidityCall { poolId: id },
+        ));
+        terpakai.push(k);
+    }
+
+    let hasil = crate::chain::multicall::batch_call(provider, multicall, calls).await?;
+
+    let mut out = Vec::with_capacity(terpakai.len());
+    let mut gagal = 0usize;
+
+    for (n, k) in terpakai.into_iter().enumerate() {
+        let dasar = n * 2;
+
+        let slot0 = crate::chain::multicall::decode::<abi::IStateView::getSlot0Call>(
+            hasil.get(dasar).and_then(|x| x.as_ref()),
+        );
+        let Some(slot0) = slot0 else {
+            gagal += 1;
+            continue;
+        };
+        let liquidity = crate::chain::multicall::decode::<abi::IStateView::getLiquidityCall>(
+            hasil.get(dasar + 1).and_then(|x| x.as_ref()),
+        );
+        let Some(liquidity) = liquidity else {
+            gagal += 1;
+            continue;
+        };
+
+        let sqrt = U256::from(slot0.sqrtPriceX96);
+
+        out.push(PoolInfo {
+            version: PoolVersion::V4,
+            id: k.id,
+            token0: k.currency0,
+            token1: k.currency1,
+            fee: k.fee,
+            dynamic_fee: k.fee & DYNAMIC_FEE_FLAG != 0,
+            tick_spacing: k.tick_spacing,
+            hooks: Some(k.hooks),
+            sqrt_price_x96: sqrt.to_string(),
+            tick: slot0.tick.as_i32(),
+            liquidity: liquidity.to_string(),
+            raw_price: raw_price_from_sqrt_x96(sqrt),
+        });
+    }
+
+    if gagal > 0 {
+        tracing::warn!(
+            gagal,
+            terbaca = out.len(),
+            "sebagian pool tidak terbaca lewat multicall, dilewati bukan dianggap kosong"
+        );
     }
 
     Ok(out)
@@ -405,10 +1140,22 @@ pub async fn discover_v4_any<P: Provider>(
 
 /// Rentang blok terlebar yang dicoba sekali jalan.
 ///
-/// RPC publik menolak rentang yang terlalu lebar, dan chain ini sudah melewati
-/// 55 juta blok karena waktu bloknya sekitar 100 ms. Memindai sekaligus akan
-/// selalu ditolak.
-const SCAN_CHUNK_AWAL: u64 = 500_000;
+/// DIUKUR, BUKAN DITEBAK
+/// Nilai pertama 500_000 dipilih karena takut ditolak, dan itu membuat satu
+/// pencarian butuh enam permintaan berurutan per arah. Pengukuran langsung ke
+/// RPC menunjukkan angka sebenarnya jauh lebih longgar:
+///
+/// | Rentang | Hasil |
+/// | --- | --- |
+/// | 3 juta blok | berhasil, 1016 ms |
+/// | 10 juta blok | `log query timed out` |
+/// | 48 juta blok | `log query timed out` |
+///
+/// Jadi seluruh jendela mundur muat dalam satu permintaan, dan memecahnya
+/// hanya menambah latensi sekaligus memancing rate limit. Kalau jendelanya
+/// nanti diperlebar melewati batas ini, penurunan otomatis di bawah yang akan
+/// menanganinya.
+const SCAN_CHUNK_AWAL: u64 = SCAN_LOOKBACK_DEFAULT;
 const SCAN_CHUNK_MINIMUM: u64 = 5_000;
 
 /// Sejauh mana mundur dari blok terakhir sebelum menyerah.
@@ -518,52 +1265,27 @@ pub struct QuoteGroup {
     pub quote: String,
     pub quote_symbol: String,
     pub quote_decimals: u8,
+    /// Benar kalau token lawannya adalah kutipan yang dikenal rantai ini,
+    /// yaitu ETH asli atau salah satu entri tokens di chain.toml. Kelompok
+    /// kanonik didahulukan saat memilih pasar utama, karena di situlah pasar
+    /// sungguhan berada.
+    pub canonical: bool,
     pub pools: Vec<PoolInfo>,
 }
 
-/// Cari seluruh pool untuk sebuah token, dikelompokkan menurut token lawannya.
+
+/// Kelompokkan pool menurut token lawan, lalu urutkan kelompoknya.
 ///
-/// KENAPA DIKELOMPOKKAN
-/// Membandingkan pool FIG/USDG dengan FIG/ETH berdasarkan likuiditas tidak
-/// bermakna, karena harganya berada di sumbu yang berbeda. User memilih
-/// pasangannya dulu, baru fee tier di dalam pasangan itu.
-///
-/// KENAPA TIDAK MENEBAK PASANGANNYA
-/// Versi pertama hanya mencari pasangan terhadap WETH, dan itu keliru. Pada FIG
-/// di Robinhood Chain, 33 dari 39 pool berpasangan dengan USDG dan tidak satu
-/// pun dengan WETH. Hasilnya kita melaporkan tidak ada pool sama sekali,
-/// padahal alat lain menemukan puluhan.
-pub async fn discover_for_token<P: Provider>(
-    provider: &P,
-    registry: &Registry,
+/// `dikenal` berisi metadata token lawan yang tidak ada di `chain.toml`, hasil
+/// pembacaan on chain. Kalau sebuah lawan tidak ada di sana, desimalnya TIDAK
+/// ditebak 18, kelompoknya dibuang. Menebak desimal menggeser harga sebesar
+/// sepuluh pangkat selisihnya, dan pada USDG selisih itu sepuluh triliun.
+fn kelompokkan(
+    pools: Vec<PoolInfo>,
     token: Address,
+    registry: &Registry,
+    dikenal: &std::collections::HashMap<String, TokenMeta>,
 ) -> Vec<QuoteGroup> {
-    let mut semua: Vec<PoolInfo> = Vec::new();
-
-    // V4 tidak perlu tahu pasangannya lebih dulu.
-    match discover_v4_any(provider, registry, token).await {
-        Ok(mut v) => semua.append(&mut v),
-        Err(e) => tracing::warn!(error = %e, "penemuan pool V4 gagal"),
-    }
-
-    // V3 butuh kedua alamat, jadi setiap token kutipan yang dikenal dicoba.
-    for (nama, entry) in &registry.tokens {
-        let Ok(quote) = entry.address.parse::<Address>() else {
-            continue;
-        };
-        if quote == token {
-            continue;
-        }
-        match discover_v3(provider, registry, token, quote).await {
-            Ok(mut v) => semua.append(&mut v),
-            Err(e) => tracing::warn!(quote = %nama, error = %e, "penemuan pool V3 gagal"),
-        }
-    }
-
-    kelompokkan(semua, token, registry)
-}
-
-fn kelompokkan(pools: Vec<PoolInfo>, token: Address, registry: &Registry) -> Vec<QuoteGroup> {
     let t = token.to_string().to_lowercase();
     let mut per_quote: std::collections::BTreeMap<String, Vec<PoolInfo>> = Default::default();
 
@@ -580,20 +1302,29 @@ fn kelompokkan(pools: Vec<PoolInfo>, token: Address, registry: &Registry) -> Vec
 
     let mut out: Vec<QuoteGroup> = per_quote
         .into_iter()
-        .map(|(quote, pools)| {
-            let (symbol, decimals) = kenali_quote(&quote, registry);
-            QuoteGroup {
+        .filter_map(|(quote, pools)| {
+            let (symbol, decimals, kanonik) = kenali_quote(&quote, registry, dikenal)?;
+            let pools = usable_pools(pools);
+            (!pools.is_empty()).then_some(QuoteGroup {
                 quote,
                 quote_symbol: symbol,
                 quote_decimals: decimals,
-                pools: usable_pools(pools),
-            }
+                canonical: kanonik,
+                pools,
+            })
         })
-        .filter(|g| !g.pools.is_empty())
         .collect();
 
-    // Kelompok dengan likuiditas terbesar lebih dulu, karena itu yang paling
-    // mungkin jadi pasar sebenarnya.
+    // KENAPA KANONIK DULU, BUKAN LIKUIDITAS DULU
+    // Token yang ramai bisa berpasangan dengan puluhan token lain, dan sebagian
+    // pasangan itu hanya pool sampah dengan likuiditas besar yang tidak pernah
+    // ditukar. Pada salinan FIG di 0x41F4..., ada 32 pasangan sekaligus, dan
+    // pengurutan murni likuiditas menaruh pasangan berisi satu pool sampah di
+    // atas pasar USDG yang sebenarnya.
+    //
+    // Pasangan terhadap token kutipan yang dikenal rantai ini didahulukan,
+    // karena di situlah pasar sungguhan berada. Sisanya tetap ditampilkan dan
+    // bisa dipilih user, hanya tidak dipilihkan otomatis.
     out.sort_by(|a, b| {
         let total = |g: &QuoteGroup| -> f64 {
             g.pools
@@ -601,30 +1332,45 @@ fn kelompokkan(pools: Vec<PoolInfo>, token: Address, registry: &Registry) -> Vec
                 .map(|p| p.liquidity.parse::<f64>().unwrap_or(0.0))
                 .sum()
         };
-        total(b)
-            .partial_cmp(&total(a))
-            .unwrap_or(std::cmp::Ordering::Equal)
+        b.canonical
+            .cmp(&a.canonical)
+            .then_with(|| {
+                total(b)
+                    .partial_cmp(&total(a))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.quote.cmp(&b.quote))
     });
 
     out
 }
 
-/// Kenali token lawan dari registry, atau tandai sebagai tidak dikenal.
+/// Simbol, desimal, dan status kanonik sebuah token lawan.
 ///
-/// Token yang tidak dikenal bukan berarti buruk, tapi wajib terlihat. Pasangan
-/// dengan token asing bisa berarti pasar yang tipis, atau token tiruan.
-fn kenali_quote(alamat: &str, registry: &Registry) -> (String, u8) {
+/// Mengembalikan `None` kalau tokennya tidak dikenal sama sekali dan juga tidak
+/// bisa dibaca on chain. Tanpa desimal yang benar, harga kelompok itu akan
+/// salah, dan menampilkan harga salah lebih buruk daripada tidak menampilkan.
+fn kenali_quote(
+    alamat: &str,
+    registry: &Registry,
+    dikenal: &std::collections::HashMap<String, TokenMeta>,
+) -> Option<(String, u8, bool)> {
     if alamat.eq_ignore_ascii_case(ZERO_ADDRESS) {
-        // V4 mendukung ETH asli sebagai currency, bukan hanya WETH.
-        return ("ETH".into(), 18);
+        // V4 mendukung ETH asli sebagai currency, bukan hanya WETH. Ia tidak
+        // punya `decimals()` karena bukan kontrak, jadi 18 di sini adalah fakta
+        // rantai, bukan tebakan.
+        return Some(("ETH".into(), 18, true));
     }
     for (nama, entry) in &registry.tokens {
         if entry.address.eq_ignore_ascii_case(alamat) {
-            return (nama.to_uppercase(), entry.decimals);
+            return Some((nama.to_uppercase(), entry.decimals, true));
         }
     }
-    ("?".into(), 18)
+    dikenal
+        .get(&alamat.to_lowercase())
+        .map(|m| (m.symbol.clone(), m.decimals, false))
 }
+
 
 /// Cari seluruh pool untuk sepasang token, V3 dan V4 sekaligus.
 ///

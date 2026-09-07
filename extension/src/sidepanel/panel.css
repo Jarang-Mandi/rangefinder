@@ -230,3 +230,60 @@
   width: auto;
   margin: 0;
 }
+
+/* Pemilih pasangan token lawan.
+ *
+ * Muncul hanya kalau token punya lebih dari satu pasangan. Pada token ramai
+ * jumlahnya bisa puluhan, jadi barisnya menggulung ke bawah alih alih memaksa
+ * gulir mendatar yang sulit dipakai di panel selebar 320 piksel. */
+.quote-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: var(--s2);
+  max-height: 92px;
+  overflow-y: auto;
+}
+
+.quote-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-radius: var(--r-chip);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 7px;
+  cursor: pointer;
+}
+
+.quote-chip:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+/* Kutipan yang dikenal rantai ini, yaitu ETH asli atau entri di chain.toml.
+ * Dibedakan lewat warna teks saja, bukan latar, supaya yang terpilih tetap
+ * jadi satu satunya elemen dengan latar terangkat. */
+.quote-chip.canonical {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.quote-chip.active {
+  background: var(--surface-raised);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.quote-count {
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.quote-chip.active .quote-count {
+  color: var(--text);
+}

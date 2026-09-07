@@ -10,6 +10,7 @@
 //! - Chain ini secara resmi dinyatakan tidak stabil oleh gmgn, jadi kegagalan
 //!   RPC adalah kondisi normal yang harus ditangani, bukan kejadian luar biasa.
 
+pub mod multicall;
 pub mod registry;
 
 use std::sync::Arc;

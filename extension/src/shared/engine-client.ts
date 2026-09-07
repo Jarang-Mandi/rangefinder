@@ -210,6 +210,17 @@ export class EngineClient {
     this.send({ type: "select_pool", pool_id: poolId });
   }
 
+  /**
+   * Pindah ke pasangan token lawan yang lain.
+   *
+   * Engine yang mengganti daftar pool dan desimal kutipan, bukan panel,
+   * karena desimal itu menentukan skala seluruh harga dan dua tempat yang
+   * menghitungnya akan menyimpang.
+   */
+  selectQuote(quote: string) {
+    this.send({ type: "select_quote", quote });
+  }
+
   /** Batas dalam market cap USD, karena itu satuan yang dipakai chart. */
   setRange(lowerMcap: number, upperMcap: number) {
     this.send({ type: "set_range", lower_mcap: lowerMcap, upper_mcap: upperMcap });

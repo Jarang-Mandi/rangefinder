@@ -29,6 +29,7 @@ import {
   isEvmAddress,
   type EngineStatus,
   type PoolInfo,
+  type QuoteGroup,
   type RangeBound,
   type RangeView,
   type TokenState,
@@ -252,6 +253,7 @@ export function App() {
             onLoadToken={loadToken}
             rangeView={rangeView}
             onSelectPool={(id) => clientRef.current?.selectPool(id)}
+            onSelectQuote={(q) => clientRef.current?.selectQuote(q)}
             onForget={forgetPairing}
           />
         ) : (
@@ -340,6 +342,7 @@ function RangeTab({
   onLoadToken,
   rangeView,
   onSelectPool,
+  onSelectQuote,
   onForget,
 }: {
   status: EngineStatus | null;
@@ -351,6 +354,7 @@ function RangeTab({
   onLoadToken: (address: string, navigate: boolean) => void;
   rangeView: RangeView | null;
   onSelectPool: (poolId: string) => void;
+  onSelectQuote: (quote: string) => void;
   onForget: () => void;
 }) {
   const [showEngine, setShowEngine] = useState(false);
@@ -371,7 +375,12 @@ function RangeTab({
 
       {loadingToken ? <p class="phase-note">Mencari pool di chain.</p> : null}
       {token ? (
-        <TokenCard token={token} rangeView={rangeView} onSelectPool={onSelectPool} />
+        <TokenCard
+          token={token}
+          rangeView={rangeView}
+          onSelectPool={onSelectPool}
+          onSelectQuote={onSelectQuote}
+        />
       ) : null}
 
       <section class="card">
@@ -439,10 +448,12 @@ function TokenCard({
   token,
   rangeView,
   onSelectPool,
+  onSelectQuote,
 }: {
   token: TokenState;
   rangeView: RangeView | null;
   onSelectPool: (poolId: string) => void;
+  onSelectQuote: (quote: string) => void;
 }) {
   // Pool aktif ditentukan engine, bukan panel, supaya tidak ada dua sumber
   // kebenaran. Selama tampilan range belum datang, pilihan awal dari
@@ -479,12 +490,14 @@ function TokenCard({
       <section class="card">
         <div class="section-title">
           <h2>Pool</h2>
-          <span class="chip">
-            {token.quotes.find((q) => q.quote === token.selected_quote)?.quote_symbol ?? "?"}
-            {" · "}
-            {token.pools.length} layak
-          </span>
+          <span class="chip">{token.pools.length} layak</span>
         </div>
+
+        <QuotePicker
+          quotes={token.quotes}
+          selected={token.selected_quote}
+          onSelect={onSelectQuote}
+        />
 
         <div class="stack" style="margin-top: var(--s2)">
           {token.pools.map((p) => (
@@ -515,6 +528,52 @@ function TokenCard({
         </section>
       ) : null}
     </>
+  );
+}
+
+/**
+ * Pemilih pasangan token lawan.
+ *
+ * Satu token bisa punya pasar terhadap beberapa token sekaligus, dan yang
+ * dipilihkan otomatis belum tentu yang diinginkan. Pada salinan FIG di
+ * 0x41F4..., ada 32 pasangan sekaligus, sebagian besar terhadap memecoin lain.
+ *
+ * Pasangan terhadap kutipan yang dikenal rantai ini ditandai, karena di situlah
+ * pasar sungguhan berada. Sisanya tetap bisa dipilih, hanya tidak dipilihkan.
+ *
+ * Tidak ada yang dihitung di sini. Menekan sebuah pasangan hanya mengirim
+ * pilihan itu ke engine, dan engine yang mengganti daftar pool beserta desimal
+ * kutipannya.
+ */
+function QuotePicker({
+  quotes,
+  selected,
+  onSelect,
+}: {
+  quotes: QuoteGroup[];
+  selected: string | null;
+  onSelect: (quote: string) => void;
+}) {
+  if (quotes.length <= 1) return null;
+
+  return (
+    <div class="quote-picker">
+      {quotes.map((q) => {
+        const aktif = q.quote === selected;
+        return (
+          <button
+            key={q.quote}
+            type="button"
+            class={`quote-chip${aktif ? " active" : ""}${q.canonical ? " canonical" : ""}`}
+            title={`${q.quote} · ${q.pools.length} pool · ${q.quote_decimals} desimal`}
+            onClick={() => onSelect(q.quote)}
+          >
+            {q.quote_symbol}
+            <span class="quote-count">{q.pools.length}</span>
+          </button>
+        );
+      })}
+    </div>
   );
 }
 

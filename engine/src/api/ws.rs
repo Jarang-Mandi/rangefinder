@@ -100,6 +100,9 @@ async fn session(socket: WebSocket, state: AppState) {
                             Ok(ClientMessage::SelectPool { pool_id }) => {
                                 state.on_select_pool(pool_id).await;
                             }
+                            Ok(ClientMessage::SelectQuote { quote }) => {
+                                state.on_select_quote(quote).await;
+                            }
                             Ok(ClientMessage::SetRange { lower_mcap, upper_mcap }) => {
                                 state.on_set_range(lower_mcap, upper_mcap).await;
                             }
