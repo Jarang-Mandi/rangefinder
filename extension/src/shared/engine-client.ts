@@ -14,12 +14,16 @@ import {
   DEFAULT_ENGINE_ORIGIN,
   WS_SUBPROTOCOL,
   asEngineStatus,
+  asOpenPlan,
   asRangeView,
+  asSendResult,
   asTokenState,
   type ClientMessage,
   type EnginePing,
   type EngineStatus,
+  type OpenPlanView,
   type RangeView,
+  type SendResultView,
   type ServerMessage,
   type TokenState,
 } from "./protocol";
@@ -37,6 +41,8 @@ interface Handlers {
   onAlert: (level: string, code: string, message: string) => void;
   onTokenState?: (token: TokenState) => void;
   onRangeView?: (view: RangeView) => void;
+  onOpenPlan?: (plan: OpenPlanView) => void;
+  onSendResult?: (result: SendResultView) => void;
 }
 
 const HEARTBEAT_MS = 20_000;
@@ -153,6 +159,16 @@ export class EngineClient {
         this.handlers.onRangeView?.(view);
         return;
       }
+      const plan = asOpenPlan(msg);
+      if (plan) {
+        this.handlers.onOpenPlan?.(plan);
+        return;
+      }
+      const sent = asSendResult(msg);
+      if (sent) {
+        this.handlers.onSendResult?.(sent);
+        return;
+      }
       if (msg.type === "alert") {
         this.handlers.onAlert(msg.level, msg.code, msg.message);
       }
@@ -219,6 +235,27 @@ export class EngineClient {
    */
   selectQuote(quote: string) {
     this.send({ type: "select_quote", quote });
+  }
+
+  /**
+   * Minta engine menyusun rencana membuka posisi.
+   *
+   * Tidak mengirim apa pun ke rantai. Pool dan tick tidak ikut dikirim,
+   * karena keduanya sudah ada di engine, dan menerimanya dari panel berarti
+   * menerima parameter transaksi dari luar.
+   */
+  quoteRange(sizeUsd: number) {
+    this.send({ type: "quote_range", size_usd: sizeUsd });
+  }
+
+  /** Beri izin ERC20 sebesar yang dibutuhkan rencana terakhir. */
+  approveToken(token: string) {
+    this.send({ type: "approve_token", token });
+  }
+
+  /** Setujui rencana terakhir. Ini yang benar benar memindahkan dana. */
+  openPosition() {
+    this.send({ type: "open_position" });
   }
 
   /** Batas dalam market cap USD, karena itu satuan yang dipakai chart. */

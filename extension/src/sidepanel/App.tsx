@@ -28,8 +28,10 @@ import {
   gmgnTokenUrl,
   isEvmAddress,
   type EngineStatus,
+  type OpenPlanView,
   type PoolInfo,
   type QuoteGroup,
+  type SendResultView,
   type RangeBound,
   type RangeView,
   type TokenState,
@@ -56,6 +58,10 @@ export function App() {
   const [tokenState, setTokenState] = useState<TokenState | null>(null);
   const [tokenLoading, setTokenLoading] = useState(false);
   const [rangeView, setRangeView] = useState<RangeView | null>(null);
+  const [openPlan, setOpenPlan] = useState<OpenPlanView | null>(null);
+  const [sendResult, setSendResult] = useState<SendResultView | null>(null);
+  /** Menunggu jawaban engine. Mencegah tombol ditekan dua kali. */
+  const [execBusy, setExecBusy] = useState(false);
 
   const clientRef = useRef<EngineClient | null>(null);
   /** Tab gmgn yang sedang menampilkan chart. Tujuan perintah gambar garis. */
@@ -86,10 +92,28 @@ export function App() {
         setTokenState(t);
         setTokenLoading(false);
         setRangeView(null);
+        // Rencana lama milik token lama. Membiarkannya berarti menawarkan
+        // tombol buka posisi untuk pool yang sudah tidak dilihat lagi.
+        setOpenPlan(null);
+        setSendResult(null);
         drawnRef.current = "";
       },
       onRangeView: setRangeView,
+      onOpenPlan: (plan) => {
+        setOpenPlan(plan);
+        setExecBusy(false);
+      },
+      onSendResult: (result) => {
+        setSendResult(result);
+        setExecBusy(false);
+        // Rencana sudah dipakai engine dan dikeluarkan dari slotnya, jadi
+        // menampilkannya lagi akan menawarkan tombol yang pasti ditolak.
+        if (result.kind === "open") setOpenPlan(null);
+      },
       onAlert: (level, code, message) => {
+        // Kegagalan eksekusi datang sebagai alert, dan tanpa ini tombolnya
+        // akan tetap mati sesudahnya.
+        setExecBusy(false);
         // Fase 5 memindahkan ini ke toast di halaman gmgn beserta suaranya,
         // sesuai PRD 3.7. Untuk sekarang cukup tercatat di konsol panel.
         console.info(`[rangefinder] ${level} ${code}: ${message}`);
@@ -254,6 +278,21 @@ export function App() {
             rangeView={rangeView}
             onSelectPool={(id) => clientRef.current?.selectPool(id)}
             onSelectQuote={(q) => clientRef.current?.selectQuote(q)}
+            openPlan={openPlan}
+            sendResult={sendResult}
+            execBusy={execBusy}
+            onQuoteRange={(usd) => {
+              setExecBusy(true);
+              clientRef.current?.quoteRange(usd);
+            }}
+            onApproveToken={(t) => {
+              setExecBusy(true);
+              clientRef.current?.approveToken(t);
+            }}
+            onOpenPosition={() => {
+              setExecBusy(true);
+              clientRef.current?.openPosition();
+            }}
             onForget={forgetPairing}
           />
         ) : (
@@ -343,6 +382,12 @@ function RangeTab({
   rangeView,
   onSelectPool,
   onSelectQuote,
+  openPlan,
+  sendResult,
+  execBusy,
+  onQuoteRange,
+  onApproveToken,
+  onOpenPosition,
   onForget,
 }: {
   status: EngineStatus | null;
@@ -355,6 +400,12 @@ function RangeTab({
   rangeView: RangeView | null;
   onSelectPool: (poolId: string) => void;
   onSelectQuote: (quote: string) => void;
+  openPlan: OpenPlanView | null;
+  sendResult: SendResultView | null;
+  execBusy: boolean;
+  onQuoteRange: (sizeUsd: number) => void;
+  onApproveToken: (token: string) => void;
+  onOpenPosition: () => void;
   onForget: () => void;
 }) {
   const [showEngine, setShowEngine] = useState(false);
@@ -375,12 +426,24 @@ function RangeTab({
 
       {loadingToken ? <p class="phase-note">Mencari pool di chain.</p> : null}
       {token ? (
+        <>
         <TokenCard
           token={token}
           rangeView={rangeView}
           onSelectPool={onSelectPool}
           onSelectQuote={onSelectQuote}
         />
+        <ExecuteCard
+          plan={openPlan}
+          result={sendResult}
+          busy={execBusy}
+          canExecute={status.can_execute}
+          blockedReasons={status.blocked_reasons}
+          onQuote={onQuoteRange}
+          onApprove={onApproveToken}
+          onOpen={onOpenPosition}
+        />
+        </>
       ) : null}
 
       <section class="card">
@@ -529,6 +592,209 @@ function TokenCard({
       ) : null}
     </>
   );
+}
+
+/**
+ * Kartu eksekusi: susun rencana, beri izin, buka posisi.
+ *
+ * Tiga langkah sengaja terpisah dan berurutan. Menggabungkannya jadi satu
+ * tombol berarti user menyetujui sesuatu yang belum pernah ia lihat, dan yang
+ * disetujui di sini memindahkan uang sungguhan.
+ *
+ * Panel tidak menyimpulkan apa pun sendiri. Boleh tidaknya mengirim, izin mana
+ * yang kurang, dan gate mana yang gagal, semuanya datang dari engine. Panel
+ * hanya menampilkan dan meneruskan tekanan tombol.
+ */
+function ExecuteCard({
+  plan,
+  result,
+  busy,
+  canExecute,
+  blockedReasons,
+  onQuote,
+  onApprove,
+  onOpen,
+}: {
+  plan: OpenPlanView | null;
+  result: SendResultView | null;
+  busy: boolean;
+  canExecute: boolean;
+  blockedReasons: string[];
+  onQuote: (sizeUsd: number) => void;
+  onApprove: (token: string) => void;
+  onOpen: () => void;
+}) {
+  const [size, setSize] = useState("");
+
+  const nominal = Number(size);
+  const nominalValid = Number.isFinite(nominal) && nominal > 0;
+
+  const kurang = plan?.allowances.filter((a) => a.insufficient) ?? [];
+  const gateGagal = plan?.gates.filter((g) => !g.passed) ?? [];
+  const siapKirim =
+    plan !== null && !plan.dry_run && gateGagal.length === 0 && kurang.length === 0;
+
+  return (
+    <section class="card">
+      <div class="section-title">
+        <h2>Eksekusi</h2>
+        {plan?.dry_run ? <span class="chip">dry run</span> : null}
+      </div>
+
+      {!canExecute ? (
+        <div class="stack" style="margin-top: var(--s2)">
+          {blockedReasons.map((r) => (
+            <p key={r} class="muted" style="margin: 0">
+              {r}
+            </p>
+          ))}
+        </div>
+      ) : null}
+
+      <div class="row" style="margin-top: var(--s2); gap: var(--s2)">
+        <input
+          type="number"
+          min="0"
+          step="any"
+          placeholder="Nominal USD"
+          value={size}
+          onInput={(e) => setSize((e.target as HTMLInputElement).value)}
+        />
+        <button
+          type="button"
+          disabled={!nominalValid || busy || !canExecute}
+          onClick={() => onQuote(nominal)}
+        >
+          Susun rencana
+        </button>
+      </div>
+
+      {plan ? (
+        <>
+          <div class="stack" style="margin-top: var(--s3)">
+            <div class="row">
+              <span class="label">Likuiditas</span>
+              <span class="value num">{plan.liquidity}</span>
+            </div>
+            <div class="row">
+              <span class="label">Tick</span>
+              <span class="value num">
+                {plan.tick_lower} sampai {plan.tick_upper}
+              </span>
+            </div>
+            <div class="row">
+              <span class="label">Gas perkiraan</span>
+              <span class="value num">{plan.gas_estimate.toLocaleString("id-ID")}</span>
+            </div>
+          </div>
+
+          <div class="stack" style="margin-top: var(--s3)">
+            {plan.gates.map((g) => (
+              <div key={g.id} class="row">
+                <span class="label">
+                  <span class={`dot ${g.passed ? "ok" : "bad"}`} /> {g.id} {g.name}
+                </span>
+                <span class="value muted">{g.detail}</span>
+              </div>
+            ))}
+          </div>
+
+          {plan.warnings.length > 0 ? (
+            <div class="stack" style="margin-top: var(--s2)">
+              {plan.warnings.map((w) => (
+                <p key={w} class="hint">
+                  {w}
+                </p>
+              ))}
+            </div>
+          ) : null}
+
+          {kurang.length > 0 ? (
+            <div class="stack" style="margin-top: var(--s3)">
+              <p class="hint">
+                Izin ERC20 belum cukup. Diberikan sebesar yang dibutuhkan saja,
+                bukan tak terbatas.
+              </p>
+              {kurang.map((a) => (
+                <button
+                  key={a.token}
+                  type="button"
+                  disabled={busy}
+                  onClick={() => onApprove(a.token)}
+                >
+                  Beri izin {shortAddress(a.token)}
+                </button>
+              ))}
+            </div>
+          ) : null}
+
+          <button
+            type="button"
+            class="primary"
+            style="margin-top: var(--s3); width: 100%"
+            disabled={!siapKirim || busy}
+            onClick={onOpen}
+          >
+            {plan.dry_run ? "Dry run aktif, tidak akan dikirim" : "Buka posisi"}
+          </button>
+
+          <p class="hint">Rencana berlaku sampai {waktuSingkat(plan.expires_at)}.</p>
+        </>
+      ) : null}
+
+      {result ? <SendResultRow result={result} /> : null}
+    </section>
+  );
+}
+
+function SendResultRow({ result }: { result: SendResultView }) {
+  const nada =
+    result.status === "sukses" ? "ok" : result.status === "revert" ? "bad" : "warn";
+  return (
+    <div class="stack" style="margin-top: var(--s3)">
+      <div class="row">
+        <span class="label">
+          <span class={`dot ${nada}`} /> {result.kind}
+        </span>
+        <span class="value num">{shortAddress(result.tx_hash)}</span>
+      </div>
+      <div class="row">
+        <span class="label">Status</span>
+        <span class="value">{result.status}</span>
+      </div>
+      {result.gas_used !== null ? (
+        <div class="row">
+          <span class="label">Gas terpakai</span>
+          <span class="value num">{result.gas_used.toLocaleString("id-ID")}</span>
+        </div>
+      ) : null}
+      {result.token_id ? (
+        <div class="row">
+          <span class="label">Token id</span>
+          <span class="value num">{result.token_id}</span>
+        </div>
+      ) : null}
+      {result.verification ? (
+        <p class={result.verification.passed ? "hint" : "muted"}>
+          {result.verification.id} {result.verification.detail}
+        </p>
+      ) : null}
+      {result.status === "menggantung" ? (
+        <p class="hint">
+          Receipt belum datang. Transaksinya sudah ada di rantai, statusnya yang
+          belum diketahui. Jangan mengirim ulang sebelum memeriksanya.
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+/** Jam menit dari waktu ISO, cukup untuk menilai apakah rencana masih segar. */
+function waktuSingkat(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? iso
+    : d.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" });
 }
 
 /**

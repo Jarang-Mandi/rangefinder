@@ -11,6 +11,7 @@
 //!   Authorization, untuk WebSocket ia dititipkan di subprotocol, karena
 //!   browser tidak bisa memasang header pada koneksi WebSocket.
 
+pub mod execute;
 pub mod protocol;
 pub mod routes;
 pub mod ws;
@@ -28,6 +29,8 @@ use tokio::sync::{broadcast, Mutex};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 
+use alloy::providers::Provider;
+
 use crate::auth::PairingToken;
 use crate::chain::{registry::Registry, ChainClient};
 use crate::config::Config;
@@ -37,6 +40,21 @@ use crate::wallet::Wallet;
 use protocol::{EngineStatus, RegistrySummary, ServerMessage};
 
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Perkiraan biaya gas satu transaksi, dalam ETH.
+///
+/// Dipakai gate G6 untuk memastikan cadangan ETH tidak habis. Angkanya
+/// sengaja dilebihkan: rantai ini murah, dan menolak transaksi karena terlalu
+/// hati hati jauh lebih baik daripada wallet yang kehabisan gas di tengah
+/// rangkaian aksi.
+const PERKIRAAN_GAS_ETH: f64 = 0.0005;
+
+/// Umur deadline yang dibawa MintParams, dalam detik.
+///
+/// Deadline terlalu panjang membuat transaksi yang tertunda tetap sah saat
+/// harganya sudah jauh berubah. Lima menit cukup untuk antrean sequencer
+/// paling buruk sekalipun pada rantai berblok 100 ms.
+const DEADLINE_DETIK: u64 = 300;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -58,6 +76,17 @@ pub struct AppState {
     /// waktu. Kalau nanti panel bisa memantau beberapa token sekaligus, ini
     /// yang berubah jadi map.
     pub active: Arc<tokio::sync::RwLock<Option<ActiveToken>>>,
+    /// Rencana terakhir yang sudah lolos gate, menunggu persetujuan user.
+    ///
+    /// Disimpan di engine, bukan dikirim bolak balik lewat panel. Rencana
+    /// yang kembali dari panel bisa saja sudah diubah, dan bagian yang
+    /// paling menarik untuk diubah justru calldata-nya.
+    pub pending_plan: Arc<tokio::sync::RwLock<Option<crate::api::execute::RencanaTersimpan>>>,
+    /// Penjaga nonce, satu untuk seluruh engine.
+    ///
+    /// Harus satu, karena dua penjaga akan memberikan nonce yang sama pada
+    /// dua transaksi yang berbeda.
+    pub nonce: Arc<crate::exec::nonce::NonceKeeper>,
 }
 
 /// Keadaan token yang sedang aktif di panel.
@@ -351,6 +380,339 @@ impl AppState {
             .events
             .send(protocol::ServerMessage::TokenState(Box::new(keadaan)));
         self.broadcast_range_view().await;
+    }
+
+    /// Susun rencana membuka posisi, jalankan seluruh gate, TIDAK mengirim.
+    ///
+    /// Seluruh angka datang dari keadaan yang sedang aktif: pool terpilih,
+    /// range yang sedang digambar, dan saldo wallet. Panel hanya menyebut
+    /// nominalnya, karena itu satu satunya hal yang memang keputusan user.
+    pub async fn on_quote_range(&self, size_usd: f64) {
+        match self.susun_rencana(size_usd).await {
+            Ok(view) => {
+                let _ = self
+                    .events
+                    .send(protocol::ServerMessage::OpenPlan(Box::new(view)));
+            }
+            Err(pesan) => self.alert_kritis("plan_failed", pesan),
+        }
+    }
+
+    async fn susun_rencana(&self, size_usd: f64) -> Result<execute::OpenPlanView, String> {
+        if !(size_usd.is_finite() && size_usd > 0.0) {
+            return Err("ukuran posisi harus angka positif".into());
+        }
+
+        // Wallet harus terbuka lebih dulu, karena penerima posisi adalah
+        // alamatnya. Menyusun rencana untuk alamat yang belum diketahui berarti
+        // menyusun rencana yang tidak bisa dikirim.
+        let pemilik = {
+            let w = self.wallet.lock().await;
+            match (w.exists(), w.is_locked(), w.address()) {
+                (false, _, _) => return Err("wallet belum dibuat".into()),
+                (_, true, _) => return Err("wallet masih terkunci".into()),
+                (_, _, Some(a)) => a,
+                _ => return Err("alamat wallet tidak diketahui".into()),
+            }
+        };
+
+        let (pool, meta, quote_decimals, requested, mcap) = {
+            let guard = self.active.read().await;
+            let active = guard.as_ref().ok_or("belum ada token yang dimuat")?;
+            let pool = active
+                .selected_pool()
+                .ok_or("pool terpilih tidak ada di daftar")?
+                .clone();
+            let mcap = active
+                .chart_mcap_usd
+                .ok_or("harga dari chart gmgn belum masuk, kurs belum bisa dikalibrasi")?;
+            (
+                pool,
+                active.meta.clone(),
+                active.quote_decimals,
+                active.requested,
+                mcap,
+            )
+        };
+
+        // Range yang dipakai persis yang sedang tergambar di chart, termasuk
+        // pembulatan ke grid tick. Menghitungnya ulang di sini dengan cara lain
+        // akan membuat yang dikirim berbeda dari yang dilihat user.
+        let view = crate::range::build_view(&pool, &meta, quote_decimals, mcap, requested)
+            .map_err(|e| format!("range belum bisa disusun: {e}"))?;
+
+        // Nama `lower` dan `upper` di RangeView mengikuti harga, bukan tick.
+        // Keduanya bertukar saat memecoin menempati token1. Lihat
+        // execute::tick_menaik.
+        let (tick_lower, tick_upper) = execute::tick_menaik(view.lower.tick, view.upper.tick)
+            .ok_or("range terlalu sempit, kedua batasnya jatuh di tick yang sama")?;
+
+        let token0: alloy::primitives::Address = pool
+            .token0
+            .parse()
+            .map_err(|_| format!("alamat token0 pool {} tidak valid", pool.id))?;
+        let token1: alloy::primitives::Address = pool
+            .token1
+            .parse()
+            .map_err(|_| format!("alamat token1 pool {} tidak valid", pool.id))?;
+
+        let provider = self
+            .chain
+            .provider()
+            .await
+            .map_err(|e| format!("RPC tidak bisa dipakai: {e}"))?;
+        let multicall = self
+            .registry
+            .contract("common", "multicall3")
+            .map_err(|e| e.to_string())?;
+        let position_manager = self
+            .registry
+            .contract("uniswap_v3", "position_manager")
+            .map_err(|e| e.to_string())?;
+
+        let (saldo0, saldo1) =
+            execute::saldo_dua_token(&provider, multicall, pemilik, token0, token1).await?;
+
+        // Nominal diubah menjadi jumlah token memecoin, lalu dibatasi saldo.
+        // Sisi lawannya dibiarkan sebesar saldo, karena berapa yang benar benar
+        // terpakai ditentukan matematika likuiditas, bukan oleh kita.
+        let harga_token_usd = view.current.price_usd;
+        let memecoin_adalah_token0 = pool.token0.eq_ignore_ascii_case(&meta.address);
+        let desimal_memecoin = meta.decimals;
+
+        let diminta = execute::usd_ke_satuan_terkecil(size_usd, harga_token_usd, desimal_memecoin)
+            .ok_or("nominal posisi tidak masuk akal untuk harga token ini")?;
+
+        let (available0, available1) = if memecoin_adalah_token0 {
+            (diminta.min(saldo0), saldo1)
+        } else {
+            (saldo0, diminta.min(saldo1))
+        };
+
+        if available0.is_zero() && available1.is_zero() {
+            return Err("saldo kedua token nol, tidak ada yang bisa disetor".into());
+        }
+
+        let eth_balance = provider
+            .get_balance(pemilik)
+            .await
+            .map_err(|e| format!("gagal membaca saldo ETH: {e}"))?;
+        let eth_balance_f64 = eth_balance.to_string().parse::<f64>().unwrap_or(0.0) / 1e18;
+
+        let req = execute::susun_permintaan(
+            &pool,
+            tick_lower,
+            tick_upper,
+            available0,
+            available1,
+            pemilik,
+            size_usd,
+            eth_balance_f64,
+            // Perkiraan biaya gas. Rantai ini murah, tapi gate G6 tetap perlu
+            // angka supaya cadangan ETH benar benar diperiksa.
+            PERKIRAAN_GAS_ETH,
+            DEADLINE_DETIK,
+        );
+
+        let plan = crate::exec::pipeline::plan_open(
+            &provider,
+            position_manager,
+            &req,
+            &self.cfg.limits,
+            &self.cfg.execution,
+        )
+        .await;
+
+        let amount0: alloy::primitives::U256 = plan.amount0.parse().unwrap_or_default();
+        let amount1: alloy::primitives::U256 = plan.amount1.parse().unwrap_or_default();
+
+        let allowances = crate::exec::approve::check_allowances(
+            &provider,
+            multicall,
+            pemilik,
+            position_manager,
+            token0,
+            amount0,
+            token1,
+            amount1,
+        )
+        .await?;
+
+        let disusun_pada = chrono::Utc::now();
+        let expires_at = (disusun_pada
+            + chrono::Duration::seconds(execute::RENCANA_KEDALUWARSA_DETIK))
+        .to_rfc3339();
+
+        *self.pending_plan.write().await = Some(execute::RencanaTersimpan {
+            plan: plan.clone(),
+            token0,
+            token1,
+            amount0,
+            amount1,
+            disusun_pada,
+        });
+
+        Ok(execute::OpenPlanView {
+            plan,
+            allowances,
+            expires_at,
+        })
+    }
+
+    /// Kirim `approve` untuk satu token sebesar yang dibutuhkan rencana terakhir.
+    ///
+    /// Jumlahnya diambil dari rencana, bukan dari panel. Panel yang boleh
+    /// menentukan jumlah izin adalah panel yang boleh menguras wallet.
+    pub async fn on_approve_token(&self, token: String) {
+        match self.kirim_approve(token).await {
+            Ok(view) => {
+                let _ = self
+                    .events
+                    .send(protocol::ServerMessage::SendResult(Box::new(view)));
+            }
+            Err(pesan) => self.alert_kritis("approve_failed", pesan),
+        }
+    }
+
+    async fn kirim_approve(&self, token: String) -> Result<execute::SendResultView, String> {
+        let target: alloy::primitives::Address = token
+            .parse()
+            .map_err(|_| format!("`{token}` bukan alamat EVM yang valid"))?;
+
+        let (jumlah, _) = {
+            let guard = self.pending_plan.read().await;
+            let r = guard.as_ref().ok_or("belum ada rencana yang disusun")?;
+            if r.kedaluwarsa() {
+                return Err("rencana sudah kedaluwarsa, susun ulang".into());
+            }
+            if target == r.token0 {
+                (r.amount0, r.token0)
+            } else if target == r.token1 {
+                (r.amount1, r.token1)
+            } else {
+                return Err(format!("{token} bukan salah satu token rencana ini"));
+            }
+        };
+
+        if jumlah.is_zero() {
+            return Err("jumlah yang dibutuhkan nol, izin tidak perlu diberikan".into());
+        }
+
+        let provider = self
+            .chain
+            .provider()
+            .await
+            .map_err(|e| format!("RPC tidak bisa dipakai: {e}"))?;
+        let multicall = self
+            .registry
+            .contract("common", "multicall3")
+            .map_err(|e| e.to_string())?;
+        let spender = self
+            .registry
+            .contract("uniswap_v3", "position_manager")
+            .map_err(|e| e.to_string())?;
+
+        let mut wallet = self.wallet.lock().await;
+        let signer = wallet.signer().map_err(|e| e.to_string())?.clone();
+        drop(wallet);
+
+        let outcome = crate::exec::send::send_approve(
+            &provider,
+            &self.nonce,
+            &signer,
+            multicall,
+            target,
+            spender,
+            jumlah,
+            self.registry.chain.id,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+        Ok(execute::SendResultView {
+            kind: "approve",
+            outcome,
+        })
+    }
+
+    /// Setujui rencana terakhir dan kirim transaksinya.
+    ///
+    /// Rencana dikeluarkan dari slot SEBELUM dikirim, apa pun hasilnya. Rencana
+    /// yang tetap tersimpan setelah dikirim bisa disetujui dua kali, dan dua
+    /// persetujuan berarti dua posisi beserta dua kali biayanya.
+    pub async fn on_open_position(&self) {
+        match self.kirim_open().await {
+            Ok(view) => {
+                let terverifikasi = view.outcome.fully_verified();
+                let _ = self
+                    .events
+                    .send(protocol::ServerMessage::SendResult(Box::new(view)));
+                if !terverifikasi {
+                    self.alert_kritis(
+                        "open_unverified",
+                        "transaksi terkirim tapi posisinya belum terbukti sama dengan yang \
+                         diminta. Periksa hasilnya sebelum membuka posisi lagi"
+                            .into(),
+                    );
+                }
+            }
+            Err(pesan) => self.alert_kritis("open_failed", pesan),
+        }
+    }
+
+    async fn kirim_open(&self) -> Result<execute::SendResultView, String> {
+        let tersimpan = self
+            .pending_plan
+            .write()
+            .await
+            .take()
+            .ok_or("belum ada rencana yang disusun")?;
+
+        if tersimpan.kedaluwarsa() {
+            return Err("rencana sudah kedaluwarsa, susun ulang".into());
+        }
+
+        let provider = self
+            .chain
+            .provider()
+            .await
+            .map_err(|e| format!("RPC tidak bisa dipakai: {e}"))?;
+        let position_manager = self
+            .registry
+            .contract("uniswap_v3", "position_manager")
+            .map_err(|e| e.to_string())?;
+
+        let mut wallet = self.wallet.lock().await;
+        let signer = wallet.signer().map_err(|e| e.to_string())?.clone();
+        drop(wallet);
+
+        let outcome = crate::exec::send::send_open(
+            &provider,
+            &self.nonce,
+            &signer,
+            position_manager,
+            &tersimpan.plan,
+            self.registry.chain.id,
+            // Posisi V3 memakai WETH, bukan ETH asli, jadi tidak ada nilai yang
+            // ikut transaksi. ETH asli baru relevan di V4, fase 4.
+            alloy::primitives::U256::ZERO,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+        Ok(execute::SendResultView {
+            kind: "open",
+            outcome,
+        })
+    }
+
+    fn alert_kritis(&self, code: &str, message: String) {
+        tracing::warn!(code, %message, "eksekusi tidak dilanjutkan");
+        let _ = self.events.send(protocol::ServerMessage::Alert {
+            level: protocol::AlertLevel::Critical,
+            code: code.to_string(),
+            message,
+        });
     }
 
     pub async fn on_set_range(&self, lower_mcap: f64, upper_mcap: f64) {

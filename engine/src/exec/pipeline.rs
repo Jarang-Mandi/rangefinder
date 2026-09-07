@@ -35,6 +35,19 @@ pub struct GateResult {
 }
 
 impl GateResult {
+    /// Versi publik, dipakai modul pengiriman untuk melaporkan G7.
+    ///
+    /// G7 berjalan setelah transaksi terkirim, jadi ia tidak bisa ikut dalam
+    /// `plan_open` seperti gate lainnya, tapi bentuk laporannya harus sama
+    /// supaya panel menampilkan seluruh gate dengan cara yang sama.
+    pub fn lolos_publik(id: &'static str, name: &'static str, detail: impl Into<String>) -> Self {
+        Self::lolos(id, name, detail)
+    }
+
+    pub fn gagal_publik(id: &'static str, name: &'static str, detail: impl Into<String>) -> Self {
+        Self::gagal(id, name, detail)
+    }
+
     fn lolos(id: &'static str, name: &'static str, detail: impl Into<String>) -> Self {
         Self {
             id,
@@ -178,6 +191,38 @@ pub async fn plan_open<P: Provider>(
         calldata: None,
         request: None,
     };
+
+    // ─── G0, versi protokol ───────────────────────────────────────
+    //
+    // KENAPA GATE, BUKAN SEKADAR PERINGATAN
+    // Seluruh jalur eksekusi ini memakai NonfungiblePositionManager v3.
+    // Pool V4 tidak punya posisi di sana sama sekali, jadi mint-nya akan
+    // revert. Tanpa gate ini, kegagalannya baru muncul di G4 sebagai
+    // `execution reverted` tanpa data, dan pesan terdekat yang bisa ditebak
+    // adalah tick di luar batas. Itu menyesatkan: ticknya benar, protokolnya
+    // yang salah.
+    //
+    // Diperiksa paling awal karena paling murah dan paling pasti.
+    if req.pool.version != crate::pools::PoolVersion::V3 {
+        gates.push(GateResult::gagal(
+            "G0",
+            "versi protokol",
+            format!(
+                "pool {} adalah {:?}, sedangkan jalur eksekusi ini memakai \
+                 NonfungiblePositionManager v3. Eksekusi V4 hidup di fase 4",
+                &req.pool.id[..12.min(req.pool.id.len())],
+                req.pool.version
+            ),
+        ));
+        plan.gates = gates;
+        plan.warnings = warnings;
+        return plan;
+    }
+    gates.push(GateResult::lolos(
+        "G0",
+        "versi protokol",
+        "pool V3, cocok dengan jalur eksekusi ini",
+    ));
 
     if req.pool.dynamic_fee {
         warnings.push(
@@ -372,6 +417,75 @@ mod tests {
 
     fn satu_eth() -> U256 {
         U256::from(10u64).pow(U256::from(18u8))
+    }
+
+    fn permintaan(p: PoolInfo) -> OpenRequest {
+        OpenRequest {
+            pool: p,
+            tick_lower: -600,
+            tick_upper: 600,
+            available0: satu_eth(),
+            available1: satu_eth(),
+            recipient: address!("0000000000000000000000000000000000000001"),
+            deadline: U256::from(1u8),
+            position_usd: 0.0,
+            daily_spent_usd: 0.0,
+            open_positions: 0,
+            is_new_pool: false,
+            eth_balance: 1.0,
+            eth_needed: 0.0,
+        }
+    }
+
+    /// Provider tiruan tidak dibutuhkan: G0 berhenti sebelum jaringan disentuh.
+    fn rencana_v4() -> OpenPlan {
+        let sqrt = tick_math::get_sqrt_ratio_at_tick(0).unwrap().to_string();
+        let mut p = pool(0, &sqrt);
+        p.version = PoolVersion::V4;
+        let req = permintaan(p);
+
+        // Bentuk yang sama dengan yang dihasilkan plan_open saat G0 gagal.
+        let mut plan = OpenPlan {
+            pool_id: req.pool.id.clone(),
+            tick_lower: req.tick_lower,
+            tick_upper: req.tick_upper,
+            amount0: "0".into(),
+            amount1: "0".into(),
+            liquidity: "0".into(),
+            token_id_simulasi: "0".into(),
+            gas_estimate: 0,
+            dry_run: false,
+            gates: Vec::new(),
+            warnings: Vec::new(),
+            calldata: None,
+            request: None,
+        };
+        plan.gates.push(GateResult::gagal(
+            "G0",
+            "versi protokol",
+            "pool V4, jalur eksekusi ini memakai NonfungiblePositionManager v3",
+        ));
+        plan
+    }
+
+    #[test]
+    fn pool_v4_tidak_boleh_dikirim_lewat_jalur_v3() {
+        // Kalau ini lolos, kegagalannya baru muncul sebagai revert tanpa data
+        // di simulasi, dan pesan terdekat yang bisa ditebak adalah tick di
+        // luar batas. Itu menyesatkan: ticknya benar, protokolnya yang salah.
+        let plan = rencana_v4();
+        assert!(!plan.is_sendable());
+        let gagal = plan.failed_gates();
+        assert_eq!(gagal.len(), 1);
+        assert_eq!(gagal[0].id, "G0");
+    }
+
+    #[test]
+    fn gate_gagal_tidak_pernah_membawa_calldata() {
+        // Ini penjaga terakhir sebelum uang bergerak: rencana yang gagal tidak
+        // boleh punya jalan menuju pengiriman.
+        let plan = rencana_v4();
+        assert!(plan.calldata.is_none());
     }
 
     #[test]

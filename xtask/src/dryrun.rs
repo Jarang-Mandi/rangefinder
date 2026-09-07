@@ -27,6 +27,14 @@ use rangefinder_engine::wallet::Wallet;
 /// Lebar range percobaan, dalam kelipatan tick spacing pool.
 const LEBAR_SPACING: i32 = 10;
 
+/// Potong angka panjang supaya tabelnya tetap terbaca di terminal sempit.
+fn ringkas_teks(v: &str) -> String {
+    if v.len() <= 12 {
+        return v.to_string();
+    }
+    format!("{}...{} digit", &v[..6], v.len())
+}
+
 pub async fn run(repo_root: &Path, token_arg: &str, from_arg: Option<&str>) -> Result<bool> {
     println!("  Dry run pipeline");
     println!("  ----------------");
@@ -38,12 +46,6 @@ pub async fn run(repo_root: &Path, token_arg: &str, from_arg: Option<&str>) -> R
     let token: Address = token_arg
         .parse()
         .with_context(|| format!("`{token_arg}` bukan alamat EVM"))?;
-    let weth: Address = registry
-        .tokens
-        .get("weth")
-        .context("weth tidak ada di chain.toml")?
-        .address
-        .parse()?;
 
     let from = tentukan_pengirim(repo_root, from_arg, &cfg)?;
 
@@ -55,13 +57,34 @@ pub async fn run(repo_root: &Path, token_arg: &str, from_arg: Option<&str>) -> R
     println!("  dry run   {}", cfg.execution.dry_run);
     println!();
 
-    // ─── Cari pool ────────────────────────────────────────────────
-    let semua = pools::discover_all(&provider, &registry, token, weth).await;
-    let layak = pools::usable_pools(semua);
-    let Some(pool) = layak.first().cloned() else {
-        println!("  Tidak ada pool dengan likuiditas untuk pasangan ini.");
+    // ─── Cari pool, TANPA mengandaikan pasangannya ────────────────
+    //
+    // Versi lama alat ini mencari pasangan terhadap WETH saja, dan itu
+    // melewatkan seluruh pasar untuk token yang berpasangan dengan
+    // stablecoin. Lihat memory/005.
+    let snapshot = pools::muat_token(
+        &provider,
+        &registry,
+        None,
+        token,
+        pools::ModePencarian::Penuh,
+    )
+    .await?;
+
+    let Some(kelompok) = snapshot.quotes.first() else {
+        println!("  Tidak ada pool dengan likuiditas untuk token ini.");
         return Ok(false);
     };
+    let Some(pool) = kelompok.pools.first().cloned() else {
+        println!("  Kelompok teratas tidak punya pool layak.");
+        return Ok(false);
+    };
+    println!(
+        "  pasangan  {} ({} desimal), {} pool layak",
+        kelompok.quote_symbol,
+        kelompok.quote_decimals,
+        kelompok.pools.len()
+    );
 
     println!(
         "  pool      {} {:?} spacing {} tick {}",
@@ -168,6 +191,38 @@ pub async fn run(repo_root: &Path, token_arg: &str, from_arg: Option<&str>) -> R
     println!("  token0     {}", plan.amount0);
     println!("  token1     {}", plan.amount1);
     println!("  bisa kirim {}", plan.is_sendable());
+
+    // ─── Izin ERC20 ───────────────────────────────────────────────
+    //
+    // Mint menarik token lewat transferFrom, jadi tanpa izin ia selalu
+    // revert setelah gas terbakar. Diperiksa di sini supaya kegagalan itu
+    // ketahuan sebelum ada transaksi sungguhan.
+    let multicall = registry.contract("common", "multicall3")?;
+    let token0: Address = pool.token0.parse()?;
+    let token1: Address = pool.token1.parse()?;
+    let amount0: U256 = plan.amount0.parse().unwrap_or_default();
+    let amount1: U256 = plan.amount1.parse().unwrap_or_default();
+
+    match rangefinder_engine::exec::approve::check_allowances(
+        &provider, multicall, from, npm, token0, amount0, token1, amount1,
+    )
+    .await
+    {
+        Ok(izin) => {
+            println!();
+            println!("  Izin ERC20 ke position manager");
+            for i in &izin {
+                println!(
+                    "  {} {} butuh {} punya {}",
+                    if i.insufficient { "KURANG" } else { "cukup " },
+                    &i.token[..10.min(i.token.len())],
+                    ringkas_teks(&i.needed),
+                    ringkas_teks(&i.current)
+                );
+            }
+        }
+        Err(e) => println!("  izin tidak terbaca: {e}"),
+    }
 
     if plan.dry_run {
         println!();

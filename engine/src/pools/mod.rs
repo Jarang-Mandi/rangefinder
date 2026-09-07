@@ -1165,6 +1165,23 @@ const SCAN_CHUNK_MINIMUM: u64 = 5_000;
 /// murah daripada menyapu 55 juta blok sejarah.
 pub const SCAN_LOOKBACK_DEFAULT: u64 = 3_000_000;
 
+/// Berapa kali menunggu saat RPC membatasi laju sebelum menyerah.
+const SABAR_MAKSIMUM: u32 = 4;
+
+/// Jeda dasar saat dibatasi laju. Naik berlipat tiap percobaan.
+const JEDA_DASAR_MS: u64 = 400;
+
+/// Benar kalau kegagalannya karena laju dibatasi, bukan karena rentangnya
+/// terlalu lebar.
+///
+/// Dikenali dari teks, karena lapisan transport membungkus kode HTTP-nya dan
+/// tidak menyediakan jalan yang lebih rapi. Kalau pengenalan ini meleset,
+/// akibatnya hanya kembali ke perilaku lama, yaitu mengecilkan rentang.
+fn dibatasi_laju(e: &impl std::fmt::Display) -> bool {
+    let teks = e.to_string();
+    teks.contains("429") || teks.to_lowercase().contains("too many requests")
+}
+
 /// Pindai log `Initialize` mundur dari blok terakhir.
 ///
 /// KENAPA MUNDUR, BUKAN MAJU
@@ -1191,6 +1208,7 @@ async fn scan_initialize_logs<P: Provider>(
     let mut out = Vec::new();
     let mut chunk = SCAN_CHUNK_AWAL;
     let mut hingga = sampai_blok;
+    let mut jeda_sisa = SABAR_MAKSIMUM;
 
     while hingga > batas_bawah {
         let mulai = hingga.saturating_sub(chunk).max(batas_bawah);
@@ -1216,6 +1234,23 @@ async fn scan_initialize_logs<P: Provider>(
                 hingga = mulai - 1;
             }
             Err(e) => {
+                // DIBATASI LAJU BERBEDA DARI RENTANG TERLALU LEBAR
+                //
+                // Keduanya muncul sebagai kegagalan yang sama, tapi obatnya
+                // berlawanan. Rentang yang kelebaran memang harus dipecah.
+                // Tapi kalau sebabnya 429, memecah rentang justru menambah
+                // jumlah permintaan dan memperburuk keadaan, sampai akhirnya
+                // pemindaian menyerah pada rentang kecil yang sebenarnya
+                // sanggup dilayani.
+                //
+                // Yang benar untuk 429 adalah menunggu, bukan mengecilkan.
+                if dibatasi_laju(&e) && jeda_sisa > 0 {
+                    let jeda = JEDA_DASAR_MS * (SABAR_MAKSIMUM - jeda_sisa + 1) as u64;
+                    jeda_sisa -= 1;
+                    tracing::debug!(jeda_ms = jeda, "RPC membatasi laju, menunggu");
+                    tokio::time::sleep(std::time::Duration::from_millis(jeda)).await;
+                    continue;
+                }
                 if chunk > SCAN_CHUNK_MINIMUM {
                     // Rentang terlalu lebar. Kecilkan lalu ulangi rentang yang
                     // sama, bukan lanjut mundur, supaya tidak ada blok terlewat.

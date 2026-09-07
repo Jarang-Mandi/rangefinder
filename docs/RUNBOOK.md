@@ -148,6 +148,75 @@ dana:
 dry_run = false
 ```
 
+## Membuka posisi pertama
+
+Tiga langkah, dan sengaja tidak digabung jadi satu tombol. Yang disetujui di
+langkah ketiga memindahkan uang sungguhan.
+
+### 1. Susun rencana
+
+Muat token, atur garis range di chart gmgn, lalu isi nominal dolar di kartu
+Eksekusi dan tekan **Susun rencana**. Engine menjalankan seluruh gate dan
+mengembalikan hasilnya. Tidak ada apa pun yang dikirim ke rantai.
+
+Yang perlu diperiksa di kartu itu:
+
+| Baris | Artinya |
+| --- | --- |
+| G0 versi protokol | Pool V4 akan ditolak di sini. Eksekusi V4 hidup di fase 4 |
+| G2 builder calldata | Tick sudah pas di grid pool |
+| G4 simulasi | Kontrak menerima transaksinya, beserta likuiditas yang tercipta |
+| G5 asersi invarian | Hasil simulasi sesuai yang diharapkan, bukan sekadar tidak revert |
+| Likuiditas dan tick | Bandingkan dengan garis yang kamu gambar |
+
+Rencana berlaku tiga menit. Sesudah itu ia ditolak dan harus disusun ulang,
+karena jumlah tokennya dihitung dari harga saat rencana dibuat.
+
+### 2. Beri izin
+
+Kalau tombol **Beri izin** muncul, artinya allowance ERC20 ke
+NonfungiblePositionManager belum cukup. Ini transaksi sungguhan, tapi ia hanya
+memberi izin, tidak memindahkan token.
+
+Izin diberikan **sebesar yang dibutuhkan rencana itu**, bukan tak terbatas. Ini
+disengaja: wallet ini panas dan batas nominal posisi tidak dibatasi, jadi izin
+tak terbatas menaruh seluruh saldo pada satu kontrak selamanya. Konsekuensinya
+langkah ini berulang tiap posisi.
+
+Sesudah terkirim, engine membaca ulang allowance dari rantai untuk
+membuktikannya benar benar naik. Sebagian token mengembalikan `false` alih alih
+revert saat approve gagal, dan tanpa pembacaan ulang kegagalan itu baru
+ketahuan saat mint ikut gagal.
+
+### 3. Buka posisi
+
+Tombol **Buka posisi** hanya hidup kalau seluruh gate lolos, izin sudah cukup,
+dan `dry_run` sudah dimatikan. Sesudah receipt datang, gate G7 membaca ulang
+posisinya dari rantai dan membandingkannya dengan yang diminta.
+
+Tiga kemungkinan status:
+
+| Status | Artinya | Yang harus dilakukan |
+| --- | --- | --- |
+| `sukses` | Masuk blok, tidak revert | Periksa baris G7. Sukses tanpa G7 lolos berarti posisinya berbeda dari yang diminta |
+| `revert` | Masuk blok tapi ditolak kontrak. Gas tetap terbakar | Jangan ulangi sebelum tahu sebabnya |
+| `menggantung` | Receipt belum datang dalam 60 detik | Transaksinya SUDAH ada di rantai. Periksa di explorer. **Jangan kirim ulang**, karena dua transaksi berarti dua posisi |
+
+Engine tidak pernah mengirim ulang sendiri. Transaksi yang gagal karena alasan
+yang tidak dimengerti tidak boleh diulang oleh mesin.
+
+### Sebelum yang pertama
+
+Jalankan dry run terhadap tokennya lebih dulu, dari terminal:
+
+```
+cargo xtask dryrun <alamat_token>
+```
+
+Perintah itu menjalankan pipeline yang sama persis terhadap saldo sungguhan,
+menampilkan tiap gate, dan menyebutkan izin mana yang kurang. Kalau di sana
+merah, di panel juga akan merah.
+
 ## Verifikasi
 
 ```

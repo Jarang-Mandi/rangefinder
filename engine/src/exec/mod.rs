@@ -8,9 +8,12 @@
 //!   `pools` sengaja hanya membaca.
 
 pub mod abi_write;
+pub mod approve;
 pub mod calldata;
 pub mod golden;
 pub mod limits;
+pub mod nonce;
 pub mod pipeline;
+pub mod send;
 pub mod simulate;
 pub mod verify;

@@ -110,6 +110,8 @@ async fn main() -> Result<()> {
         started_at: Instant::now(),
         registry_checks: Arc::new(registry_checks),
         active: Arc::new(tokio::sync::RwLock::new(None)),
+        pending_plan: Arc::new(tokio::sync::RwLock::new(None)),
+        nonce: Arc::new(rangefinder_engine::exec::nonce::NonceKeeper::new()),
     };
 
     spawn_health_loop(state.clone());

@@ -106,6 +106,22 @@ async fn session(socket: WebSocket, state: AppState) {
                             Ok(ClientMessage::SetRange { lower_mcap, upper_mcap }) => {
                                 state.on_set_range(lower_mcap, upper_mcap).await;
                             }
+                            // Tiga pesan berikut menyentuh dana. Masing masing
+                            // dijalankan di tugas terpisah supaya loop ini tetap
+                            // membalas denyut selama transaksi menunggu receipt,
+                            // yang bisa memakan puluhan detik.
+                            Ok(ClientMessage::QuoteRange { size_usd }) => {
+                                let s = state.clone();
+                                tokio::spawn(async move { s.on_quote_range(size_usd).await });
+                            }
+                            Ok(ClientMessage::ApproveToken { token }) => {
+                                let s = state.clone();
+                                tokio::spawn(async move { s.on_approve_token(token).await });
+                            }
+                            Ok(ClientMessage::OpenPosition) => {
+                                let s = state.clone();
+                                tokio::spawn(async move { s.on_open_position().await });
+                            }
                             Ok(ClientMessage::Ping) => {
                                 // Denyut juga memundurkan kunci otomatis, karena
                                 // panel yang terbuka berarti user masih bekerja.

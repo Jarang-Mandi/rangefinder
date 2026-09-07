@@ -177,12 +177,70 @@ export interface RangeView {
   warnings: string[];
 }
 
+/** Hasil satu gate validasi, ditampilkan apa adanya di panel. */
+export interface GateResult {
+  id: string;
+  name: string;
+  passed: boolean;
+  detail: string;
+}
+
+/** Izin ERC20 yang dibutuhkan sebuah rencana. */
+export interface AllowanceNeed {
+  token: string;
+  needed: string;
+  current: string;
+  insufficient: boolean;
+}
+
+/**
+ * Rencana membuka posisi yang sudah lolos gate, menunggu persetujuan.
+ *
+ * Calldata TIDAK ikut dikirim. Ia tinggal di engine, karena rencana yang
+ * bolak balik lewat panel bisa saja kembali dalam keadaan sudah diubah, dan
+ * bagian yang paling menarik untuk diubah justru calldata-nya.
+ */
+export interface OpenPlanView {
+  pool_id: string;
+  tick_lower: number;
+  tick_upper: number;
+  amount0: string;
+  amount1: string;
+  liquidity: string;
+  token_id_simulasi: string;
+  gas_estimate: number;
+  dry_run: boolean;
+  gates: GateResult[];
+  warnings: string[];
+  allowances: AllowanceNeed[];
+  expires_at: string;
+}
+
+export type TxStatus = "sukses" | "revert" | "menggantung";
+
+/** Hasil satu pengiriman transaksi. */
+export interface SendResultView {
+  /** `approve` atau `open`, supaya panel tahu kartu mana yang diperbarui. */
+  kind: string;
+  tx_hash: string;
+  nonce: number;
+  gas_limit: number;
+  status: TxStatus;
+  block_number: number | null;
+  gas_used: number | null;
+  token_id: string | null;
+  verification: GateResult | null;
+  sent_at: string;
+}
+
 export type ServerMessage =
   | { type: "hello"; engine_version: string; protocol_version: number }
   | ({ type: "engine_status" } & Partial<EngineStatus>)
   | { type: "pong" }
   | ({ type: "token_state" } & Partial<TokenState>)
   | ({ type: "range_view" } & Partial<RangeView>)
+  | ({ type: "open_plan" } & Partial<OpenPlanView>)
+  | ({ type: "send_result" } & Partial<SendResultView>)
   | { type: "alert"; level: AlertLevel; code: string; message: string };
 
 export type ClientMessage =
@@ -192,7 +250,10 @@ export type ClientMessage =
   | { type: "chart_price"; address: string; mcap_usd: number }
   | { type: "select_pool"; pool_id: string }
   | { type: "select_quote"; quote: string }
-  | { type: "set_range"; lower_mcap: number; upper_mcap: number };
+  | { type: "set_range"; lower_mcap: number; upper_mcap: number }
+  | { type: "quote_range"; size_usd: number }
+  | { type: "approve_token"; token: string }
+  | { type: "open_position" };
 
 export function asRangeView(msg: unknown): RangeView | null {
   if (!msg || typeof msg !== "object") return null;
@@ -200,6 +261,27 @@ export function asRangeView(msg: unknown): RangeView | null {
   if (m.type !== "range_view") return null;
   const { type: _type, ...rest } = m;
   return rest as unknown as RangeView;
+}
+
+export function asOpenPlan(msg: unknown): OpenPlanView | null {
+  return untag<OpenPlanView>(msg, "open_plan");
+}
+
+export function asSendResult(msg: unknown): SendResultView | null {
+  return untag<SendResultView>(msg, "send_result");
+}
+
+/**
+ * Pesan di kabel adalah muatan yang diratakan bersama field `type`, karena
+ * serde memakai tag internal. Pembantu ini memisahkan keduanya supaya sisi UI
+ * tidak perlu tahu detail itu.
+ */
+function untag<T>(msg: unknown, type: string): T | null {
+  if (!msg || typeof msg !== "object") return null;
+  const m = msg as Record<string, unknown>;
+  if (m.type !== type) return null;
+  const { type: _type, ...rest } = m;
+  return rest as unknown as T;
 }
 
 export function asTokenState(msg: unknown): TokenState | null {

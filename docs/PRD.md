@@ -829,7 +829,11 @@ Mengikuti LPZenith: jika grid tick tidak memungkinkan penempatan range dalam 1 p
 
 ### 6.2 Jalur V3
 
-Mint lewat `NonfungiblePositionManager.mint(MintParams)`. Posisi berupa NFT ERC721. Approval memakai Permit2 supaya tidak perlu approve terpisah tiap token. Seluruh langkah dibungkus `multicall` milik NonfungiblePositionManager agar atomik.
+Mint lewat `NonfungiblePositionManager.mint(MintParams)`. Posisi berupa NFT ERC721. Seluruh langkah dibungkus `multicall` milik NonfungiblePositionManager agar atomik.
+
+**Koreksi terhadap rencana awal soal Permit2.** Bagian ini semula menyebut approval memakai Permit2 supaya tidak perlu approve terpisah tiap token. Itu keliru untuk jalur yang kita pakai. Permit2 dipakai UniversalRouter, sedangkan NonfungiblePositionManager v3 menarik token lewat `transferFrom` biasa, jadi ia butuh allowance ERC20 langsung ke alamatnya. Tanpa itu `mint` selalu revert dengan `TRANSFER_FROM_FAILED`, dan revert itu terjadi setelah gas terbakar.
+
+Karena itu membuka posisi berjalan dua transaksi: `approve` lebih dulu, lalu `mint`. Izin diberikan **sebesar yang dibutuhkan**, bukan tak terbatas. Wallet ini panas dan tersimpan di mesin user, dan batas nominal posisi sengaja tidak dibatasi atas permintaan user. Dua hal itu bersama berarti izin tak terbatas menaruh seluruh saldo pada satu kontrak, selamanya. Biaya tambahannya satu transaksi per posisi, dan pada rantai berblok 100 ms itu hampir tidak terasa.
 
 Aksi lain: `increaseLiquidity`, `decreaseLiquidity`, `collect`, `burn`. Rebalance adalah `decreaseLiquidity` penuh, lalu `collect`, lalu `mint` baru, semuanya dalam satu multicall.
 
@@ -957,8 +961,9 @@ Panel ke engine:
 | `select_pool` | `{ poolId }`, user memilih pool lain dari daftar | 2 |
 | `select_quote` | `{ quote }`, user berpindah ke pasangan token lawan yang lain. Tidak menyentuh jaringan, seluruh kelompok sudah ada di memori sejak token dimuat | 2 |
 | `set_range` | `{ lowerMcap, upperMcap }`, user menggeser garis. Batas dalam market cap USD karena itu satuan chart | 2 |
-| `quote_range` | `{ pool, tickLower, tickUpper, sizeUsd, sourceToken }` | 3 |
-| `open_position` | `{ quoteId }` | 3 |
+| `quote_range` | `{ sizeUsd }`. Susun rencana pada pool dan range yang sedang aktif, jalankan seluruh gate, TIDAK mengirim apa pun. Pool dan tick tidak ikut dikirim panel: keduanya sudah ada di engine, dan menerimanya dari panel berarti menerima parameter transaksi dari luar | 3 |
+| `approve_token` | `{ token }`. Kirim `approve` ERC20 sebesar yang dibutuhkan rencana terakhir. Jumlah dan spender datang dari engine, bukan dari panel | 3 |
+| `open_position` | tanpa isi. Menyetujui rencana terakhir yang tersimpan di engine. Rencana tidak pernah bolak balik lewat panel, karena bagian yang paling menarik untuk diubah justru calldata-nya | 3 |
 | `rebalance` | `{ positionId, tickLower, tickUpper }` | 3 |
 | `claim` | `{ positionId, swapToEth }` | 3 |
 | `close` | `{ positionId, swapToEth }` | 3 |
@@ -971,6 +976,8 @@ Engine ke panel:
 | `hello` | `{ engineVersion, protocolVersion }`, dikirim sekali saat tersambung | 1 |
 | `engine_status` | `{ engineVersion, uptimeSecs, chain, wallet, registry, canExecute, blockedReasons[] }` | 1 |
 | `pong` | balasan denyut | 1 |
+| `open_plan` | rencana lengkap beserta hasil tiap gate, izin ERC20 yang masih kurang, dan kapan rencananya kedaluwarsa | 3 |
+| `send_result` | `{ kind, txHash, nonce, gasLimit, status, blockNumber, gasUsed, tokenId, verification, sentAt }`. `kind` bernilai `approve` atau `open`. `status` bernilai `sukses`, `revert`, atau `menggantung` | 3 |
 | `alert` | `{ level, code, message, positionId }` | 1 |
 | `token_state` | `{ address, meta, quotes[], pools[], selectedQuote, selectedPoolId, error }`. Setiap `quote` membawa `{ quote, quoteSymbol, quoteDecimals, canonical, pools[] }`. Dikirim dua kali saat memuat: sekali cepat dari kunci pool yang tersimpan, sekali lagi setelah pemindaian selesai kalau ada yang berubah. Lihat 4.3c | 2 |
 | `range_view` | `{ poolId, tickSpacing, ethUsd, current, lower, upper, widthPct, inRange, warnings[] }`. Tiap batas memuat `tick`, `priceWeth`, `priceUsd`, `mcapUsd`, dan `driftBps`, yaitu selisih akibat pembulatan ke grid tick | 2 |

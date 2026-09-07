@@ -47,6 +47,25 @@ pub enum ClientMessage {
 
     /// User menggeser garis. Batasnya dalam market cap USD, satuan chart.
     SetRange { lower_mcap: f64, upper_mcap: f64 },
+
+    /// Susun rencana membuka posisi sebesar sekian dolar pada range sekarang.
+    ///
+    /// Tidak mengirim apa pun. Seluruh gate dijalankan dan hasilnya
+    /// dikirim balik sebagai `open_plan`, supaya user melihat persis apa
+    /// yang akan terjadi sebelum menyetujuinya.
+    QuoteRange { size_usd: f64 },
+
+    /// Kirim `approve` ERC20 untuk satu token, sebesar yang dibutuhkan
+    /// rencana terakhir. Alamat spender datang dari chain.toml, tidak
+    /// pernah dari panel.
+    ApproveToken { token: String },
+
+    /// Setujui rencana terakhir dan kirim transaksinya.
+    ///
+    /// Tidak membawa rencana, hanya persetujuan. Rencana yang datang
+    /// kembali dari panel bisa saja sudah diubah, dan yang diubah itu
+    /// justru calldata.
+    OpenPosition,
 }
 
 /// Pesan dari engine ke panel.
@@ -66,6 +85,12 @@ pub enum ServerMessage {
     TokenState(Box<TokenState>),
     /// Range dalam tiga satuan sekaligus, hasil kalibrasi dan snap tick.
     RangeView(Box<crate::range::RangeView>),
+    /// Rencana membuka posisi beserta hasil seluruh gate.
+    OpenPlan(Box<crate::api::execute::OpenPlanView>),
+
+    /// Hasil satu pengiriman transaksi, `approve` maupun `open`.
+    SendResult(Box<crate::api::execute::SendResultView>),
+
     /// Kejadian yang layak diberitahukan ke user. Lihat PRD 3.7.
     Alert {
         level: AlertLevel,

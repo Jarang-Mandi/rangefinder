@@ -124,6 +124,15 @@ tersandung:
 | `scanned_to` hanya maju kalau pemindaian benar benar selesai | `pools::pindai_dan_gabung` | Memajukannya setelah kegagalan berarti blok yang terlewat tidak pernah dipindai lagi, dan poolnya hilang selamanya |
 | Desimal kutipan tidak pernah ditebak | `pools::kenali_quote` | Lawan yang tidak dikenal dibaca on chain, dan kalau gagal kelompoknya dibuang. Menebak 18 pada USDG menggeser harga sepuluh triliun kali |
 | Satu permintaan berat pada satu waktu | `pools::pindai_dan_gabung` | Dua getLogs berbarengan membuat yang kedua kena 429 lalu backoff, dan totalnya lima kali lebih lambat daripada berurutan |
+| Chain id diperiksa sebelum menandatangani | `exec/send.rs::send_calldata` | Tanda tangan untuk chain id yang salah bisa diputar ulang di rantai lain, dan tetap sah selamanya |
+| Nonce dilepas kalau pengiriman gagal, TIDAK dilepas kalau hanya receiptnya belum datang | `exec/nonce.rs` | Nonce yang bocor membuat transaksi berikutnya menggantung. Melepas nonce yang sudah terpakai membuat dua transaksi bertabrakan |
+| Receipt sukses belum berarti berhasil | `exec/send.rs` dan `exec/verify.rs` | G7 membaca ulang posisinya dari rantai. Transaksi bisa sukses sambil menghasilkan posisi yang berbeda dari niat kita |
+| Rencana disimpan di engine, tidak bolak balik lewat panel | `api/mod.rs::pending_plan` | Rencana yang kembali dari panel bisa saja sudah diubah, dan bagian yang paling menarik untuk diubah justru calldata-nya |
+| Rencana dikeluarkan dari slot sebelum dikirim | `api/mod.rs::kirim_open` | Rencana yang masih tersimpan setelah dikirim bisa disetujui dua kali, dan dua persetujuan berarti dua posisi |
+| Izin ERC20 sebesar yang dibutuhkan, bukan tak terbatas | `exec/approve.rs` | Wallet panas ditambah batas nominal yang sengaja tidak dibatasi berarti izin tak terbatas menaruh seluruh saldo pada satu kontrak, selamanya |
+| Pool V4 ditolak jalur eksekusi V3 | `exec/pipeline.rs` gate G0 | Tanpa gate ini kegagalannya muncul sebagai revert tanpa data, dan tebakan terdekatnya menyalahkan tick yang sebenarnya benar |
+| RangeView memakai orientasi harga, MintParams memakai orientasi tick | `api/execute.rs::tick_menaik` | Saat memecoin token1, `lower.tick` justru yang lebih besar. Memakainya apa adanya menolak setiap posisi pada separuh pool yang ada |
+| 429 ditunggu, rentang kelebaran dipecah | `pools::scan_initialize_logs` | Keduanya muncul sebagai kegagalan yang sama tapi obatnya berlawanan. Memecah rentang saat kena 429 menambah permintaan dan memperburuk |
 | Konversi satuan hanya di engine | `range` dan `math` | Panel tidak menghitung apa pun. Angka di layar harus sama persis dengan yang tercatat on chain |
 | Kurs ETH diturunkan dari chart | `math::calibrate_eth_usd` | Sumber luar selalu sedikit meleset dari gmgn, dan garis ikut bergeser |
 | Sisi tampilan bertukar saat memecoin token1 | `range::build_view` | Tick yang lebih besar berarti harga memecoin lebih rendah. Batas atas dan bawah harus ditukar sebelum ditampilkan |
@@ -172,7 +181,7 @@ bytecode yang tidak cocok dengan yang dipin.
 | 1 | Engine: config, pairing, keystore, chain, api, xtask | **selesai dan terverifikasi jalan** |
 | 1 | Ekstensi: manifest, side panel, jembatan chart | selesai, typecheck bersih, build menghasilkan dist yang bisa dimuat |
 | 2 | Injeksi chart dan matematika satuan | **selesai**. Penemuan pool, kalibrasi kurs dari chart, konversi tiga satuan, snap tick beserta laporan drift, lingkaran penuh panel ke chart ke engine, dan uji integrasi terhadap snapshot gmgn |
-| 3 | Eksekusi V3 | **berjalan**. Keenam gate G1 sampai G7 kecuali pengiriman sudah ada dan teruji: registry, builder calldata, golden vector terhadap transaksi sungguhan, simulasi, asersi invarian, pembatas nilai, dan verifikasi pasca kirim. Yang belum: perakitan pipeline dan pengiriman transaksinya sendiri |
+| 3 | Eksekusi V3 | **selesai**. Gate G0 sampai G7 terangkai dan terbukti jalan terhadap pool sungguhan lewat `cargo xtask dryrun`: versi protokol, pembatas nilai, builder calldata, golden vector, simulasi, asersi invarian, izin ERC20, pengiriman beserta penjaga chain id dan nonce, serta verifikasi pasca kirim. Jalur panel lengkap: `quote_range`, `approve_token`, `open_position`. Yang belum pernah terjadi: satu pengiriman sungguhan, karena `dry_run` menyala secara bawaan dan mematikannya adalah keputusan user |
 | 4 | Eksekusi V4 dan zap | belum |
 | 5 | Positions, PnL, notifikasi | belum |
 | 6 | Signals, Optimizer, doktrin penempatan | belum |
