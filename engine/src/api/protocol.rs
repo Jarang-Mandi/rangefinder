@@ -60,6 +60,15 @@ pub enum ClientMessage {
     /// pernah dari panel.
     ApproveToken { token: String },
 
+    /// Minta riwayat notifikasi terakhir.
+    GetNotifications,
+
+    /// Minta daftar posisi LP milik wallet, dimuat ulang dari rantai.
+    ///
+    /// Menyentuh jaringan dan bisa makan beberapa detik, jadi jawabannya
+    /// datang belakangan sebagai `positions`.
+    GetPositions,
+
     /// Jalankan swap zap dari rencana terakhir.
     ///
     /// Transaksi terpisah dari membuka posisi, dan itu bukan pilihan:
@@ -97,6 +106,19 @@ pub enum ServerMessage {
 
     /// Hasil satu pengiriman transaksi, `approve` maupun `open`.
     SendResult(Box<crate::api::execute::SendResultView>),
+
+    /// Satu kejadian yang layak dimunculkan sebagai toast di halaman gmgn.
+    ///
+    /// Berbeda dari `alert`, yang dipakai untuk kegagalan seketika pada aksi
+    /// yang sedang dijalankan user. `notify` melewati pendinginan, masuk
+    /// riwayat, dan membawa petunjuk durasi serta suara.
+    Notify(Box<crate::notify::Kejadian>),
+
+    /// Riwayat notifikasi, terbaru lebih dulu.
+    NotifyHistory { items: Vec<crate::notify::Kejadian> },
+
+    /// Daftar posisi LP milik wallet beserta keadaannya.
+    Positions(Box<PositionsView>),
 
     /// Kejadian yang layak diberitahukan ke user. Lihat PRD 3.7.
     Alert {
@@ -156,6 +178,26 @@ pub struct RegistrySummary {
     pub unpinned: usize,
     pub no_code: usize,
     pub checks: Vec<RegistryCheck>,
+}
+
+/// Daftar posisi beserta ringkasannya.
+#[derive(Debug, Clone, Serialize)]
+pub struct PositionsView {
+    pub positions: Vec<crate::positions::Posisi>,
+    /// Alamat wallet yang posisinya ditampilkan. Panel menampilkannya
+    /// supaya tidak ada keraguan posisi siapa yang sedang dilihat.
+    pub owner: String,
+    /// Berapa yang sedang di luar range. Angka ini yang menentukan apakah
+    /// tab Positions perlu ditandai.
+    pub keluar_range: usize,
+    /// Ringkasan hasil seluruh posisi, dalam satuan token kutipan.
+    ///
+    /// Dihitung engine, bukan panel, supaya tidak ada dua tempat yang
+    /// menjumlahkan hal yang sama lalu menyimpang.
+    pub ringkasan: crate::pnl::Ringkasan,
+    /// Kosong kalau pemuatannya berhasil.
+    pub error: Option<String>,
+    pub dimuat_pada: String,
 }
 
 pub const PROTOCOL_VERSION: u32 = 1;

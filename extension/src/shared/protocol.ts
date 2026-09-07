@@ -268,6 +268,107 @@ export interface SendResultView {
   sent_at: string;
 }
 
+/**
+ * Komponen hasil sebuah posisi, dalam satuan token kutipan pool.
+ *
+ * Selalu dipisah, tidak pernah satu angka. Fee kotor menipu: posisi yang
+ * mengumpulkan fee besar bisa tetap rugi setelah impermanent loss, gas, dan
+ * slippage.
+ */
+export interface HasilPnl {
+  fee: number;
+  /** Positif berarti rugi. Ditampilkan sebagai pengurang. */
+  impermanent_loss: number;
+  gas: number;
+  slippage: number;
+  net: number;
+  /** Benar kalau sebagian angkanya direkonstruksi, bukan dari catatan. */
+  perkiraan: boolean;
+}
+
+export interface RingkasanPnl {
+  jumlah: number;
+  total_net: number;
+  total_fee: number;
+  total_biaya: number;
+  win_rate_bps: number;
+  perkiraan: number;
+}
+
+/** Satu posisi LP beserta keadaannya sekarang. */
+export interface Posisi {
+  token_id: string;
+  version: PoolVersion;
+  token0: string;
+  token1: string;
+  fee: number;
+  tick_lower: number;
+  tick_upper: number;
+  liquidity: string;
+  /** Tick pool sekarang. Null kalau poolnya tidak terbaca. */
+  tick_sekarang: number | null;
+  in_range: boolean;
+  /** Fee yang belum diklaim, dalam satuan terkecil. */
+  fee0: string;
+  fee1: string;
+  hooks: string | null;
+  sqrt_price_x96: string | null;
+  /** Jumlah token yang benar benar ada di dalam posisi pada harga sekarang. */
+  amount0: string;
+  amount1: string;
+  /** Null berarti nilainya tidak bisa dinyatakan dalam satuan yang berarti. */
+  pnl: HasilPnl | null;
+  /** Benar kalau posisinya sudah tidak punya likuiditas sama sekali. */
+  kosong: boolean;
+}
+
+export interface PositionsView {
+  positions: Posisi[];
+  owner: string;
+  keluar_range: number;
+  ringkasan: RingkasanPnl;
+  error: string | null;
+  dimuat_pada: string;
+}
+
+/**
+ * Satu kejadian yang layak dimunculkan sebagai toast.
+ *
+ * Berbeda dari `alert`, yang dipakai untuk kegagalan seketika pada aksi yang
+ * sedang dijalankan user. Kejadian melewati pendinginan dan masuk riwayat.
+ */
+export interface Kejadian {
+  level: AlertLevel;
+  code: string;
+  message: string;
+  /** Biasanya token id posisi. Null untuk kejadian yang tidak terikat posisi. */
+  subject: string | null;
+  at: string;
+  /** Benar kalau tertahan pendinginan sehingga tidak dimunculkan. */
+  ditahan: boolean;
+}
+
+/**
+ * Berapa lama toast bertahan, dalam milidetik. Nol berarti menetap sampai
+ * diklik. Angkanya mengikuti tabel di PRD 3.7, dan disalin di sini karena
+ * content script tidak bisa memanggil engine.
+ */
+export function durasiToastMs(level: AlertLevel): number {
+  switch (level) {
+    case "info":
+      return 6_000;
+    case "warning":
+      return 12_000;
+    default:
+      return 0;
+  }
+}
+
+/** Berapa ketukan nada yang dibunyikan untuk sebuah tingkat. */
+export function ketukanNada(level: AlertLevel): number {
+  return level === "info" ? 1 : level === "warning" ? 2 : 3;
+}
+
 export type ServerMessage =
   | { type: "hello"; engine_version: string; protocol_version: number }
   | ({ type: "engine_status" } & Partial<EngineStatus>)
@@ -276,6 +377,9 @@ export type ServerMessage =
   | ({ type: "range_view" } & Partial<RangeView>)
   | ({ type: "open_plan" } & Partial<OpenPlanView>)
   | ({ type: "send_result" } & Partial<SendResultView>)
+  | ({ type: "positions" } & Partial<PositionsView>)
+  | ({ type: "notify" } & Partial<Kejadian>)
+  | { type: "notify_history"; items: Kejadian[] }
   | { type: "alert"; level: AlertLevel; code: string; message: string };
 
 export type ClientMessage =
@@ -288,6 +392,8 @@ export type ClientMessage =
   | { type: "set_range"; lower_mcap: number; upper_mcap: number }
   | { type: "quote_range"; size_usd: number }
   | { type: "approve_token"; token: string }
+  | { type: "get_positions" }
+  | { type: "get_notifications" }
   | { type: "swap_zap" }
   | { type: "open_position" };
 
@@ -297,6 +403,14 @@ export function asRangeView(msg: unknown): RangeView | null {
   if (m.type !== "range_view") return null;
   const { type: _type, ...rest } = m;
   return rest as unknown as RangeView;
+}
+
+export function asPositions(msg: unknown): PositionsView | null {
+  return untag<PositionsView>(msg, "positions");
+}
+
+export function asNotify(msg: unknown): Kejadian | null {
+  return untag<Kejadian>(msg, "notify");
 }
 
 export function asOpenPlan(msg: unknown): OpenPlanView | null {

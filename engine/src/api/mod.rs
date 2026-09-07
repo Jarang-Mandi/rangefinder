@@ -87,6 +87,17 @@ pub struct AppState {
     /// Harus satu, karena dua penjaga akan memberikan nonce yang sama pada
     /// dua transaksi yang berbeda.
     pub nonce: Arc<crate::exec::nonce::NonceKeeper>,
+    /// Posisi yang terakhir dimuat.
+    ///
+    /// Disimpan bukan untuk ditampilkan, melainkan untuk dibandingkan. Yang
+    /// layak diberitahukan ke user adalah PERUBAHAN keadaan range, bukan
+    /// keadaannya, dan perbandingan butuh keadaan sebelumnya.
+    pub positions: Arc<tokio::sync::RwLock<Vec<crate::positions::Posisi>>>,
+    /// Penjaga pendinginan notifikasi beserta riwayatnya.
+    ///
+    /// Satu untuk seluruh engine, karena pendinginan yang terpisah per
+    /// koneksi tidak menahan apa pun saat panel dibuka tutup.
+    pub notifier: Arc<tokio::sync::RwLock<crate::notify::Notifier>>,
 }
 
 /// Keadaan token yang sedang aktif di panel.
@@ -928,6 +939,186 @@ impl AppState {
             outcome,
         })
     }
+    /// Catat sebuah kejadian, lalu siarkan kalau ia tidak tertahan pendinginan.
+    ///
+    /// Semua kejadian masuk riwayat, termasuk yang tertahan. Yang tertahan tidak
+    /// disiarkan, karena toast yang berulang setiap detik membuat user
+    /// mematikan notifikasi seluruhnya, dan itu hasil yang lebih buruk daripada
+    /// tidak punya notifikasi sama sekali.
+    pub async fn beri_tahu_subjek(
+        &self,
+        level: protocol::AlertLevel,
+        code: &str,
+        message: String,
+        subject: Option<String>,
+    ) {
+        let tingkat = match level {
+            protocol::AlertLevel::Info => crate::notify::Tingkat::Info,
+            protocol::AlertLevel::Warning => crate::notify::Tingkat::Warning,
+            protocol::AlertLevel::Critical => crate::notify::Tingkat::Critical,
+        };
+
+        let kejadian = {
+            let mut n = self.notifier.write().await;
+            n.catat(
+                tingkat,
+                code,
+                message,
+                subject,
+                chrono::Utc::now().timestamp(),
+            )
+        };
+
+        if kejadian.ditahan {
+            tracing::debug!(code, "kejadian tertahan pendinginan, hanya masuk riwayat");
+            return;
+        }
+
+        let _ = self
+            .events
+            .send(protocol::ServerMessage::Notify(Box::new(kejadian)));
+    }
+
+    /// Versi ringkas untuk kejadian yang tidak terikat posisi tertentu.
+    pub fn beri_tahu(&self, level: protocol::AlertLevel, code: &str, message: String) {
+        let state = self.clone();
+        let code = code.to_string();
+        tokio::spawn(async move {
+            state.beri_tahu_subjek(level, &code, message, None).await;
+        });
+    }
+
+    /// Kirim riwayat notifikasi ke panel.
+    pub async fn on_get_notifications(&self) {
+        let riwayat = self.notifier.read().await.riwayat();
+        let _ = self
+            .events
+            .send(protocol::ServerMessage::NotifyHistory { items: riwayat });
+    }
+
+    /// Muat ulang posisi LP wallet dan siarkan hasilnya.
+    ///
+    /// Pemuatannya menyentuh jaringan dan bisa makan beberapa detik, jadi ia
+    /// dijalankan di tugas terpisah. Kegagalan dikirim sebagai bagian dari
+    /// muatan, bukan menggantikannya, supaya panel tetap bisa menampilkan
+    /// posisi lama sambil menyebutkan apa yang salah.
+    pub async fn on_get_positions(&self) {
+        let view = self.susun_positions().await;
+
+        // Perubahan keadaan range diperiksa SEBELUM disimpan, karena
+        // perbandingannya butuh keadaan sebelumnya.
+        self.periksa_perubahan_range(&view.positions).await;
+
+        *self.positions.write().await = view.positions.clone();
+        let _ = self
+            .events
+            .send(protocol::ServerMessage::Positions(Box::new(view)));
+    }
+
+    async fn susun_positions(&self) -> protocol::PositionsView {
+        let waktu = chrono::Utc::now().to_rfc3339();
+
+        let pemilik = {
+            let w = self.wallet.lock().await;
+            w.address()
+        };
+        let Some(pemilik) = pemilik else {
+            return protocol::PositionsView {
+                positions: Vec::new(),
+                owner: String::new(),
+                keluar_range: 0,
+                ringkasan: crate::pnl::ringkas(&[]),
+                error: Some("wallet belum dibuat".into()),
+                dimuat_pada: waktu,
+            };
+        };
+
+        let provider = match self.chain.provider().await {
+            Ok(p) => p,
+            Err(e) => {
+                return protocol::PositionsView {
+                    positions: Vec::new(),
+                    owner: pemilik.to_string(),
+                    keluar_range: 0,
+                    ringkasan: crate::pnl::ringkas(&[]),
+                    error: Some(format!("RPC tidak bisa dipakai: {e}")),
+                    dimuat_pada: waktu,
+                }
+            }
+        };
+
+        let posisi = crate::positions::muat::muat_semua(
+            &provider,
+            &self.registry,
+            Some(&self.store),
+            pemilik,
+        )
+        .await;
+
+        let keluar = posisi.iter().filter(|p| !p.in_range && !p.kosong).count();
+        let hasil: Vec<crate::pnl::Hasil> =
+            posisi.iter().filter_map(|p| p.pnl.clone()).collect();
+        let ringkasan = crate::pnl::ringkas(&hasil);
+
+        protocol::PositionsView {
+            positions: posisi,
+            owner: pemilik.to_string(),
+            keluar_range: keluar,
+            ringkasan,
+            error: None,
+            dimuat_pada: waktu,
+        }
+    }
+
+    /// Bandingkan keadaan range sekarang dengan sebelumnya, lalu beri tahu.
+    ///
+    /// KENAPA PERBANDINGAN, BUKAN KEADAAN
+    /// Memberi tahu setiap kali posisi berada di luar range akan membanjiri
+    /// layar setiap kali daftar dimuat ulang. Yang layak diberitahukan adalah
+    /// PERUBAHANNYA: baru saja keluar, atau baru saja kembali masuk.
+    async fn periksa_perubahan_range(&self, sekarang: &[crate::positions::Posisi]) {
+        let sebelum = self.positions.read().await.clone();
+        if sebelum.is_empty() {
+            // Pemuatan pertama bukan perubahan. Memberi tahu di sini berarti
+            // membanjiri layar setiap kali engine baru dijalankan.
+            return;
+        }
+
+        let lama: std::collections::HashMap<&str, bool> = sebelum
+            .iter()
+            .map(|p| (p.token_id.as_str(), p.in_range))
+            .collect();
+
+        for p in sekarang {
+            if p.kosong {
+                continue;
+            }
+            let Some(dulu) = lama.get(p.token_id.as_str()) else {
+                continue;
+            };
+            if *dulu == p.in_range {
+                continue;
+            }
+
+            if p.in_range {
+                self.beri_tahu(
+                    protocol::AlertLevel::Info,
+                    "position_back_in_range",
+                    format!("Posisi #{} kembali masuk range", p.token_id),
+                );
+            } else {
+                self.beri_tahu(
+                    protocol::AlertLevel::Critical,
+                    "position_out_of_range",
+                    format!(
+                        "Posisi #{} keluar range dan berhenti menghasilkan fee",
+                        p.token_id
+                    ),
+                );
+            }
+        }
+    }
+
     /// Jalankan swap zap dari rencana terakhir.
     ///
     /// Rencananya TIDAK dikeluarkan dari slot, karena setelah swap user
@@ -1061,6 +1252,30 @@ impl AppState {
         )
         .await
         .map_err(|e| e.to_string())?;
+
+        // Catatan biaya disimpan hanya kalau posisinya benar benar tercipta.
+        // Tanpa ini, PnL posisi yang kita buka sendiri akan selamanya
+        // ditandai perkiraan, padahal kita tahu persis berapa yang disetor.
+        if let Some(token_id) = outcome.token_id.as_ref() {
+            crate::pnl::simpan(
+                &self.store,
+                &crate::pnl::Catatan {
+                    token_id: token_id.clone(),
+                    setor0: tersimpan.plan.amount0.clone(),
+                    setor1: tersimpan.plan.amount1.clone(),
+                    harga_buka: 0.0,
+                    // Gas dinyatakan dalam ETH, sedangkan PnL dalam token
+                    // kutipan. Konversinya butuh kurs, yang baru ada saat
+                    // chart terbuka, jadi nilainya diisi nol dan bukan
+                    // ditebak. Angka yang ditebak lebih buruk daripada nol
+                    // yang jujur, karena ia terlihat seperti fakta.
+                    gas_kutipan: 0.0,
+                    slippage_kutipan: 0.0,
+                    dibuka_pada: outcome.sent_at.clone(),
+                    tx_buka: Some(outcome.tx_hash.clone()),
+                },
+            );
+        }
 
         Ok(execute::SendResultView {
             kind: "open",

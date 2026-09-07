@@ -308,6 +308,7 @@ cargo xtask dryrun <token> [pengirim]   jalankan seluruh pipeline tanpa mengirim
 cargo xtask pairs <token>  lihat token itu berpasangan dengan apa saja di V4
 cargo xtask v4probe       buktikan ABI V4 ada di bytecode yang terpasang
 cargo xtask zap <token> [nominal]   jalankan penyelesai zap terhadap pool sungguhan
+cargo xtask positions <wallet>     muat posisi LP sebuah wallet dari rantai
 cargo test                seluruh uji unit engine
 cargo clippy --all-targets
 ```

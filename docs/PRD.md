@@ -971,6 +971,64 @@ Kalau encoder memakai struct standar, `hookData` akan mendarat di posisi yang sa
 
 **Izin swap terpisah dari izin posisi.** UniversalRouter menarik token lewat Permit2 juga, dan izin ke PositionManager tidak berlaku untuknya. Panel menampilkan langkah izin router sebagai bagian dari daftar yang sama.
 
+### 6.9 Menemukan posisi milik wallet
+
+Kedua protokol butuh cara yang sama sekali berbeda, dan perbedaannya ditemukan lewat pemeriksaan bytecode, bukan dari dokumentasi.
+
+| Kontrak | `balanceOf` | `tokenOfOwnerByIndex` | `totalSupply` | `tokenByIndex` |
+| --- | --- | --- | --- | --- |
+| NonfungiblePositionManager v3 | ada | ada | ada | ada |
+| PositionManager V4 | ada | tidak ada | tidak ada | tidak ada |
+
+V3 mengimplementasikan ERC721Enumerable sepenuhnya, jadi posisinya dihitung lewat `balanceOf` lalu diambil satu per satu dengan `tokenOfOwnerByIndex`. Semuanya muat dalam dua permintaan.
+
+V4 tidak. Satu satunya cara adalah memindai event `Transfer` yang menuju wallet itu, lalu membaca ulang kepemilikannya. Hasil pemindaian disimpan supaya pemuatan berikutnya hanya melihat blok baru.
+
+**Yang disimpan hanya daftar calon, bukan kepemilikannya.** NFT posisi bisa berpindah kapan saja, dan cache yang menyimpan kepemilikan akan menampilkan posisi milik orang lain. Itu kesalahan yang paling membingungkan yang bisa dilakukan alat seperti ini.
+
+### 6.10 Fee yang belum diklaim
+
+Field `tokensOwed0` dan `tokensOwed1` pada posisi V3 hanya diperbarui saat posisinya disentuh, yaitu saat likuiditas berubah atau fee diklaim. Posisi yang dibuka lalu didiamkan akan melaporkan nol selamanya, padahal fee-nya terus bertambah. Menampilkan nol berarti user mengira posisinya tidak menghasilkan apa apa.
+
+Karena itu keduanya dibaca dengan cara lain, dan caranya berbeda per protokol:
+
+| Protokol | Cara | Kenapa |
+| --- | --- | --- |
+| V3 | Simulasikan `collect` lewat `eth_call` dari pemiliknya | Menjalankan perhitungan yang sama persis dengan yang akan terjadi sungguhan |
+| V4 | `StateView.getFeeGrowthInside` dikurangi `getPositionInfo` lalu dikali likuiditas | V4 tidak punya `collect` yang bisa disimulasikan |
+
+Simulasi `collect` tidak bisa lewat Multicall3, karena fungsi itu menuntut pemanggilnya adalah pemilik NFT, dan lewat multicall pemanggilnya menjadi multicall.
+
+**Pengurangan pertumbuhan fee wajib membungkus, bukan jenuh.** Kontrak Uniswap memakai aritmetika `unchecked`, dan nilainya memang dirancang melampaui batas lalu berputar. Memakai pengurangan yang jenuh akan melaporkan fee nol persis pada posisi yang paling lama berjalan, yaitu yang fee-nya paling besar.
+
+Pada V4, pemilik posisi di dalam PoolManager adalah PositionManager, bukan wallet user, dan `salt` adalah token id. Itu yang membedakan posisi dua wallet pada range yang sama persis, dan salah di sini menampilkan fee milik orang lain.
+
+### 6.11 Akuntansi hasil
+
+Fee kotor menipu. Posisi yang mengumpulkan fee besar bisa tetap rugi setelah impermanent loss, gas, dan slippage. Karena itu komponennya selalu dipisah, dan `net` selalu dihitung dari selisihnya, tidak pernah disimpan terpisah.
+
+**Impermanent loss diukur terhadap memegang, bukan terhadap modal awal.** Keduanya dinilai pada harga sekarang. Itu yang membuatnya benar benar mengukur akibat menjadi LP: kalau posisinya masih memegang persis yang disetor, hasilnya nol berapa pun harganya. Mengukurnya terhadap modal awal akan mencampur perubahan harga dengan kerugian menjadi LP, dan membuat strategi yang bagus terlihat buruk saat pasar turun.
+
+**Satuannya token kutipan pool, bukan dolar.** Nilai dinyatakan dalam sisi yang merupakan kutipan yang dikenal rantai ini, yaitu ETH asli atau entri `[tokens]` di chain.toml. Kalau kedua sisinya memecoin, PnL-nya tidak ditampilkan sama sekali.
+
+Itu keputusan yang disengaja. Menghitungnya dalam satuan terkecil token1 memang konsisten secara aritmetika, tapi kalau token1 ternyata memecoin, hasilnya adalah angka raksasa dalam satuan memecoin yang terbaca seperti dolar. Angka yang salah satuannya lebih berbahaya daripada tidak ada angka.
+
+**Posisi tanpa catatan tetap dihitung dan ditandai.** Posisi yang dibuka di luar Rangefinder tidak punya catatan berapa yang dulu disetor. Untuk posisi seperti itu, yang disetor dianggap sama dengan yang ada sekarang, sehingga impermanent loss-nya nol, dan hasilnya ditandai perkiraan. Menyembunyikannya justru melanggar permintaan user bahwa posisi dari luar dikelola penuh.
+
+### 6.12 Notifikasi
+
+Toast muncul di pojok kanan atas halaman gmgn, sesuai PRD 3.7. Yang perlu ditegaskan adalah bagaimana ia tetap sampai saat panel tertutup.
+
+**Content script menyambung sendiri ke engine.** Kalau jalurnya lewat side panel, notifikasi berhenti persis saat ia paling dibutuhkan, karena panel yang tertutup adalah keadaan paling umum: user menatap chart, bukan panel. Koneksi ini hanya mendengarkan, dan tidak pernah mengirim perintah yang mengubah keadaan. Halaman gmgn adalah lingkungan pihak ketiga.
+
+**Pendinginan berlaku per pasangan kode dan subjek, bukan per kode saja.** Dua posisi berbeda yang sama sama keluar range adalah dua kabar berbeda. Pendinginan per kode akan menyembunyikan yang kedua, dan posisi itu bisa jadi justru yang paling besar.
+
+**Riwayat menyimpan yang tertahan juga.** Toast boleh ditahan, catatan tidak. Catatan itulah yang menjelaskan apa yang terjadi saat user tidak menatap layar, dan kejadian yang tertahan ditandai supaya jelas kenapa ia tidak muncul.
+
+**Nada dibangkitkan, bukan berkas.** PRD 3.7 menyebut berkas audio pendek yang dibundel. Oscillator lebih baik untuk keperluan ini: tidak ada berkas yang dimuat, tidak ada jeda pada bunyi pertama, ukurannya nol, dan bunyinya dibedakan per tingkat hanya dengan mengubah jumlah ketukan. Audio dinyalakan pada interaksi pertama user di halaman gmgn, karena Chrome memblokirnya sampai saat itu.
+
+**Yang diberitahukan adalah perubahan, bukan keadaan.** Memberi tahu setiap kali posisi berada di luar range akan membanjiri layar setiap kali daftar dimuat ulang. Yang layak diberitahukan adalah baru saja keluar, atau baru saja kembali masuk. Pemuatan pertama tidak pernah memicu notifikasi.
+
 ## 7. Technical Specifications
 
 ### 7.1 Arsitektur
@@ -1037,6 +1095,8 @@ Panel ke engine:
 | `rebalance` | `{ positionId, tickLower, tickUpper }` | 3 |
 | `claim` | `{ positionId, swapToEth }` | 3 |
 | `close` | `{ positionId, swapToEth }` | 3 |
+| `get_positions` | tanpa isi. Muat ulang posisi LP wallet dari rantai. Menyentuh jaringan, jadi jawabannya datang belakangan sebagai `positions` | 5 |
+| `get_notifications` | tanpa isi. Minta riwayat notifikasi terakhir | 5 |
 | `scan` | `{ filters }` | 6 |
 
 Engine ke panel:
@@ -1049,6 +1109,9 @@ Engine ke panel:
 | `open_plan` | rencana lengkap beserta hasil tiap gate, `version` bernilai `v3` atau `v4`, daftar langkah izin yang masih kurang, `zap` kalau modal perlu ditukar lebih dulu, dan kapan rencananya kedaluwarsa. Setiap langkah izin membawa `{ jenis, token, needed, current, label }`, dan bentuknya seragam untuk kedua protokol | 3 |
 | `send_result` | `{ kind, txHash, nonce, gasLimit, status, blockNumber, gasUsed, tokenId, verification, sentAt }`. `kind` bernilai `approve`, `zap`, atau `open`. `status` bernilai `sukses`, `revert`, atau `menggantung` | 3 |
 | `alert` | `{ level, code, message, positionId }` | 1 |
+| `positions` | `{ positions[], owner, keluarRange, error, dimuatPada }`. Setiap posisi membawa versi protokol, PoolKey, tick, likuiditas, status in range, dan fee yang belum diklaim | 5 |
+| `notify` | `{ level, code, message, subject, at, ditahan }`. Berbeda dari `alert`: pesan ini melewati pendinginan, masuk riwayat, dan membawa petunjuk durasi serta suara. `alert` dipakai untuk kegagalan seketika pada aksi yang sedang dijalankan user | 5 |
+| `notify_history` | daftar kejadian terakhir, terbaru lebih dulu, paling banyak 50 | 5 |
 | `token_state` | `{ address, meta, quotes[], pools[], selectedQuote, selectedPoolId, error }`. Setiap `quote` membawa `{ quote, quoteSymbol, quoteDecimals, canonical, pools[] }`. Dikirim dua kali saat memuat: sekali cepat dari kunci pool yang tersimpan, sekali lagi setelah pemindaian selesai kalau ada yang berubah. Lihat 4.3c | 2 |
 | `range_view` | `{ poolId, tickSpacing, ethUsd, current, lower, upper, widthPct, inRange, warnings[] }`. Tiap batas memuat `tick`, `priceWeth`, `priceUsd`, `mcapUsd`, dan `driftBps`, yaitu selisih akibat pembulatan ke grid tick | 2 |
 | `price_tick` | `{ address, priceUsd, priceWeth, mcapUsd }` | 2 |

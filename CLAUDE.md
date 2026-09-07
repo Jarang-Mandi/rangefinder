@@ -90,7 +90,7 @@ engine/                 biner `rangefinder`, plus pustaka `rangefinder_engine`
     routes.rs           handler HTTP
     ws.rs               WebSocket ke panel
 
-xtask/                  verify, docs-check, golden, dryrun, pairs, v4probe, zap
+xtask/                  verify, docs-check, golden, dryrun, pairs, v4probe, zap, positions
   src/golden.rs         pengambil golden vector dari transaksi sungguhan
   src/dryrun.rs         jalankan pipeline penuh terhadap pool sungguhan
 extension/              ekstensi Chrome MV3
@@ -142,6 +142,14 @@ tersandung:
 | Kutipan quoter yang nol adalah kegagalan | `exec/v4/quote.rs` | Pool tanpa likuiditas di arah itu menjawab nol tanpa revert, dan menerimanya sebagai jawaban sah membuat pembagian modal sepenuhnya salah |
 | Struct UniversalRouter punya `minHopPriceX36` sebelum `hookData` | `exec/router_rbh.rs` | Terbukti dari offset `hookData` bernilai 0x140, sepuluh kata, sedangkan struct standar sembilan kata. Memakai struct standar membuat kontrak membaca sampah |
 | UniversalRouter butuh izin Permit2 sendiri | `exec/plan.rs::izin_permit2_untuk` | Izin ke PositionManager tidak berlaku untuknya, dan melewatkannya membuat swap revert setelah gas terbakar |
+| Kepemilikan NFT posisi tidak pernah di-cache | `positions/mod.rs::kandidat_v4` | NFT bisa berpindah kapan saja, dan cache kepemilikan akan menampilkan posisi milik orang lain |
+| Fee dibaca dari pertumbuhan, bukan `tokensOwed` | `positions/fees.rs` dan `muat.rs` | `tokensOwed` hanya diperbarui saat posisi disentuh, jadi posisi yang didiamkan melaporkan nol selamanya |
+| Pengurangan pertumbuhan fee membungkus, bukan jenuh | `positions/fees.rs` | Kontrak Uniswap memakai unchecked dan nilainya memang berputar. Jenuh membuat fee terbaca nol pada posisi yang paling lama berjalan |
+| Setiap angka di layar punya satuan yang bisa disebutkan | `positions/muat.rs::kutipan_pool` | PnL dalam satuan terkecil memecoin terbaca seperti dolar. Kalau satuannya tidak bisa disebutkan, angkanya tidak ditampilkan |
+| Impermanent loss diukur terhadap memegang | `pnl/mod.rs` | Terhadap modal awal akan mencampur perubahan harga dengan kerugian menjadi LP |
+| Notifikasi memberitakan perubahan, bukan keadaan | `api/mod.rs::periksa_perubahan_range` | Memberitakan keadaan membanjiri layar setiap kali daftar dimuat ulang |
+| Pendinginan per kode DAN subjek | `notify/mod.rs` | Dua posisi yang sama sama keluar range adalah dua kabar berbeda |
+| Varian serde bertag tidak boleh membungkus Vec langsung | `api/protocol.rs` | `NotifyHistory(Box<Vec<..>>)` gagal saat diserialkan dan koneksinya diam tanpa penjelasan. Pakai varian struct |
 | 429 ditunggu, rentang kelebaran dipecah | `pools::scan_initialize_logs` | Keduanya muncul sebagai kegagalan yang sama tapi obatnya berlawanan. Memecah rentang saat kena 429 menambah permintaan dan memperburuk |
 | Konversi satuan hanya di engine | `range` dan `math` | Panel tidak menghitung apa pun. Angka di layar harus sama persis dengan yang tercatat on chain |
 | Kurs ETH diturunkan dari chart | `math::calibrate_eth_usd` | Sumber luar selalu sedikit meleset dari gmgn, dan garis ikut bergeser |
@@ -193,7 +201,7 @@ bytecode yang tidak cocok dengan yang dipin.
 | 2 | Injeksi chart dan matematika satuan | **selesai**. Penemuan pool, kalibrasi kurs dari chart, konversi tiga satuan, snap tick beserta laporan drift, lingkaran penuh panel ke chart ke engine, dan uji integrasi terhadap snapshot gmgn |
 | 3 | Eksekusi V3 | **selesai**. Gate G0 sampai G7 terangkai dan terbukti jalan terhadap pool sungguhan lewat `cargo xtask dryrun`: versi protokol, pembatas nilai, builder calldata, golden vector, simulasi, asersi invarian, izin ERC20, pengiriman beserta penjaga chain id dan nonce, serta verifikasi pasca kirim. Jalur panel lengkap: `quote_range`, `approve_token`, `open_position`. Yang belum pernah terjadi: satu pengiriman sungguhan, karena `dry_run` menyala secara bawaan dan mematikannya adalah keputusan user |
 | 4 | Eksekusi V4 dan zap | **selesai**. ABI V4 dibuktikan ada di bytecode terpasang lewat `cargo xtask v4probe`, encoder aksi menghasilkan byte identik dengan transaksi V4 sungguhan sepanjang 868 byte, izin dua lapis lewat Permit2, gate G0 sampai G7 terangkai. Zap satu sisi memakai kutipan V4Quoter dan penyelesai bagi dua, dan encoder UniversalRouter fork membangun ulang transaksi swap sungguhan 1124 byte byte per byte termasuk field `minHopPriceX36`. `cargo xtask dryrun` dan `cargo xtask zap` hijau terhadap pool nyata |
-| 5 | Positions, PnL, notifikasi | belum |
+| 5 | Positions, PnL, notifikasi | **selesai**. Posisi V3 lewat ERC721Enumerable dan V4 lewat pemindaian Transfer, karena V4 tidak punya enumerasi. Fee dibaca dari pertumbuhan fee, bukan `tokensOwed`. PnL memisahkan fee, impermanent loss, gas, dan slippage, dinyatakan dalam token kutipan. Toast diinjeksi ke halaman gmgn dengan pendinginan dan riwayat, dan content script menyambung sendiri ke engine supaya kabar tetap sampai saat panel tertutup. Terbukti terhadap wallet sungguhan lewat `cargo xtask positions`. Yang belum: aksi tambah, rebalance, klaim, dan tutup dari kartu posisi |
 | 6 | Signals, Optimizer, doktrin penempatan | belum |
 | 7 | Self improvement | belum |
 

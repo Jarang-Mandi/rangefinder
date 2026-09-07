@@ -19,6 +19,7 @@
 
 mod dryrun;
 mod pairs;
+mod positions;
 mod v4probe;
 mod zap;
 mod golden;
@@ -62,6 +63,16 @@ fn main() -> Result<()> {
             let from = args.get(2).cloned();
             let rt = tokio::runtime::Runtime::new()?;
             let ok = rt.block_on(dryrun::run(&root, &token, from.as_deref()))?;
+            finish(ok)
+        }
+        "positions" => {
+            let alamat = args.get(1).cloned().unwrap_or_default();
+            if alamat.is_empty() {
+                eprintln!("cara pakai: cargo xtask positions <alamat_wallet>");
+                std::process::exit(2);
+            }
+            let rt = tokio::runtime::Runtime::new()?;
+            let ok = rt.block_on(positions::run(&root, &alamat))?;
             finish(ok)
         }
         "zap" => {

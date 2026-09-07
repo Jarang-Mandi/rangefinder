@@ -14,14 +14,18 @@ import {
   DEFAULT_ENGINE_ORIGIN,
   WS_SUBPROTOCOL,
   asEngineStatus,
+  asNotify,
   asOpenPlan,
+  asPositions,
   asRangeView,
   asSendResult,
   asTokenState,
   type ClientMessage,
   type EnginePing,
   type EngineStatus,
+  type Kejadian,
   type OpenPlanView,
+  type PositionsView,
   type RangeView,
   type SendResultView,
   type ServerMessage,
@@ -43,6 +47,9 @@ interface Handlers {
   onRangeView?: (view: RangeView) => void;
   onOpenPlan?: (plan: OpenPlanView) => void;
   onSendResult?: (result: SendResultView) => void;
+  onPositions?: (view: PositionsView) => void;
+  onNotify?: (k: Kejadian) => void;
+  onNotifyHistory?: (riwayat: Kejadian[]) => void;
 }
 
 const HEARTBEAT_MS = 20_000;
@@ -159,6 +166,21 @@ export class EngineClient {
         this.handlers.onRangeView?.(view);
         return;
       }
+      const posisi = asPositions(msg);
+      if (posisi) {
+        this.handlers.onPositions?.(posisi);
+        return;
+      }
+      const kabar = asNotify(msg);
+      if (kabar) {
+        this.handlers.onNotify?.(kabar);
+        return;
+      }
+      if (msg.type === "notify_history") {
+        const isi = (msg as unknown as { items?: Kejadian[] }).items;
+        this.handlers.onNotifyHistory?.(Array.isArray(isi) ? isi : []);
+        return;
+      }
       const plan = asOpenPlan(msg);
       if (plan) {
         this.handlers.onOpenPlan?.(plan);
@@ -251,6 +273,16 @@ export class EngineClient {
   /** Beri izin ERC20 sebesar yang dibutuhkan rencana terakhir. */
   approveToken(token: string) {
     this.send({ type: "approve_token", token });
+  }
+
+  /** Muat ulang posisi LP wallet dari rantai. */
+  getPositions() {
+    this.send({ type: "get_positions" });
+  }
+
+  /** Minta riwayat notifikasi terakhir. */
+  getNotifications() {
+    this.send({ type: "get_notifications" });
   }
 
   /** Jalankan swap zap dari rencana terakhir. */

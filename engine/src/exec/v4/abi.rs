@@ -105,3 +105,36 @@ sol! {
             returns (uint256 amountOut, uint256 gasEstimate);
     }
 }
+
+sol! {
+    #[sol(rpc)]
+    interface IStateViewV4 {
+        /// Pertumbuhan fee di dalam sebuah range, dipakai menghitung fee yang
+        /// belum diklaim.
+        function getFeeGrowthInside(bytes32 poolId, int24 tickLower, int24 tickUpper)
+            external
+            view
+            returns (uint256 feeGrowthInside0X128, uint256 feeGrowthInside1X128);
+
+        /// Keadaan posisi di dalam PoolManager.
+        ///
+        /// Pemiliknya adalah PositionManager, bukan wallet user, dan `salt`
+        /// adalah tokenId posisi. Ini yang membedakan posisi satu wallet dengan
+        /// wallet lain pada range yang sama persis.
+        function getPositionInfo(
+            bytes32 poolId,
+            address owner,
+            int24 tickLower,
+            int24 tickUpper,
+            bytes32 salt
+        )
+            external
+            view
+            returns (
+                uint128 liquidity,
+                uint256 feeGrowthInside0LastX128,
+                uint256 feeGrowthInside1LastX128
+            );
+    }
+}
+

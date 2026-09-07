@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use tokio::sync::{broadcast, Mutex};
 
-use rangefinder_engine::api::protocol::{AlertLevel, ServerMessage};
+use rangefinder_engine::api::protocol::AlertLevel;
 use rangefinder_engine::api::AppState;
 use rangefinder_engine::chain::{registry::Registry, ChainClient};
 use rangefinder_engine::config::Config;
@@ -112,6 +112,10 @@ async fn main() -> Result<()> {
         active: Arc::new(tokio::sync::RwLock::new(None)),
         pending_plan: Arc::new(tokio::sync::RwLock::new(None)),
         nonce: Arc::new(rangefinder_engine::exec::nonce::NonceKeeper::new()),
+        positions: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+        notifier: Arc::new(tokio::sync::RwLock::new(
+            rangefinder_engine::notify::Notifier::default(),
+        )),
     };
 
     spawn_health_loop(state.clone());
@@ -189,23 +193,25 @@ fn spawn_health_loop(state: AppState) {
             // Hanya beri tahu saat status berubah, bukan setiap detak, supaya
             // tidak membanjiri panel. Lihat aturan pendinginan di PRD 3.7.
             if sehat_sebelumnya != Some(health.healthy) {
-                let msg = if health.healthy {
-                    ServerMessage::Alert {
-                        level: AlertLevel::Info,
-                        code: "rpc_healthy".into(),
-                        message: "RPC kembali sehat".into(),
-                    }
+                // Lewat jalur notifikasi, bukan alert langsung, supaya ia
+                // ikut pendinginan dan masuk riwayat. RPC yang berkedip
+                // sehat dan sakit bergantian akan membanjiri layar tanpa ini.
+                if health.healthy {
+                    state.beri_tahu(
+                        AlertLevel::Info,
+                        "rpc_healthy",
+                        "RPC kembali sehat".into(),
+                    );
                 } else {
-                    ServerMessage::Alert {
-                        level: AlertLevel::Critical,
-                        code: "rpc_unhealthy".into(),
-                        message: health
+                    state.beri_tahu(
+                        AlertLevel::Critical,
+                        "rpc_unhealthy",
+                        health
                             .error
                             .clone()
                             .unwrap_or_else(|| "RPC tidak sehat".into()),
-                    }
-                };
-                let _ = state.events.send(msg);
+                    );
+                }
                 sehat_sebelumnya = Some(health.healthy);
             }
 
@@ -221,11 +227,11 @@ fn spawn_auto_lock_loop(state: AppState) {
             ticker.tick().await;
             let terkunci = state.wallet.lock().await.tick_auto_lock();
             if terkunci {
-                let _ = state.events.send(ServerMessage::Alert {
-                    level: AlertLevel::Warning,
-                    code: "wallet_auto_locked".into(),
-                    message: "Wallet terkunci otomatis karena tidak ada aktivitas".into(),
-                });
+                state.beri_tahu(
+                    AlertLevel::Warning,
+                    "wallet_auto_locked",
+                    "Wallet terkunci otomatis karena tidak ada aktivitas".into(),
+                );
                 state.broadcast_status().await;
             }
         }

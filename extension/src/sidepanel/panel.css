@@ -287,3 +287,46 @@
 .quote-chip.active .quote-count {
   color: var(--text);
 }
+
+/* Bar posisi harga di dalam range.
+ *
+ * Warna datar, bukan gradient, sesuai aturan desain proyek. Kedalaman dibedakan
+ * lewat border dan pergeseran nilai permukaan. */
+.pos-bar {
+  position: relative;
+  height: 6px;
+  margin-top: var(--s3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-bar);
+  background: var(--surface-raised);
+}
+
+/* Penanda harga sekarang. Digeser setengah lebarnya sendiri supaya titik
+ * tengahnya benar benar jatuh di posisi yang dimaksud. */
+.pos-bar-isi {
+  position: absolute;
+  top: -3px;
+  width: 3px;
+  height: 10px;
+  margin-left: -1px;
+  border-radius: 1px;
+  background: var(--accent);
+}
+
+/* Arah nilai pada kartu PnL. Warna datar tanpa latar, supaya angkanya tetap
+ * jadi yang paling terbaca dan bukan kotak berwarnanya. */
+.value.naik {
+  color: var(--upper);
+}
+
+.value.turun {
+  color: var(--lower);
+}
+
+/* Baris net dipisah garis, karena ia hasil dari baris di atasnya. */
+.row.pnl-net {
+  border-top: 1px solid var(--border);
+  padding-top: var(--s2);
+  margin-top: var(--s1);
+  font-weight: 600;
+}

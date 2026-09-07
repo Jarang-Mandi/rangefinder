@@ -28,8 +28,11 @@ import {
   gmgnTokenUrl,
   isEvmAddress,
   type EngineStatus,
+  type Kejadian,
   type OpenPlanView,
   type PoolInfo,
+  type PositionsView,
+  type Posisi,
   type QuoteGroup,
   type SendResultView,
   type RangeBound,
@@ -44,8 +47,8 @@ type TabId = "range" | "signals" | "positions" | "pnl";
 const TABS: { id: TabId; label: string; phase: number }[] = [
   { id: "range", label: "Range", phase: 1 },
   { id: "signals", label: "Signals", phase: 6 },
-  { id: "positions", label: "Positions", phase: 5 },
-  { id: "pnl", label: "PnL", phase: 5 },
+  { id: "positions", label: "Positions", phase: 0 },
+  { id: "pnl", label: "PnL", phase: 0 },
 ];
 
 export function App() {
@@ -62,6 +65,10 @@ export function App() {
   const [sendResult, setSendResult] = useState<SendResultView | null>(null);
   /** Menunggu jawaban engine. Mencegah tombol ditekan dua kali. */
   const [execBusy, setExecBusy] = useState(false);
+  const [positions, setPositions] = useState<PositionsView | null>(null);
+  const [posBusy, setPosBusy] = useState(false);
+  /** Riwayat notifikasi, terbaru lebih dulu. */
+  const [riwayat, setRiwayat] = useState<Kejadian[]>([]);
 
   const clientRef = useRef<EngineClient | null>(null);
   /** Tab gmgn yang sedang menampilkan chart. Tujuan perintah gambar garis. */
@@ -99,6 +106,17 @@ export function App() {
         drawnRef.current = "";
       },
       onRangeView: setRangeView,
+      onPositions: (v) => {
+        setPositions(v);
+        setPosBusy(false);
+      },
+      onNotify: (k) => {
+        // Toast-nya muncul di halaman gmgn, bukan di sini. Panel hanya
+        // menyimpan riwayatnya, karena panel bisa saja sedang tertutup saat
+        // kejadiannya terjadi.
+        setRiwayat((r) => [k, ...r].slice(0, 50));
+      },
+      onNotifyHistory: setRiwayat,
       onOpenPlan: (plan) => {
         setOpenPlan(plan);
         setExecBusy(false);
@@ -125,6 +143,9 @@ export function App() {
 
     clientRef.current = client;
     client.connect();
+    // Riwayat diminta sekali saat tersambung, supaya panel yang baru dibuka
+    // tetap bisa menjelaskan apa yang terjadi selagi ia tertutup.
+    self.setTimeout(() => client.getNotifications(), 500);
     return () => {
       client.disconnect();
       clientRef.current = null;
@@ -302,11 +323,31 @@ export function App() {
             }}
             onForget={forgetPairing}
           />
+        ) : tab === "pnl" ? (
+          <PnlTab
+            view={positions}
+            busy={posBusy}
+            onMuat={() => {
+              setPosBusy(true);
+              clientRef.current?.getPositions();
+            }}
+          />
+        ) : tab === "positions" ? (
+          <PositionsTab
+            view={positions}
+            busy={posBusy}
+            onMuat={() => {
+              setPosBusy(true);
+              clientRef.current?.getPositions();
+            }}
+          />
         ) : (
           <p class="phase-note">
             Tab ini hidup di fase {TABS.find((t) => t.id === tab)?.phase}.
           </p>
         )}
+
+        <RiwayatCard riwayat={riwayat} />
       </div>
 
       <StatusBar state={state} status={status} />
@@ -602,6 +643,408 @@ function TokenCard({
       ) : null}
     </>
   );
+}
+
+/**
+ * Riwayat notifikasi, terbaru lebih dulu.
+ *
+ * Ada di bawah setiap tab, karena PRD 3.7 meminta riwayat bisa dibuka dari
+ * side panel tanpa menyebut tab tertentu. Tertutup secara bawaan supaya tidak
+ * mendorong isi tab ke bawah.
+ *
+ * Kejadian yang tertahan pendinginan ikut tercatat di sini, dan ditandai.
+ * Toast boleh ditahan, catatan tidak: catatan inilah yang menjelaskan apa yang
+ * terjadi saat user tidak menatap layar.
+ */
+function RiwayatCard({ riwayat }: { riwayat: Kejadian[] }) {
+  const [buka, setBuka] = useState(false);
+  if (riwayat.length === 0) return null;
+
+  return (
+    <section class="card">
+      <div class="section-title">
+        <h2>Riwayat kabar</h2>
+        <button class="chip" style="cursor: pointer" onClick={() => setBuka((v) => !v)}>
+          {buka ? "tutup" : `${riwayat.length} tersimpan`}
+        </button>
+      </div>
+      {buka ? (
+        <div class="stack" style="margin-top: var(--s2)">
+          {riwayat.map((k, i) => (
+            <div key={`${k.at}:${k.code}:${i}`} class="row">
+              <span class="label">
+                <span
+                  class={`dot ${k.level === "critical" ? "bad" : k.level === "warning" ? "warn" : "ok"}`}
+                />
+                {jamSingkat(k.at)}
+              </span>
+              <span class="value muted">
+                {k.message}
+                {k.ditahan ? " (tertahan pendinginan)" : ""}
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+/** Jam dan menit dari waktu ISO. Cukup untuk menempatkan kejadian. */
+function jamSingkat(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? iso
+    : d.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" });
+}
+/**
+ * Tab PnL.
+ *
+ * KENAPA KOMPONENNYA SELALU DIPISAH
+ * Fee kotor menipu. Posisi yang mengumpulkan fee besar bisa tetap rugi setelah
+ * impermanent loss, gas, dan slippage. Kalau kartunya hanya menampilkan satu
+ * angka, kesalahan itu akan terulang karena tidak pernah terlihat. PRD 11
+ * menyebutnya eksplisit.
+ *
+ * Angka datang dari engine apa adanya. Panel tidak menjumlahkan apa pun sendiri,
+ * karena dua tempat yang menjumlahkan hal yang sama pasti menyimpang.
+ */
+function PnlTab({
+  view,
+  busy,
+  onMuat,
+}: {
+  view: PositionsView | null;
+  busy: boolean;
+  onMuat: () => void;
+}) {
+  if (!view) {
+    return (
+      <div class="stack">
+        <section class="card">
+          <div class="section-title">
+            <h2>PnL</h2>
+          </div>
+          <p class="muted" style="margin: var(--s2) 0 0">
+            Belum dimuat. Angka PnL dihitung dari posisi yang sedang berjalan.
+          </p>
+          <button
+            type="button"
+            class="primary"
+            style="margin-top: var(--s3); width: 100%"
+            disabled={busy}
+            onClick={onMuat}
+          >
+            {busy ? "Membaca rantai" : "Muat posisi"}
+          </button>
+        </section>
+      </div>
+    );
+  }
+
+  const r = view.ringkasan;
+  const berhasil = view.positions.filter((p) => p.pnl !== null);
+  const tanpaSatuan = view.positions.length - berhasil.length;
+
+  return (
+    <div class="stack">
+      <section class="card">
+        <div class="section-title">
+          <h2>Ringkasan</h2>
+          <span class="chip">{r.jumlah} posisi</span>
+        </div>
+
+        <div class="stack" style="margin-top: var(--s2)">
+          <div class="row">
+            <span class="label">Net</span>
+            <span class={`value num ${r.total_net >= 0 ? "naik" : "turun"}`}>
+              {angka(r.total_net)}
+            </span>
+          </div>
+          <div class="row">
+            <span class="label">Fee diperoleh</span>
+            <span class="value num">{angka(r.total_fee)}</span>
+          </div>
+          <div class="row">
+            <span class="label">Total biaya</span>
+            <span class="value num">{angka(r.total_biaya)}</span>
+          </div>
+          <div class="row">
+            <span class="label">Win rate</span>
+            <span class="value num">{(r.win_rate_bps / 100).toFixed(1)}%</span>
+          </div>
+        </div>
+
+        {r.perkiraan > 0 ? (
+          <p class="hint">
+            {r.perkiraan} dari {r.jumlah} memakai angka perkiraan. Posisi yang
+            dibuka di luar Rangefinder tidak punya catatan berapa yang dulu
+            disetor, jadi impermanent loss-nya tidak bisa dihitung dan dianggap
+            nol.
+          </p>
+        ) : null}
+
+        {tanpaSatuan > 0 ? (
+          <p class="hint">
+            {tanpaSatuan} posisi tidak bisa dinyatakan nilainya, karena kedua
+            sisinya memecoin dan tidak ada satuan yang berarti.
+          </p>
+        ) : null}
+
+        <button
+          type="button"
+          style="margin-top: var(--s3); width: 100%"
+          disabled={busy}
+          onClick={onMuat}
+        >
+          {busy ? "Membaca rantai" : "Muat ulang"}
+        </button>
+      </section>
+
+      {berhasil.map((p) => (
+        <PnlCard key={`${p.version}:${p.token_id}`} pos={p} />
+      ))}
+    </div>
+  );
+}
+
+function PnlCard({ pos }: { pos: Posisi }) {
+  const h = pos.pnl;
+  if (!h) return null;
+
+  return (
+    <section class="card">
+      <div class="section-title">
+        <h2>
+          {pos.version.toUpperCase()} #{pos.token_id}
+        </h2>
+        <span class="chip">
+          <span class={`dot ${h.net >= 0 ? "ok" : "bad"}`} />
+          {h.perkiraan ? "perkiraan" : "tercatat"}
+        </span>
+      </div>
+
+      <div class="stack" style="margin-top: var(--s2)">
+        <div class="row">
+          <span class="label">Fee diperoleh</span>
+          <span class="value num naik">{angka(h.fee)}</span>
+        </div>
+        <div class="row">
+          <span class="label">Impermanent loss</span>
+          <span class="value num turun">{angka(-h.impermanent_loss)}</span>
+        </div>
+        <div class="row">
+          <span class="label">Gas</span>
+          <span class="value num turun">{angka(-h.gas)}</span>
+        </div>
+        <div class="row">
+          <span class="label">Slippage zap</span>
+          <span class="value num turun">{angka(-h.slippage)}</span>
+        </div>
+        <div class="row pnl-net">
+          <span class="label">Net</span>
+          <span class={`value num ${h.net >= 0 ? "naik" : "turun"}`}>{angka(h.net)}</span>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/**
+ * Angka hasil, dalam satuan token kutipan pool.
+ *
+ * Bukan dolar, dan tidak pernah ditulis sebagai dolar. Pada pool berkutipan
+ * stablecoin keduanya memang berdekatan, tapi menyebutnya dolar berarti
+ * mengklaim ketepatan yang tidak kita punya.
+ */
+function angka(v: number): string {
+  if (!Number.isFinite(v)) return "?";
+  const tanda = v > 0 ? "+" : "";
+  return `${tanda}${v.toLocaleString("id-ID", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 4,
+  })}`;
+}
+
+/**
+ * Tab Positions.
+ *
+ * Menampilkan semua posisi LP milik wallet, termasuk yang dibuka di luar
+ * Rangefinder. Itu permintaan user yang eksplisit, dan konsekuensinya tidak ada
+ * bagian di sini yang boleh bergantung pada catatan lokal untuk sekadar
+ * menampilkan sebuah posisi.
+ *
+ * Yang keluar range naik ke puncak, karena itu yang butuh tindakan. Urutannya
+ * ditentukan engine, bukan di sini, supaya tidak ada dua tempat yang mengurutkan
+ * hal yang sama.
+ */
+function PositionsTab({
+  view,
+  busy,
+  onMuat,
+}: {
+  view: PositionsView | null;
+  busy: boolean;
+  onMuat: () => void;
+}) {
+  if (!view) {
+    return (
+      <div class="stack">
+        <section class="card">
+          <div class="section-title">
+            <h2>Positions</h2>
+          </div>
+          <p class="muted" style="margin: var(--s2) 0 0">
+            Belum dimuat. Tekan tombol di bawah untuk membaca posisi dari rantai.
+          </p>
+          <button
+            type="button"
+            class="primary"
+            style="margin-top: var(--s3); width: 100%"
+            disabled={busy}
+            onClick={onMuat}
+          >
+            {busy ? "Membaca rantai" : "Muat posisi"}
+          </button>
+        </section>
+      </div>
+    );
+  }
+
+  return (
+    <div class="stack">
+      <section class="card">
+        <div class="section-title">
+          <h2>Positions</h2>
+          <span class="chip">
+            {view.keluar_range > 0 ? (
+              <>
+                <span class="dot bad" />
+                {view.keluar_range} keluar range
+              </>
+            ) : (
+              <>
+                <span class="dot ok" />
+                {view.positions.length} posisi
+              </>
+            )}
+          </span>
+        </div>
+
+        {view.error ? (
+          <p class="muted" style="margin: var(--s2) 0 0">
+            {view.error}
+          </p>
+        ) : null}
+
+        <div class="row" style="margin-top: var(--s2)">
+          <span class="label">Wallet</span>
+          <span class="value num">{shortAddress(view.owner)}</span>
+        </div>
+
+        <button
+          type="button"
+          style="margin-top: var(--s3); width: 100%"
+          disabled={busy}
+          onClick={onMuat}
+        >
+          {busy ? "Membaca rantai" : "Muat ulang"}
+        </button>
+      </section>
+
+      {view.positions.map((p) => (
+        <PositionCard key={`${p.version}:${p.token_id}`} pos={p} />
+      ))}
+
+      {view.positions.length === 0 && !view.error ? (
+        <section class="card">
+          <p class="muted" style="margin: 0">
+            Tidak ada posisi dalam jendela pemindaian. Posisi V4 ditemukan lewat
+            log transfer, jadi yang lebih tua dari tiga juta blok baru muncul
+            setelah sekali ketemu.
+          </p>
+        </section>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Satu kartu posisi.
+ *
+ * Bar posisi harga di dalam range memakai warna datar, bukan gradient, sesuai
+ * aturan desain proyek.
+ */
+function PositionCard({ pos }: { pos: Posisi }) {
+  const porsi = porsiDalamRange(pos);
+  const nada = pos.kosong ? "" : pos.in_range ? "ok" : "bad";
+  const status = pos.kosong ? "kosong" : pos.in_range ? "di dalam" : "di luar";
+
+  return (
+    <section class="card">
+      <div class="section-title">
+        <h2>
+          {pos.version.toUpperCase()} #{pos.token_id}
+        </h2>
+        <span class="chip">
+          <span class={`dot ${nada}`} />
+          {status}
+        </span>
+      </div>
+
+      <div class="pos-bar" title={`Harga berada di ${(porsi * 100).toFixed(0)}% lebar range`}>
+        <div class="pos-bar-isi" style={`left: ${(porsi * 100).toFixed(2)}%`} />
+      </div>
+
+      <div class="stack" style="margin-top: var(--s2)">
+        <div class="row">
+          <span class="label">Fee tier</span>
+          <span class="value num">{(pos.fee / 10_000).toFixed(2)}%</span>
+        </div>
+        <div class="row">
+          <span class="label">Tick</span>
+          <span class="value num">
+            {pos.tick_lower} sampai {pos.tick_upper}
+          </span>
+        </div>
+        <div class="row">
+          <span class="label">Likuiditas</span>
+          <span class="value num">{pos.liquidity}</span>
+        </div>
+        <div class="row">
+          <span class="label">Fee belum diklaim</span>
+          <span class="value num">
+            {pos.fee0} dan {pos.fee1}
+          </span>
+        </div>
+      </div>
+
+      {pos.hooks && pos.hooks !== "0x0000000000000000000000000000000000000000" ? (
+        <p class="hint">
+          Pool ini memakai hook {shortAddress(pos.hooks)}. Periksa allowlist
+          sebelum menambah dana.
+        </p>
+      ) : null}
+
+      <p class="hint">
+        Aksi tambah, rebalance, klaim, dan tutup hidup di fase berikutnya. Kartu
+        ini sudah membaca keadaan sungguhan dari rantai.
+      </p>
+    </section>
+  );
+}
+
+/**
+ * Seberapa jauh harga sekarang di dalam range, sebagai porsi 0 sampai 1.
+ *
+ * Disalin dari engine dengan sengaja: ini murni untuk menggambar, dan tidak ada
+ * satu pun keputusan yang bergantung padanya. Nilai yang dipakai untuk
+ * keputusan selalu datang dari engine.
+ */
+function porsiDalamRange(p: Posisi): number {
+  if (p.tick_sekarang === null || p.tick_upper <= p.tick_lower) return 0.5;
+  const lebar = p.tick_upper - p.tick_lower;
+  return Math.min(1, Math.max(0, (p.tick_sekarang - p.tick_lower) / lebar));
 }
 
 /**

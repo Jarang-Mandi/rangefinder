@@ -14,6 +14,8 @@
  *   kita kirim ke halaman tidak terpantul balik dan menjadi lingkaran.
  */
 
+import { mulaiNotifikasi } from "./notifikasi";
+
 const CHANNEL = "rangefinder";
 
 window.addEventListener("message", (event) => {
@@ -34,6 +36,11 @@ chrome.runtime.onMessage.addListener((message: unknown) => {
   const { target: _t, ...payload } = m;
   window.postMessage({ channel: CHANNEL, direction: "to-page", ...payload }, "*");
 });
+
+// Notifikasi menyambung sendiri ke engine, tidak lewat panel. Alasannya ada di
+// notifikasi.ts: panel yang tertutup adalah keadaan paling umum, dan justru saat
+// itulah kabar penting harus tetap sampai.
+mulaiNotifikasi();
 
 // Menjadikan berkas ini modul, bukan skrip global, supaya konstanta di dalamnya
 // tidak bertabrakan dengan berkas content script lain saat pemeriksaan tipe.
