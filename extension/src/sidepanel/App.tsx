@@ -629,7 +629,10 @@ function ExecuteCard({
   const nominal = Number(size);
   const nominalValid = Number.isFinite(nominal) && nominal > 0;
 
-  const kurang = plan?.allowances.filter((a) => a.insufficient) ?? [];
+  // Engine sudah menyaring: daftar ini hanya berisi langkah yang memang
+  // masih kurang. Panel tidak menyaring ulang, karena dua tempat yang
+  // memutuskan hal yang sama pasti menyimpang.
+  const kurang = plan?.allowances ?? [];
   const gateGagal = plan?.gates.filter((g) => !g.passed) ?? [];
   const siapKirim =
     plan !== null && !plan.dry_run && gateGagal.length === 0 && kurang.length === 0;
@@ -638,7 +641,10 @@ function ExecuteCard({
     <section class="card">
       <div class="section-title">
         <h2>Eksekusi</h2>
-        {plan?.dry_run ? <span class="chip">dry run</span> : null}
+        <span class="chip">
+          {plan ? plan.version.toUpperCase() : "belum ada rencana"}
+          {plan?.dry_run ? " · dry run" : ""}
+        </span>
       </div>
 
       {!canExecute ? (
@@ -712,17 +718,18 @@ function ExecuteCard({
           {kurang.length > 0 ? (
             <div class="stack" style="margin-top: var(--s3)">
               <p class="hint">
-                Izin ERC20 belum cukup. Diberikan sebesar yang dibutuhkan saja,
-                bukan tak terbatas.
+                {plan.version === "v4"
+                  ? "V4 menarik token lewat Permit2, jadi izinnya dua lapis. Kerjakan berurutan, satu tombol satu transaksi."
+                  : "Izin ERC20 belum cukup. Diberikan sebesar yang dibutuhkan saja, bukan tak terbatas."}
               </p>
               {kurang.map((a) => (
                 <button
-                  key={a.token}
+                  key={`${a.jenis}:${a.token}`}
                   type="button"
                   disabled={busy}
                   onClick={() => onApprove(a.token)}
                 >
-                  Beri izin {shortAddress(a.token)}
+                  {a.label}
                 </button>
               ))}
             </div>

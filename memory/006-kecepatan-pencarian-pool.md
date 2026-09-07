@@ -74,6 +74,17 @@ dipindai. Pemuatan berikutnya cukup membaca keadaan, satu permintaan.
 | setelah pemindaian diserialkan | sekitar 3 detik |
 | dengan kunci pool tersimpan | 400 sampai 700 ms |
 
+## Tambahan dari fase 4
+
+Multicall ternyata juga bisa kena 429, dan versi pertamanya menyerah seketika
+dengan pesan `multicall aggregate3 gagal`. Batch itu sendiri satu permintaan,
+jadi memecahnya tidak menolong. Yang menolong hanya menunggu lalu mengulang,
+sama seperti pemindaian log.
+
+Pelajarannya berulang: pada RPC berbatas laju, setiap jalur yang menyentuh
+jaringan butuh perlakuan yang sama, dan memperbaikinya di satu tempat saja
+berarti tempat berikutnya akan mengulangi kegagalan yang sama.
+
 ## Aturan yang lahir dari sini
 
 1. **Cache hanya menyimpan yang tidak pernah berubah.** Kunci pool boleh,

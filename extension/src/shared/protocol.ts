@@ -185,12 +185,25 @@ export interface GateResult {
   detail: string;
 }
 
-/** Izin ERC20 yang dibutuhkan sebuah rencana. */
-export interface AllowanceNeed {
+/**
+ * Satu langkah izin yang masih harus dikerjakan.
+ *
+ * Bentuknya seragam untuk V3 dan V4. V3 butuh satu langkah per token, yaitu
+ * allowance ERC20 ke position manager. V4 butuh dua, karena ia menarik token
+ * lewat Permit2: token mengizinkan Permit2, lalu Permit2 mengizinkan position
+ * manager.
+ *
+ * Panel tidak perlu tahu bedanya. Ia menekan tombolnya sampai daftar ini
+ * kosong, dan engine yang memutuskan langkah mana yang dikerjakan.
+ */
+export interface LangkahIzin {
+  /** `erc20_ke_position_manager`, `erc20_ke_permit2`, atau `permit2_ke_position_manager`. */
+  jenis: string;
   token: string;
   needed: string;
   current: string;
-  insufficient: boolean;
+  /** Teks siap tampil, disusun engine supaya panel tidak menyusun kalimat sendiri. */
+  label: string;
 }
 
 /**
@@ -212,7 +225,9 @@ export interface OpenPlanView {
   dry_run: boolean;
   gates: GateResult[];
   warnings: string[];
-  allowances: AllowanceNeed[];
+  allowances: LangkahIzin[];
+  /** `v3` atau `v4`. */
+  version: string;
   expires_at: string;
 }
 

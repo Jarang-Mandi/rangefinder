@@ -118,6 +118,7 @@ pub async fn send_open<P: Provider>(
     keeper: &NonceKeeper,
     signer: &PrivateKeySigner,
     position_manager: Address,
+    multicall: Address,
     plan: &OpenPlan,
     chain_id_diharapkan: u64,
     value: U256,
@@ -202,24 +203,71 @@ pub async fn send_open<P: Provider>(
 
     // 5. Gate G7. Token id diambil dari log, bukan dari simulasi, karena yang
     //    kita periksa justru apakah kenyataan sama dengan perkiraan.
-    let token_id = token_id_dari_log(&receipt);
-    let verification = match (token_id, plan.request.as_ref()) {
-        (Some(id), Some(req)) => {
-            let harapan: u128 = plan.liquidity.parse().unwrap_or(0);
-            Some(verifikasi_posisi(provider, position_manager, id, req, harapan).await)
-        }
-        (None, _) => Some(GateResult::gagal_publik(
-            "G7",
-            "verifikasi pasca kirim",
-            "transaksi sukses tapi tidak ada event IncreaseLiquidity, token id tidak diketahui",
-        )),
-        (_, None) => Some(GateResult::gagal_publik(
-            "G7",
-            "verifikasi pasca kirim",
-            "rencana tidak menyimpan permintaan aslinya, tidak ada yang bisa dibandingkan",
-        )),
+    //
+    //    Cara membacanya berbeda per protokol. V3 memancarkan
+    //    `IncreaseLiquidity` di PositionManager. V4 tidak, jadi penandanya
+    //    adalah `Transfer` ERC721 dari alamat nol.
+    let (token_id, verification) = if let Some(v4) = plan.v4_request.as_ref() {
+        let id = crate::exec::v4::pipeline::token_id_dari_receipt(&receipt, position_manager);
+        let gate = match id {
+            Some(id) => {
+                match crate::exec::v4::verify::baca_posisi(
+                    provider,
+                    position_manager,
+                    multicall,
+                    id,
+                )
+                .await
+                {
+                    Ok(posisi) => match crate::exec::v4::verify::cocok_dengan_permintaan(
+                        &posisi, v4,
+                    ) {
+                        Ok(()) => GateResult::lolos_publik(
+                            "G7",
+                            "verifikasi pasca kirim",
+                            format!("posisi V4 {id} cocok dengan yang diminta"),
+                        ),
+                        Err(selisih) => GateResult::gagal_publik(
+                            "G7",
+                            "verifikasi pasca kirim",
+                            format!(
+                                "posisi V4 {id} berbeda dari yang diminta: {}",
+                                selisih.join("; ")
+                            ),
+                        ),
+                    },
+                    Err(e) => {
+                        GateResult::gagal_publik("G7", "verifikasi pasca kirim", e)
+                    }
+                }
+            }
+            None => GateResult::gagal_publik(
+                "G7",
+                "verifikasi pasca kirim",
+                "transaksi sukses tapi tidak ada Transfer NFT dari alamat nol, token id tidak diketahui",
+            ),
+        };
+        (id, Some(gate))
+    } else {
+        let id = token_id_dari_log(&receipt);
+        let gate = match (id, plan.request.as_ref()) {
+            (Some(id), Some(req)) => {
+                let harapan: u128 = plan.liquidity.parse().unwrap_or(0);
+                verifikasi_posisi(provider, position_manager, id, req, harapan).await
+            }
+            (None, _) => GateResult::gagal_publik(
+                "G7",
+                "verifikasi pasca kirim",
+                "transaksi sukses tapi tidak ada event IncreaseLiquidity, token id tidak diketahui",
+            ),
+            (_, None) => GateResult::gagal_publik(
+                "G7",
+                "verifikasi pasca kirim",
+                "rencana tidak menyimpan permintaan aslinya, tidak ada yang bisa dibandingkan",
+            ),
+        };
+        (id, Some(gate))
     };
-
     Ok(SendOutcome {
         tx_hash: format!("{tx_hash:#x}"),
         nonce: reservasi_nonce,
@@ -414,6 +462,41 @@ pub async fn send_approve<P: Provider>(
         verification,
         sent_at,
     })
+}
+
+/// Terjemahkan transaksi yang sudah terkirim menjadi hasil yang bisa ditampilkan.
+///
+/// Dipakai jalur yang tidak punya verifikasi khusus, seperti izin Permit2.
+/// Statusnya tetap dibedakan tiga: sukses, revert, dan menggantung. Yang
+/// terakhir bukan kegagalan, hanya belum diketahui, dan itu perbedaan penting.
+pub fn jadikan_hasil(t: Terkirim) -> SendOutcome {
+    let sent_at = chrono::Utc::now().to_rfc3339();
+    let tx_hash = format!("{:#x}", t.tx_hash);
+
+    match t.receipt {
+        Some(r) => SendOutcome {
+            tx_hash,
+            nonce: t.nonce,
+            gas_limit: t.gas_limit,
+            status: if r.status() { TxStatus::Sukses } else { TxStatus::Revert },
+            block_number: r.block_number,
+            gas_used: Some(r.gas_used),
+            token_id: None,
+            verification: None,
+            sent_at,
+        },
+        None => SendOutcome {
+            tx_hash,
+            nonce: t.nonce,
+            gas_limit: t.gas_limit,
+            status: TxStatus::Menggantung,
+            block_number: None,
+            gas_used: None,
+            token_id: None,
+            verification: None,
+            sent_at,
+        },
+    }
 }
 
 /// Tanda tangani, kirim, lalu tunggu receipt sampai batas waktu.

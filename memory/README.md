@@ -41,3 +41,4 @@ setiap agent.
 | `005-pasangan-token-dan-fee-jebakan.md` | Token lawan tidak boleh ditebak, dan pool ber-fee ekstrem |
 | `006-kecepatan-pencarian-pool.md` | Kenapa pencarian pool lambat, dan kenapa paralel justru memperburuk |
 | `007-pengiriman-transaksi.md` | Invarian pengiriman transaksi, dan tiga hal yang hampir terlewat |
+| `008-eksekusi-v4.md` | Cara kerja V4 dibaca dari rantai, izin dua lapis, dan jebakan kebiasaan V3 |

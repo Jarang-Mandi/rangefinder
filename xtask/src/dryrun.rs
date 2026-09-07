@@ -20,7 +20,7 @@ use anyhow::{Context, Result};
 use rangefinder_engine::chain::registry::Registry;
 use rangefinder_engine::config::{self, Config};
 use rangefinder_engine::exec::golden;
-use rangefinder_engine::exec::pipeline::{self, OpenRequest};
+use rangefinder_engine::exec::pipeline::OpenRequest;
 use rangefinder_engine::pools;
 use rangefinder_engine::wallet::Wallet;
 
@@ -41,7 +41,6 @@ pub async fn run(repo_root: &Path, token_arg: &str, from_arg: Option<&str>) -> R
 
     let registry = Registry::load_from(&Registry::default_path(repo_root))?;
     let cfg = Config::load()?;
-    let npm = registry.contract("uniswap_v3", "position_manager")?;
 
     let token: Address = token_arg
         .parse()
@@ -168,7 +167,17 @@ pub async fn run(repo_root: &Path, token_arg: &str, from_arg: Option<&str>) -> R
         eth_needed: 0.0,
     };
 
-    let plan = pipeline::plan_open(&provider, npm, &req, &cfg.limits, &cfg.execution).await;
+    // Jalur dipilih menurut versi pool. Mengirim mint V4 ke
+    // NonfungiblePositionManager v3 akan revert, dan sebaliknya.
+    let alamat = rangefinder_engine::exec::plan::AlamatEksekusi::dari_registry(&registry)?;
+    let plan = rangefinder_engine::exec::plan::plan_open_auto(
+        &provider,
+        &alamat,
+        &req,
+        &cfg.limits,
+        &cfg.execution,
+    )
+    .await;
 
     // ─── Laporan ──────────────────────────────────────────────────
     println!("  Gate");
@@ -197,33 +206,45 @@ pub async fn run(repo_root: &Path, token_arg: &str, from_arg: Option<&str>) -> R
     // Mint menarik token lewat transferFrom, jadi tanpa izin ia selalu
     // revert setelah gas terbakar. Diperiksa di sini supaya kegagalan itu
     // ketahuan sebelum ada transaksi sungguhan.
-    let multicall = registry.contract("common", "multicall3")?;
     let token0: Address = pool.token0.parse()?;
     let token1: Address = pool.token1.parse()?;
     let amount0: U256 = plan.amount0.parse().unwrap_or_default();
     let amount1: U256 = plan.amount1.parse().unwrap_or_default();
 
-    match rangefinder_engine::exec::approve::check_allowances(
-        &provider, multicall, from, npm, token0, amount0, token1, amount1,
+    match rangefinder_engine::exec::plan::izin_yang_kurang(
+        &provider,
+        &alamat,
+        pool.version,
+        from,
+        token0,
+        amount0,
+        token1,
+        amount1,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
     )
     .await
     {
-        Ok(izin) => {
+        Ok(langkah) if langkah.is_empty() => {
             println!();
-            println!("  Izin ERC20 ke position manager");
-            for i in &izin {
+            println!("  Izin sudah cukup, tidak ada langkah yang tersisa");
+        }
+        Ok(langkah) => {
+            println!();
+            println!("  Langkah izin yang masih kurang");
+            for l in &langkah {
                 println!(
-                    "  {} {} butuh {} punya {}",
-                    if i.insufficient { "KURANG" } else { "cukup " },
-                    &i.token[..10.min(i.token.len())],
-                    ringkas_teks(&i.needed),
-                    ringkas_teks(&i.current)
+                    "  {}  butuh {} punya {}",
+                    l.label,
+                    ringkas_teks(&l.needed),
+                    ringkas_teks(&l.current)
                 );
             }
         }
         Err(e) => println!("  izin tidak terbaca: {e}"),
     }
-
     if plan.dry_run {
         println!();
         println!("  Dry run menyala, tidak ada yang dikirim.");

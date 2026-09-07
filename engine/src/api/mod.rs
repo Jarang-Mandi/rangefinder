@@ -461,14 +461,11 @@ impl AppState {
             .provider()
             .await
             .map_err(|e| format!("RPC tidak bisa dipakai: {e}"))?;
-        let multicall = self
-            .registry
-            .contract("common", "multicall3")
+        // Alamat kontrak dipilih menurut versi pool, di satu tempat. Mengirim
+        // mint V4 ke NonfungiblePositionManager v3 akan revert, dan sebaliknya.
+        let alamat = crate::exec::plan::AlamatEksekusi::dari_registry(&self.registry)
             .map_err(|e| e.to_string())?;
-        let position_manager = self
-            .registry
-            .contract("uniswap_v3", "position_manager")
-            .map_err(|e| e.to_string())?;
+        let multicall = alamat.multicall;
 
         let (saldo0, saldo1) =
             execute::saldo_dua_token(&provider, multicall, pemilik, token0, token1).await?;
@@ -483,11 +480,28 @@ impl AppState {
         let diminta = execute::usd_ke_satuan_terkecil(size_usd, harga_token_usd, desimal_memecoin)
             .ok_or("nominal posisi tidak masuk akal untuk harga token ini")?;
 
-        let (available0, available1) = if memecoin_adalah_token0 {
+        let (mut available0, mut available1) = if memecoin_adalah_token0 {
             (diminta.min(saldo0), saldo1)
         } else {
             (saldo0, diminta.min(saldo1))
         };
+
+        // ETH ASLI TIDAK BOLEH DIPAKAI SAMPAI HABIS
+        //
+        // Di V4, currency nol adalah ETH asli, dan ia juga yang membayar gas.
+        // Menawarkan seluruh saldo sebagai modal berarti posisi yang berhasil
+        // dibuka tapi tidak bisa ditutup, karena tidak ada gas tersisa.
+        // Cadangannya diambil dari konfigurasi yang sama dengan gate G6,
+        // supaya tidak ada dua angka yang bisa menyimpang.
+        let cadangan_wei = alloy::primitives::U256::from(
+            (self.cfg.limits.min_eth_reserve.max(0.0) * 1e18) as u128,
+        );
+        if token0.is_zero() {
+            available0 = available0.saturating_sub(cadangan_wei);
+        }
+        if token1.is_zero() {
+            available1 = available1.saturating_sub(cadangan_wei);
+        }
 
         if available0.is_zero() && available1.is_zero() {
             return Err("saldo kedua token nol, tidak ada yang bisa disetor".into());
@@ -499,6 +513,14 @@ impl AppState {
             .map_err(|e| format!("gagal membaca saldo ETH: {e}"))?;
         let eth_balance_f64 = eth_balance.to_string().parse::<f64>().unwrap_or(0.0) / 1e18;
 
+        let eth_komitmen = if token0.is_zero() {
+            available0.to_string().parse::<f64>().unwrap_or(0.0) / 1e18
+        } else if token1.is_zero() {
+            available1.to_string().parse::<f64>().unwrap_or(0.0) / 1e18
+        } else {
+            0.0
+        };
+
         let req = execute::susun_permintaan(
             &pool,
             tick_lower,
@@ -508,15 +530,17 @@ impl AppState {
             pemilik,
             size_usd,
             eth_balance_f64,
-            // Perkiraan biaya gas. Rantai ini murah, tapi gate G6 tetap perlu
-            // angka supaya cadangan ETH benar benar diperiksa.
-            PERKIRAAN_GAS_ETH,
+            // Biaya gas ditambah ETH yang benar benar masuk ke posisi. Untuk
+            // pool yang kedua sisinya token, yang kedua nol. Untuk pool
+            // berpasangan ETH asli, mengabaikannya membuat gate G6 mengira
+            // cadangan masih utuh padahal modalnya diambil dari sana juga.
+            PERKIRAAN_GAS_ETH + eth_komitmen,
             DEADLINE_DETIK,
         );
 
-        let plan = crate::exec::pipeline::plan_open(
+        let plan = crate::exec::plan::plan_open_auto(
             &provider,
-            position_manager,
+            &alamat,
             &req,
             &self.cfg.limits,
             &self.cfg.execution,
@@ -526,18 +550,18 @@ impl AppState {
         let amount0: alloy::primitives::U256 = plan.amount0.parse().unwrap_or_default();
         let amount1: alloy::primitives::U256 = plan.amount1.parse().unwrap_or_default();
 
-        let allowances = crate::exec::approve::check_allowances(
+        let allowances = crate::exec::plan::izin_yang_kurang(
             &provider,
-            multicall,
+            &alamat,
+            pool.version,
             pemilik,
-            position_manager,
             token0,
             amount0,
             token1,
             amount1,
+            chrono::Utc::now().timestamp().max(0) as u64,
         )
         .await?;
-
         let disusun_pada = chrono::Utc::now();
         let expires_at = (disusun_pada
             + chrono::Duration::seconds(execute::RENCANA_KEDALUWARSA_DETIK))
@@ -545,6 +569,7 @@ impl AppState {
 
         *self.pending_plan.write().await = Some(execute::RencanaTersimpan {
             plan: plan.clone(),
+            versi: pool.version,
             token0,
             token1,
             amount0,
@@ -555,6 +580,10 @@ impl AppState {
         Ok(execute::OpenPlanView {
             plan,
             allowances,
+            version: match pool.version {
+                crate::pools::PoolVersion::V3 => "v3",
+                crate::pools::PoolVersion::V4 => "v4",
+            },
             expires_at,
         })
     }
@@ -579,16 +608,16 @@ impl AppState {
             .parse()
             .map_err(|_| format!("`{token}` bukan alamat EVM yang valid"))?;
 
-        let (jumlah, _) = {
+        let (jumlah, versi) = {
             let guard = self.pending_plan.read().await;
             let r = guard.as_ref().ok_or("belum ada rencana yang disusun")?;
             if r.kedaluwarsa() {
                 return Err("rencana sudah kedaluwarsa, susun ulang".into());
             }
             if target == r.token0 {
-                (r.amount0, r.token0)
+                (r.amount0, r.versi)
             } else if target == r.token1 {
-                (r.amount1, r.token1)
+                (r.amount1, r.versi)
             } else {
                 return Err(format!("{token} bukan salah satu token rencana ini"));
             }
@@ -603,38 +632,93 @@ impl AppState {
             .provider()
             .await
             .map_err(|e| format!("RPC tidak bisa dipakai: {e}"))?;
-        let multicall = self
-            .registry
-            .contract("common", "multicall3")
-            .map_err(|e| e.to_string())?;
-        let spender = self
-            .registry
-            .contract("uniswap_v3", "position_manager")
+        let alamat = crate::exec::plan::AlamatEksekusi::dari_registry(&self.registry)
             .map_err(|e| e.to_string())?;
 
         let mut wallet = self.wallet.lock().await;
         let signer = wallet.signer().map_err(|e| e.to_string())?.clone();
         drop(wallet);
 
-        let outcome = crate::exec::send::send_approve(
-            &provider,
-            &self.nonce,
-            &signer,
-            multicall,
-            target,
-            spender,
-            jumlah,
-            self.registry.chain.id,
-        )
-        .await
-        .map_err(|e| e.to_string())?;
+        let sekarang = chrono::Utc::now().timestamp().max(0) as u64;
+        let outcome = match versi {
+            crate::pools::PoolVersion::V3 => crate::exec::send::send_approve(
+                &provider,
+                &self.nonce,
+                &signer,
+                alamat.multicall,
+                target,
+                alamat.position_manager_v3,
+                jumlah,
+                self.registry.chain.id,
+            )
+            .await
+            .map_err(|e| e.to_string())?,
+
+            crate::pools::PoolVersion::V4 => {
+                // V4 butuh dua lapis izin, dan urutannya penting: izin Permit2
+                // tidak berguna sebelum token mengizinkan Permit2 lebih dulu.
+                // Engine mengerjakan langkah PERTAMA yang masih kurang, jadi
+                // panel cukup menekan tombolnya lagi untuk langkah berikutnya.
+                let kurang = crate::exec::plan::izin_yang_kurang(
+                    &provider,
+                    &alamat,
+                    crate::pools::PoolVersion::V4,
+                    signer.address(),
+                    target,
+                    jumlah,
+                    target,
+                    alloy::primitives::U256::ZERO,
+                    sekarang,
+                )
+                .await?;
+
+                let langkah = kurang
+                    .first()
+                    .ok_or("izin untuk token ini sudah cukup")?;
+
+                match langkah.jenis {
+                    "erc20_ke_permit2" => crate::exec::send::send_approve(
+                        &provider,
+                        &self.nonce,
+                        &signer,
+                        alamat.multicall,
+                        target,
+                        alamat.permit2,
+                        jumlah,
+                        self.registry.chain.id,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?,
+
+                    _ => {
+                        let calldata = crate::exec::v4::permit::permit2_approve_calldata(
+                            target,
+                            alamat.position_manager_v4,
+                            jumlah,
+                            sekarang + crate::exec::v4::permit::MASA_BERLAKU_DETIK,
+                        )?;
+                        let terkirim = crate::exec::send::send_calldata(
+                            &provider,
+                            &self.nonce,
+                            &signer,
+                            alamat.permit2,
+                            calldata,
+                            alloy::primitives::U256::ZERO,
+                            self.registry.chain.id,
+                        )
+                        .await
+                        .map_err(|e| e.to_string())?;
+                        crate::exec::send::jadikan_hasil(terkirim)
+                    }
+                }
+            }
+        };
 
         Ok(execute::SendResultView {
             kind: "approve",
             outcome,
         })
     }
-
     /// Setujui rencana terakhir dan kirim transaksinya.
     ///
     /// Rencana dikeluarkan dari slot SEBELUM dikirim, apa pun hasilnya. Rencana
@@ -677,25 +761,33 @@ impl AppState {
             .provider()
             .await
             .map_err(|e| format!("RPC tidak bisa dipakai: {e}"))?;
-        let position_manager = self
-            .registry
-            .contract("uniswap_v3", "position_manager")
+        let alamat = crate::exec::plan::AlamatEksekusi::dari_registry(&self.registry)
             .map_err(|e| e.to_string())?;
+        let position_manager = alamat.position_manager(tersimpan.versi);
 
         let mut wallet = self.wallet.lock().await;
         let signer = wallet.signer().map_err(|e| e.to_string())?.clone();
         drop(wallet);
+
+        // Nilai ETH hanya ikut kalau salah satu currency V4 adalah ETH asli.
+        // Posisi V3 selalu memakai WETH, jadi nilainya nol. Mengirim ETH ke
+        // pool yang tidak memakainya membuatnya tersangkut di kontrak.
+        let value = tersimpan
+            .plan
+            .v4_request
+            .as_ref()
+            .map(|r| r.value())
+            .unwrap_or(alloy::primitives::U256::ZERO);
 
         let outcome = crate::exec::send::send_open(
             &provider,
             &self.nonce,
             &signer,
             position_manager,
+            alamat.multicall,
             &tersimpan.plan,
             self.registry.chain.id,
-            // Posisi V3 memakai WETH, bukan ETH asli, jadi tidak ada nilai yang
-            // ikut transaksi. ETH asli baru relevan di V4, fase 4.
-            alloy::primitives::U256::ZERO,
+            value,
         )
         .await
         .map_err(|e| e.to_string())?;

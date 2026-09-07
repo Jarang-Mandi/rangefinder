@@ -19,6 +19,7 @@
 
 mod dryrun;
 mod pairs;
+mod v4probe;
 mod golden;
 
 use std::path::{Path, PathBuf};
@@ -60,6 +61,11 @@ fn main() -> Result<()> {
             let from = args.get(2).cloned();
             let rt = tokio::runtime::Runtime::new()?;
             let ok = rt.block_on(dryrun::run(&root, &token, from.as_deref()))?;
+            finish(ok)
+        }
+        "v4probe" => {
+            let rt = tokio::runtime::Runtime::new()?;
+            let ok = rt.block_on(v4probe::run(&root))?;
             finish(ok)
         }
         "pairs" => {

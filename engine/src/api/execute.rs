@@ -29,6 +29,9 @@ pub const RENCANA_KEDALUWARSA_DETIK: i64 = 180;
 /// Rencana yang tersimpan beserta konteks yang dibutuhkan untuk mengirimnya.
 pub struct RencanaTersimpan {
     pub plan: OpenPlan,
+    /// Versi pool yang direncanakan. Menentukan kontrak tujuan, bentuk
+    /// izin, dan cara verifikasi pasca kirim.
+    pub versi: crate::pools::PoolVersion,
     pub token0: Address,
     pub token1: Address,
     pub amount0: U256,
@@ -47,8 +50,15 @@ impl RencanaTersimpan {
 pub struct OpenPlanView {
     #[serde(flatten)]
     pub plan: OpenPlan,
-    /// Izin ERC20 yang masih kurang. Kosong berarti posisi bisa langsung dibuka.
-    pub allowances: Vec<crate::exec::approve::AllowanceNeed>,
+    /// Langkah izin yang masih harus dikerjakan, berurutan. Kosong berarti
+    /// posisi bisa langsung dibuka.
+    ///
+    /// Bentuknya seragam untuk V3 dan V4. V3 butuh satu langkah per token,
+    /// V4 butuh dua karena izinnya lewat Permit2. Panel tidak perlu tahu
+    /// bedanya, ia hanya menekan tombolnya sampai daftarnya kosong.
+    pub allowances: Vec<crate::exec::plan::LangkahIzin>,
+    /// `v3` atau `v4`, supaya panel bisa menyebutnya di layar.
+    pub version: &'static str,
     pub expires_at: String,
 }
 
@@ -61,7 +71,16 @@ pub struct SendResultView {
     pub outcome: SendOutcome,
 }
 
-/// Baca saldo dua token sekaligus.
+/// Baca saldo dua currency sekaligus.
+///
+/// KENAPA TIDAK CUKUP `balanceOf` DUA KALI
+/// Di V4, currency `0x0000...0000` berarti ETH asli, bukan alamat kosong. Ia
+/// bukan kontrak dan tidak punya `balanceOf`, jadi saldonya harus dibaca lewat
+/// `eth_getBalance`. Memanggil `balanceOf` ke alamat nol hanya menghasilkan
+/// kegagalan, dan kegagalan itu akan terlihat seperti tokennya bermasalah.
+///
+/// FIG di rantai ini punya lima pool berpasangan ETH asli, jadi ini bukan
+/// kasus pinggiran.
 ///
 /// Kegagalan TIDAK diubah menjadi nol. Saldo nol palsu membuat gate pembatas
 /// menolak transaksi yang sebenarnya sah, dan pesannya menyesatkan. Ini
@@ -75,24 +94,58 @@ pub async fn saldo_dua_token<P: Provider>(
 ) -> Result<(U256, U256), String> {
     use crate::exec::abi_write::IERC20Write;
 
-    let calls = vec![
-        crate::chain::multicall::encode(token0, &IERC20Write::balanceOfCall { account: pemilik }),
-        crate::chain::multicall::encode(token1, &IERC20Write::balanceOfCall { account: pemilik }),
-    ];
-    let hasil = crate::chain::multicall::batch_call(provider, multicall, calls)
-        .await
-        .map_err(|e| format!("gagal membaca saldo: {e}"))?;
-
-    let baca = |i: usize, t: Address| {
-        crate::chain::multicall::decode::<IERC20Write::balanceOfCall>(
-            hasil.get(i).and_then(|x| x.as_ref()),
+    // ETH asli dibaca terpisah, dan hanya kalau memang ikut.
+    let saldo_native = if token0.is_zero() || token1.is_zero() {
+        Some(
+            provider
+                .get_balance(pemilik)
+                .await
+                .map_err(|e| format!("gagal membaca saldo ETH: {e}"))?,
         )
-        .ok_or_else(|| format!("{t} tidak menjawab balanceOf()"))
+    } else {
+        None
     };
 
-    Ok((baca(0, token0)?, baca(1, token1)?))
-}
+    let mut calls = Vec::new();
+    let mut ikut: Vec<Address> = Vec::new();
+    for t in [token0, token1] {
+        if t.is_zero() {
+            continue;
+        }
+        calls.push(crate::chain::multicall::encode(
+            t,
+            &IERC20Write::balanceOfCall { account: pemilik },
+        ));
+        ikut.push(t);
+    }
 
+    let hasil = if calls.is_empty() {
+        Vec::new()
+    } else {
+        crate::chain::multicall::batch_call(provider, multicall, calls)
+            .await
+            .map_err(|e| format!("gagal membaca saldo: {e}"))?
+    };
+
+    let mut per_token: std::collections::HashMap<Address, U256> = Default::default();
+    for (i, t) in ikut.into_iter().enumerate() {
+        let v = crate::chain::multicall::decode::<IERC20Write::balanceOfCall>(
+            hasil.get(i).and_then(|x| x.as_ref()),
+        )
+        .ok_or_else(|| format!("{t} tidak menjawab balanceOf()"))?;
+        per_token.insert(t, v);
+    }
+
+    let ambil = |t: Address| -> U256 {
+        if t.is_zero() {
+            saldo_native.unwrap_or(U256::ZERO)
+        } else {
+            per_token.get(&t).copied().unwrap_or(U256::ZERO)
+        }
+    };
+
+    Ok((ambil(token0), ambil(token1)))
+}
 /// Ubah nominal USD menjadi jumlah token, memakai kurs yang dikalibrasi chart.
 ///
 /// Mengembalikan `None` kalau salah satu masukannya tidak masuk akal. Nilai
@@ -205,6 +258,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn saldo_eth_asli_disisakan_untuk_gas_bukan_dipakai_habis() {
+        // Bukan uji jaringan, hanya penegasan aturan: kalau salah satu
+        // currency adalah ETH asli, seluruh saldo ETH tidak boleh dipakai,
+        // karena gas transaksinya juga dibayar dari sana. Gate G6 yang
+        // menegakkannya lewat min_eth_reserve, dan uji ini menandai bahwa
+        // hubungan itu disengaja.
+        let cfg = crate::config::LimitsConfig::default();
+        assert!(
+            cfg.min_eth_reserve > 0.0,
+            "cadangan ETH wajib bukan nol, kalau tidak wallet bisa kehabisan gas"
+        );
+    }
+
+    #[test]
     fn konversi_usd_ke_satuan_terkecil() {
         // 100 dolar pada harga 2 dolar per token, 18 desimal.
         let hasil = usd_ke_satuan_terkecil(100.0, 2.0, 18).unwrap();
@@ -274,6 +341,7 @@ mod tests {
     fn rencana_kedaluwarsa_setelah_batas() {
         let plan = RencanaTersimpan {
             plan: contoh_plan(),
+            versi: crate::pools::PoolVersion::V3,
             token0: Address::ZERO,
             token1: Address::ZERO,
             amount0: U256::ZERO,
@@ -288,6 +356,7 @@ mod tests {
     fn rencana_baru_belum_kedaluwarsa() {
         let plan = RencanaTersimpan {
             plan: contoh_plan(),
+            versi: crate::pools::PoolVersion::V3,
             token0: Address::ZERO,
             token1: Address::ZERO,
             amount0: U256::ZERO,
@@ -312,6 +381,7 @@ mod tests {
             warnings: Vec::new(),
             calldata: None,
             request: None,
+            v4_request: None,
         }
     }
 }

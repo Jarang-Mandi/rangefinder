@@ -90,7 +90,7 @@ engine/                 biner `rangefinder`, plus pustaka `rangefinder_engine`
     routes.rs           handler HTTP
     ws.rs               WebSocket ke panel
 
-xtask/                  verify, docs-check, golden, dryrun, pairs
+xtask/                  verify, docs-check, golden, dryrun, pairs, v4probe
   src/golden.rs         pengambil golden vector dari transaksi sungguhan
   src/dryrun.rs         jalankan pipeline penuh terhadap pool sungguhan
 extension/              ekstensi Chrome MV3
@@ -132,6 +132,11 @@ tersandung:
 | Izin ERC20 sebesar yang dibutuhkan, bukan tak terbatas | `exec/approve.rs` | Wallet panas ditambah batas nominal yang sengaja tidak dibatasi berarti izin tak terbatas menaruh seluruh saldo pada satu kontrak, selamanya |
 | Pool V4 ditolak jalur eksekusi V3 | `exec/pipeline.rs` gate G0 | Tanpa gate ini kegagalannya muncul sebagai revert tanpa data, dan tebakan terdekatnya menyalahkan tick yang sebenarnya benar |
 | RangeView memakai orientasi harga, MintParams memakai orientasi tick | `api/execute.rs::tick_menaik` | Saat memecoin token1, `lower.tick` justru yang lebih besar. Memakainya apa adanya menolak setiap posisi pada separuh pool yang ada |
+| ABI V4 wajib dibuktikan ada di bytecode | `cargo xtask v4probe` | Rantai ini sudah terbukti memakai fork pada UniversalRouter. ABI dari ingatan bukan bukti, dan kekeliruannya baru terlihat saat transaksi revert |
+| V4 butuh izin dua lapis lewat Permit2 | `exec/v4/permit.rs` | Lapis pertama terlihat seperti sudah cukup, dan melewatkan yang kedua membuat mint revert setelah gas terbakar |
+| V4 memakai batas ATAS jumlah, bukan batas bawah | `exec/v4/pipeline.rs::batas_atas` | Itu satu satunya pengaman slippage di V4. Menyetelnya sebesar saldo berarti mengizinkan pool mengambil seluruh saldo |
+| Hook ikut dibandingkan saat verifikasi V4 | `exec/v4/verify.rs` | poolId adalah hash dari kelima field PoolKey. Hook yang berbeda berarti pool yang berbeda, betapapun mirip sisanya |
+| ETH asli tidak punya izin, ia ikut sebagai msg.value | `exec/v4/permit.rs` dan `calldata.rs::value` | Currency nol berarti ETH asli. Mengirim ETH ke pool yang tidak memakainya membuatnya tersangkut di kontrak |
 | 429 ditunggu, rentang kelebaran dipecah | `pools::scan_initialize_logs` | Keduanya muncul sebagai kegagalan yang sama tapi obatnya berlawanan. Memecah rentang saat kena 429 menambah permintaan dan memperburuk |
 | Konversi satuan hanya di engine | `range` dan `math` | Panel tidak menghitung apa pun. Angka di layar harus sama persis dengan yang tercatat on chain |
 | Kurs ETH diturunkan dari chart | `math::calibrate_eth_usd` | Sumber luar selalu sedikit meleset dari gmgn, dan garis ikut bergeser |
@@ -182,7 +187,7 @@ bytecode yang tidak cocok dengan yang dipin.
 | 1 | Ekstensi: manifest, side panel, jembatan chart | selesai, typecheck bersih, build menghasilkan dist yang bisa dimuat |
 | 2 | Injeksi chart dan matematika satuan | **selesai**. Penemuan pool, kalibrasi kurs dari chart, konversi tiga satuan, snap tick beserta laporan drift, lingkaran penuh panel ke chart ke engine, dan uji integrasi terhadap snapshot gmgn |
 | 3 | Eksekusi V3 | **selesai**. Gate G0 sampai G7 terangkai dan terbukti jalan terhadap pool sungguhan lewat `cargo xtask dryrun`: versi protokol, pembatas nilai, builder calldata, golden vector, simulasi, asersi invarian, izin ERC20, pengiriman beserta penjaga chain id dan nonce, serta verifikasi pasca kirim. Jalur panel lengkap: `quote_range`, `approve_token`, `open_position`. Yang belum pernah terjadi: satu pengiriman sungguhan, karena `dry_run` menyala secara bawaan dan mematikannya adalah keputusan user |
-| 4 | Eksekusi V4 dan zap | belum |
+| 4 | Eksekusi V4 | **selesai untuk membuka posisi**. ABI dibuktikan ada di bytecode terpasang lewat `cargo xtask v4probe`, encoder aksi menghasilkan byte identik dengan transaksi V4 sungguhan sepanjang 868 byte, izin dua lapis lewat Permit2, gate G0 sampai G7 terangkai, dan `cargo xtask dryrun` hijau terhadap pool V4 nyata. Yang belum: zap satu sisi dan swap lewat UniversalRouter fork |
 | 5 | Positions, PnL, notifikasi | belum |
 | 6 | Signals, Optimizer, doktrin penempatan | belum |
 | 7 | Self improvement | belum |

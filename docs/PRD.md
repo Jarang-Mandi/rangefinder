@@ -837,17 +837,42 @@ Karena itu membuka posisi berjalan dua transaksi: `approve` lebih dulu, lalu `mi
 
 Aksi lain: `increaseLiquidity`, `decreaseLiquidity`, `collect`, `burn`. Rebalance adalah `decreaseLiquidity` penuh, lalu `collect`, lalu `mint` baru, semuanya dalam satu multicall.
 
-### 6.3 Jalur V4
+### 6.3 Eksekusi V4
 
-V4 memakai singleton PoolManager dan PositionManager periphery. Likuiditas diubah lewat `modifyLiquidities(bytes unlockData, uint256 deadline)`, di mana `unlockData` adalah pasangan `abi.encode(actions, params[])`. Aksi yang dipakai: `MINT_POSITION`, `INCREASE_LIQUIDITY`, `DECREASE_LIQUIDITY`, `BURN_POSITION`, `TAKE_PAIR`, `SETTLE_PAIR`, `CLOSE_CURRENCY`.
+Bentuk transaksinya berbeda secara mendasar dari V3, dan perbedaannya bukan detail yang bisa disamarkan di balik satu builder.
 
-Tiga hal khusus chain ini:
+**Tidak ada fungsi `mint`.** Satu satunya pintu masuk adalah `modifyLiquidities(bytes unlockData, uint256 deadline)`, dan `unlockData` adalah `abi.encode(bytes actions, bytes[] params)`. Setiap byte di `actions` adalah satu aksi, dan `params[i]` parameternya.
 
-1. **UniversalRouter fork.** Struct swap V4 membawa field tambahan `minHopPriceX36`. Encoder dibuat manual di modul `router_rbh`, tidak memakai encoder SDK. Modul ini punya suite golden vector tersendiri.
-2. **Hook.** `PoolKey` berisi `currency0`, `currency1`, `fee`, `tickSpacing`, `hooks`. Alamat hook wajib dicek terhadap allowlist sebelum transaksi apa pun disusun.
-3. **Native ETH.** V4 mendukung ETH asli sebagai currency, bukan hanya WETH. Engine memilih jalur dengan biaya paling rendah dan mencatat pilihan itu di log posisi.
+Membuka posisi berarti dua aksi: `MINT_POSITION` bernilai `0x02`, lalu `SETTLE_PAIR` bernilai `0x0d`. Tanpa penyelesaian, token tidak pernah berpindah dan seluruh transaksi revert dengan `CurrencyNotSettled`. Menutup posisi memakai `BURN_POSITION` bernilai `0x03` lalu `TAKE_PAIR` bernilai `0x11`.
 
-Matematika likuiditas V4 identik dengan V3, jadi modul `math` dipakai bersama. Yang berbeda hanya pembungkus transaksi dan akuntansi currency.
+Parameter `MINT_POSITION` adalah PoolKey yang diratakan menjadi lima kata, lalu `tickLower`, `tickUpper`, `liquidity`, `amount0Max`, `amount1Max`, `owner`, dan `hookData`.
+
+**Bentuk ini tidak disalin dari repo Uniswap.** Ia dibaca langsung dari transaksi sungguhan di Robinhood Chain, `0x92acbe0bc669fbdff06263646d45399825c1a398090fbe42e8530bde610f1ccd`, dan builder kita diuji dengan membangun ulang calldata transaksi itu lalu membandingkannya byte per byte, seluruhnya 868 byte. Alasannya sama dengan kenapa UniversalRouter tidak dipakai apa adanya: rantai ini sudah terbukti memakai fork di satu tempat, jadi ABI dari ingatan bukan bukti. `cargo xtask v4probe` memeriksa setiap selector ada di bytecode yang terpasang, lalu memanggil fungsi bacanya sungguhan.
+
+**Izinnya dua lapis.** V3 menarik token lewat `transferFrom` biasa, jadi cukup satu allowance ERC20. PositionManager V4 menarik lewat Permit2, sehingga:
+
+| Lapis | Apa yang terjadi |
+| --- | --- |
+| 1 | Token mengizinkan Permit2 lewat `approve` ERC20 biasa |
+| 2 | Permit2 mengizinkan PositionManager lewat `Permit2.approve`, yang punya masa berlaku |
+
+Melewatkan lapis kedua adalah kesalahan yang paling mudah terjadi, karena lapis pertama terlihat seperti sudah cukup. Akibatnya `mint` revert setelah gas terbakar. Masa berlaku disetel tiga puluh menit: izin Permit2 yang berlaku setahun sama saja dengan izin tak terbatas dalam waktu.
+
+**Slippage dijaga dari arah yang berlawanan.** V3 memakai `amount0Min` dan `amount1Min`, yaitu batas bawah yang harus tercapai. V4 memakai `amount0Max` dan `amount1Max`, yaitu batas atas yang boleh terpakai. Itu satu satunya pengaman di jalur ini, jadi menyetelnya sebesar saldo berarti mengizinkan pool mengambil seluruh saldo saat harga bergerak. Engine memakai jumlah yang dibutuhkan ditambah margin slippage, dan tidak pernah melampaui saldo.
+
+**ETH asli didukung.** Currency `0x0000...0000` di V4 berarti ETH asli, bukan alamat kosong. Nilainya ikut sebagai `msg.value`, bukan ditarik lewat Permit2, dan ia tidak punya izin sama sekali. Sebaliknya, ETH yang ikut untuk pool yang kedua sisinya token akan tersangkut di kontrak, jadi gate G5 menolaknya.
+
+**Verifikasi pasca kirim membaca lebih banyak.** V4 tidak memancarkan `IncreaseLiquidity` di PositionManager, jadi penanda posisi baru adalah `Transfer` ERC721 dari alamat nol. Yang dibandingkan bukan hanya tick dan likuiditas, tapi PoolKey lengkap termasuk hook, karena poolId adalah hash dari kelimanya. Hook yang berbeda berarti pool yang berbeda, betapapun mirip sisanya.
+
+`PositionInfo` mengemas kedua tick sebagai int24 di dalam satu uint256: delapan bit terbawah flag, lalu `tickLower`, lalu `tickUpper`, lalu poolId terpotong. Pembacaannya diuji terhadap posisi V4 sungguhan, tokenId 2100029.
+
+### 6.3b Pemilihan jalur
+
+Versi pool menentukan segalanya: kontrak tujuan, bentuk calldata, bentuk izin, dan cara verifikasi. Gate G0 menolak pool yang versinya tidak cocok dengan jalur, dan pemilihannya terjadi di satu tempat saja, `exec::plan::plan_open_auto`.
+
+Panel tidak pernah tahu protokol mana yang dipakai. Ia menerima daftar langkah izin yang bentuknya seragam, dan menekan tombolnya sampai daftar itu kosong. Kalau panel tahu bedanya, ia akan menyimpulkan sendiri, dan dua tempat yang menyimpulkan hal yang sama pasti menyimpang.
+
+**Yang tetap berlaku dari rencana awal.** UniversalRouter di rantai ini adalah fork yang membawa field tambahan `minHopPriceX36`, jadi encoder swap dibuat manual dan tidak memakai encoder SDK. Alamat hook wajib diperiksa terhadap allowlist sebelum transaksi apa pun disusun. Matematika likuiditas V4 identik dengan V3, jadi modul `math` dipakai bersama, dan yang berbeda hanya pembungkus transaksi beserta akuntansi currency-nya.
 
 ### 6.4 Gate validasi berlapis
 
@@ -962,7 +987,7 @@ Panel ke engine:
 | `select_quote` | `{ quote }`, user berpindah ke pasangan token lawan yang lain. Tidak menyentuh jaringan, seluruh kelompok sudah ada di memori sejak token dimuat | 2 |
 | `set_range` | `{ lowerMcap, upperMcap }`, user menggeser garis. Batas dalam market cap USD karena itu satuan chart | 2 |
 | `quote_range` | `{ sizeUsd }`. Susun rencana pada pool dan range yang sedang aktif, jalankan seluruh gate, TIDAK mengirim apa pun. Pool dan tick tidak ikut dikirim panel: keduanya sudah ada di engine, dan menerimanya dari panel berarti menerima parameter transaksi dari luar | 3 |
-| `approve_token` | `{ token }`. Kirim `approve` ERC20 sebesar yang dibutuhkan rencana terakhir. Jumlah dan spender datang dari engine, bukan dari panel | 3 |
+| `approve_token` | `{ token }`. Kerjakan langkah izin PERTAMA yang masih kurang untuk token itu. Pada V3 satu langkah sudah cukup, pada V4 ada dua karena izinnya lewat Permit2, jadi pesannya dikirim dua kali. Jumlah dan spender datang dari engine, bukan dari panel | 3 |
 | `open_position` | tanpa isi. Menyetujui rencana terakhir yang tersimpan di engine. Rencana tidak pernah bolak balik lewat panel, karena bagian yang paling menarik untuk diubah justru calldata-nya | 3 |
 | `rebalance` | `{ positionId, tickLower, tickUpper }` | 3 |
 | `claim` | `{ positionId, swapToEth }` | 3 |
@@ -976,7 +1001,7 @@ Engine ke panel:
 | `hello` | `{ engineVersion, protocolVersion }`, dikirim sekali saat tersambung | 1 |
 | `engine_status` | `{ engineVersion, uptimeSecs, chain, wallet, registry, canExecute, blockedReasons[] }` | 1 |
 | `pong` | balasan denyut | 1 |
-| `open_plan` | rencana lengkap beserta hasil tiap gate, izin ERC20 yang masih kurang, dan kapan rencananya kedaluwarsa | 3 |
+| `open_plan` | rencana lengkap beserta hasil tiap gate, `version` bernilai `v3` atau `v4`, daftar langkah izin yang masih kurang, dan kapan rencananya kedaluwarsa. Setiap langkah membawa `{ jenis, token, needed, current, label }`, dan bentuknya seragam untuk kedua protokol | 3 |
 | `send_result` | `{ kind, txHash, nonce, gasLimit, status, blockNumber, gasUsed, tokenId, verification, sentAt }`. `kind` bernilai `approve` atau `open`. `status` bernilai `sukses`, `revert`, atau `menggantung` | 3 |
 | `alert` | `{ level, code, message, positionId }` | 1 |
 | `token_state` | `{ address, meta, quotes[], pools[], selectedQuote, selectedPoolId, error }`. Setiap `quote` membawa `{ quote, quoteSymbol, quoteDecimals, canonical, pools[] }`. Dikirim dua kali saat memuat: sekali cepat dari kunci pool yang tersimpan, sekali lagi setelah pemindaian selesai kalau ada yang berubah. Lihat 4.3c | 2 |

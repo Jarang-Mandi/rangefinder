@@ -86,6 +86,10 @@ pub struct OpenPlan {
     pub calldata: Option<Bytes>,
     #[serde(skip)]
     pub request: Option<MintRequest>,
+    /// Permintaan V4, terisi kalau poolnya V4. Dipakai gate G7 untuk
+    /// membandingkan posisi yang tercipta dengan yang diminta.
+    #[serde(skip)]
+    pub v4_request: Option<super::v4::calldata::MintV4Request>,
 }
 
 impl OpenPlan {
@@ -190,6 +194,7 @@ pub async fn plan_open<P: Provider>(
         warnings: Vec::new(),
         calldata: None,
         request: None,
+        v4_request: None,
     };
 
     // ─── G0, versi protokol ───────────────────────────────────────
@@ -459,6 +464,7 @@ mod tests {
             warnings: Vec::new(),
             calldata: None,
             request: None,
+            v4_request: None,
         };
         plan.gates.push(GateResult::gagal(
             "G0",
@@ -541,6 +547,7 @@ mod tests {
             warnings: vec![],
             calldata: None,
             request: None,
+            v4_request: None,
         };
         assert!(!plan.is_sendable(), "tanpa calldata tidak boleh bisa dikirim");
     }
@@ -561,6 +568,7 @@ mod tests {
             warnings: vec![],
             calldata: Some(Bytes::from(vec![1, 2, 3])),
             request: None,
+            v4_request: None,
         };
         assert!(!plan.is_sendable(), "dry run tidak boleh bisa dikirim");
     }
@@ -584,6 +592,7 @@ mod tests {
             warnings: vec![],
             calldata: Some(Bytes::from(vec![1, 2, 3])),
             request: None,
+            v4_request: None,
         };
         assert!(!plan.is_sendable());
         assert_eq!(plan.failed_gates().len(), 1);
@@ -611,6 +620,7 @@ mod tests {
             warnings: vec![],
             calldata: Some(Bytes::from(vec![1, 2, 3])),
             request: None,
+            v4_request: None,
         };
         assert!(plan.is_sendable());
     }
@@ -633,6 +643,7 @@ mod tests {
             warnings: vec![],
             calldata: Some(Bytes::from(vec![0xde, 0xad])),
             request: None,
+            v4_request: None,
         };
         let json = serde_json::to_string(&plan).unwrap();
         assert!(!json.contains("dead"), "calldata bocor ke JSON: {json}");

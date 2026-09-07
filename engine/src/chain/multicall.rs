@@ -23,7 +23,7 @@ use alloy::primitives::{Address, Bytes};
 use alloy::providers::Provider;
 use alloy::sol;
 use alloy::sol_types::SolCall;
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 sol! {
     #[sol(rpc)]
@@ -50,6 +50,22 @@ sol! {
 /// batas itu, dan sudah cukup untuk menutup token dengan ratusan pool dalam
 /// satu atau dua permintaan.
 pub const MAX_BATCH: usize = 200;
+
+/// Berapa kali menunggu saat RPC membatasi laju sebelum menyerah.
+const SABAR_MAKSIMUM: u32 = 4;
+
+/// Jeda dasar saat dibatasi laju. Naik berlipat tiap percobaan.
+const JEDA_DASAR_MS: u64 = 400;
+
+/// Benar kalau kegagalannya karena laju dibatasi.
+///
+/// Dikenali dari teks, karena lapisan transport membungkus kode HTTP-nya.
+/// Kalau pengenalan ini meleset, akibatnya hanya kembali ke perilaku lama,
+/// yaitu gagal seketika.
+fn dibatasi_laju(e: &impl std::fmt::Display) -> bool {
+    let teks = e.to_string();
+    teks.contains("429") || teks.to_lowercase().contains("too many requests")
+}
 
 /// Jalankan sekumpulan panggilan baca dalam satu permintaan.
 ///
@@ -78,11 +94,28 @@ pub async fn batch_call<P: Provider>(
             })
             .collect();
 
-        let hasil = mc
-            .aggregate3(payload)
-            .call()
-            .await
-            .context("multicall aggregate3 gagal")?;
+        // DIBATASI LAJU DITUNGGU, BUKAN DIANGGAP GAGAL
+        //
+        // RPC publik ini membalas 429 saat beberapa permintaan berat datang
+        // berdekatan. Batch ini sendiri satu permintaan, jadi memecahnya
+        // tidak menolong. Yang menolong hanya menunggu sebentar lalu
+        // mengulang. Pelajaran yang sama sudah tercatat untuk pemindaian log
+        // di memory/006.
+        let mut sisa = SABAR_MAKSIMUM;
+        let hasil = loop {
+            match mc.aggregate3(payload.clone()).call().await {
+                Ok(v) => break v,
+                Err(e) if dibatasi_laju(&e) && sisa > 0 => {
+                    let jeda = JEDA_DASAR_MS * (SABAR_MAKSIMUM - sisa + 1) as u64;
+                    sisa -= 1;
+                    tracing::debug!(jeda_ms = jeda, "multicall dibatasi laju, menunggu");
+                    tokio::time::sleep(std::time::Duration::from_millis(jeda)).await;
+                }
+                Err(e) => {
+                    return Err(anyhow::Error::new(e).context("multicall aggregate3 gagal"));
+                }
+            }
+        };
 
         for r in hasil {
             out.push(if r.success && !r.returnData.is_empty() {

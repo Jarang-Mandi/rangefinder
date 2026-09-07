@@ -163,7 +163,7 @@ Yang perlu diperiksa di kartu itu:
 
 | Baris | Artinya |
 | --- | --- |
-| G0 versi protokol | Pool V4 akan ditolak di sini. Eksekusi V4 hidup di fase 4 |
+| G0 versi protokol | Menentukan jalur mana yang dipakai, V3 atau V4. Pool yang versinya tidak cocok dengan jalur ditolak di sini |
 | G2 builder calldata | Tick sudah pas di grid pool |
 | G4 simulasi | Kontrak menerima transaksinya, beserta likuiditas yang tercipta |
 | G5 asersi invarian | Hasil simulasi sesuai yang diharapkan, bukan sekadar tidak revert |
@@ -174,9 +174,23 @@ karena jumlah tokennya dihitung dari harga saat rencana dibuat.
 
 ### 2. Beri izin
 
-Kalau tombol **Beri izin** muncul, artinya allowance ERC20 ke
-NonfungiblePositionManager belum cukup. Ini transaksi sungguhan, tapi ia hanya
-memberi izin, tidak memindahkan token.
+Kalau tombol izin muncul, artinya izinnya belum cukup. Ini transaksi
+sungguhan, tapi ia hanya memberi izin, tidak memindahkan token.
+
+Jumlah tombolnya berbeda menurut protokol, dan itu bukan kebetulan:
+
+| Protokol | Langkah |
+| --- | --- |
+| V3 | Satu, yaitu allowance ERC20 ke NonfungiblePositionManager |
+| V4 | Dua, yaitu token mengizinkan Permit2, lalu Permit2 mengizinkan PositionManager |
+
+V4 menarik token lewat Permit2, jadi lapis kedua wajib ada. Melewatkannya
+membuat mint revert setelah gas terbakar, dan lapis pertama terlihat seperti
+sudah cukup. Tekan tombolnya berurutan sampai daftarnya kosong, satu tombol
+satu transaksi. Teks pada tombol menyebutkan langkah keberapa.
+
+Izin Permit2 berlaku tiga puluh menit. Itu disengaja: izin yang berlaku
+setahun sama saja dengan izin tak terbatas dalam waktu.
 
 Izin diberikan **sebesar yang dibutuhkan rencana itu**, bukan tak terbatas. Ini
 disengaja: wallet ini panas dan batas nominal posisi tidak dibatasi, jadi izin
@@ -226,6 +240,7 @@ cargo xtask docs-check    hanya periksa kesesuaian kode dengan dokumen
 cargo xtask golden [n]    ambil n golden vector dari transaksi mint sungguhan
 cargo xtask dryrun <token> [pengirim]   jalankan seluruh pipeline tanpa mengirim
 cargo xtask pairs <token>  lihat token itu berpasangan dengan apa saja di V4
+cargo xtask v4probe       buktikan ABI V4 ada di bytecode yang terpasang
 cargo test                seluruh uji unit engine
 cargo clippy --all-targets
 ```
