@@ -33,6 +33,35 @@ ulang. Urutannya penting:
 Menghapus lebih dulu berarti kalau ada yang meleset, Rust-nya hilang dan harus
 diunduh ulang tiga giga.
 
+## Variabel lingkungan saja TIDAK cukup
+
+Ini pelajaran terpenting di berkas ini.
+
+Setelah `CARGO_HOME` dan `RUSTUP_HOME` diatur dan direktori lama dihapus,
+1,5 GB kembali muncul di C dalam hitungan menit. Penyebabnya rust-analyzer di
+dalam VS Code: jendela itu terbuka sebelum variabelnya diatur, jadi ia mewarisi
+lingkungan lama. Rustup di dalamnya tidak melihat `RUSTUP_HOME`, kembali ke
+bawaan `%USERPROFILE%`, dan **mengunduh ulang seluruh toolchain msvc tanpa
+memberi tahu siapa pun**.
+
+Variabel lingkungan hanya diwarisi proses yang lahir sesudahnya. Selama ada
+proses lama yang masih hidup, jaminannya bocor.
+
+Penyelesaiannya menambah lapis kedua: `%USERPROFILE%\.cargo` dan
+`%USERPROFILE%\.rustup` dibuat sebagai junction ke D.
+
+```powershell
+New-Item -ItemType Junction -Path "$env:USERPROFILE\.cargo"  -Target 'D:\Rust\cargo'
+New-Item -ItemType Junction -Path "$env:USERPROFILE\.rustup" -Target 'D:\Rust\rustup'
+```
+
+Dengan begitu proses mana pun, mau melihat variabelnya atau tidak, tetap
+menulis ke D. Diuji langsung: berkas yang ditulis lewat jalur C muncul di D.
+
+**Pola yang bisa dipakai lagi.** Kalau sebuah jaminan bergantung pada setiap
+pemakai melakukan hal yang benar, jaminan itu akan bocor. Cari lapis yang
+berlaku tanpa kerja sama siapa pun.
+
 ## Dua jebakan
 
 **Robocopy exit code 1 itu BERHASIL, bukan gagal.** Nol berarti tidak ada

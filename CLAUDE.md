@@ -31,10 +31,15 @@ lain. `cargo build`, `cargo test`, dan `cargo xtask verify` jalan apa adanya.
 
 **Rust tidak dipasang di lokasi bawaan.** `RUSTUP_HOME` menunjuk
 `D:\Rust\rustup` dan `CARGO_HOME` menunjuk `D:\Rust\cargo`, karena disk C hanya
-menyisakan sekitar 8 GB. Kalau `cargo` tiba tiba tidak dikenali atau rustup
-menawarkan pemasangan ulang dari nol, kedua variabel itu yang hilang, bukan
-Rust-nya. Cara mengembalikannya ada di `docs/RUNBOOK.md` bagian Lokasi
-instalasi Rust.
+menyisakan sekitar 8 GB. Sebagai lapis kedua, `%USERPROFILE%\.cargo` dan
+`.rustup` adalah junction ke D, sehingga proses yang tidak melihat variabel itu
+pun tetap menulis ke D.
+
+Lapis kedua itu perlu karena variabel lingkungan hanya diwarisi proses yang
+lahir sesudahnya. VS Code yang sudah terbuka sempat mengunduh ulang 1,5 GB
+toolchain ke C tanpa memberi tahu apa pun. Rinciannya di
+`memory/004-rust-di-disk-d.md`, dan cara memulihkannya di `docs/RUNBOOK.md`
+bagian Lokasi instalasi Rust.
 
 Mesin ini sempat kelihatan tidak punya toolchain C, dan repo sempat berisi
 penyiasatan raw-dylib untuk target GNU. Semua itu sudah dihapus setelah

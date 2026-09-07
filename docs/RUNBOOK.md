@@ -22,8 +22,25 @@ registry memakan hampir 3,5 GB.
 | `CARGO_HOME` | `D:\Rust\cargo` |
 | PATH | memuat `D:\Rust\cargo\bin`, bukan `%USERPROFILE%\.cargo\bin` |
 
-Ketiganya diatur sebagai variabel lingkungan tingkat user. Kalau suatu saat
-hilang, misalnya setelah pasang ulang Windows atau rustup, kembalikan dengan:
+Selain itu, `%USERPROFILE%\.cargo` dan `%USERPROFILE%\.rustup` dibuat sebagai
+**junction** yang menunjuk ke D. Jadi ada dua lapis jaminan:
+
+| Lapis | Melindungi dari |
+| --- | --- |
+| `CARGO_HOME` dan `RUSTUP_HOME` | pemakaian normal |
+| Junction di `%USERPROFILE%` | proses yang tidak melihat variabel itu |
+
+Lapis kedua bukan kemewahan. Variabel lingkungan hanya diwarisi proses yang
+lahir sesudahnya, jadi VS Code yang sudah terbuka sebelum perubahan tetap
+memakai lingkungan lama. Tanpa junction, rust-analyzer di dalamnya akan
+mengunduh ulang toolchain ke C tanpa memberi tahu siapa pun. Itu benar benar
+terjadi, 1,5 GB kembali ke C dalam hitungan menit.
+
+Junction tidak memakan ruang di C. Ia hanya penunjuk, dan seluruh berkasnya
+tetap di D.
+
+Kalau variabelnya suatu saat hilang, misalnya setelah pasang ulang Windows atau
+rustup, kembalikan dengan:
 
 ```powershell
 [Environment]::SetEnvironmentVariable('CARGO_HOME',  'D:\Rust\cargo',  'User')
@@ -37,9 +54,20 @@ if ($p -notcontains 'D:\Rust\cargo\bin') { $p += 'D:\Rust\cargo\bin' }
 Lalu tutup terminal dan buka yang baru. Periksa dengan `rustup show`, barisnya
 harus berbunyi `rustup home: D:\Rust\rustup`.
 
-**Jangan menghapus `RUSTUP_HOME` atau `CARGO_HOME` tanpa memindahkan isinya
-kembali.** Tanpa kedua variabel itu, rustup akan mencari di `%USERPROFILE%` yang
-sudah kosong, lalu menawarkan pemasangan ulang dari nol.
+Membuat ulang junction-nya kalau hilang:
+
+```powershell
+New-Item -ItemType Junction -Path "$env:USERPROFILE\.cargo"  -Target 'D:\Rust\cargo'
+New-Item -ItemType Junction -Path "$env:USERPROFILE\.rustup" -Target 'D:\Rust\rustup'
+```
+
+**Hati hati saat menghapus junction.** Hapus dengan `Remove-Item` pada
+junction-nya saja, jangan dengan alat yang menelusuri isi tautan, karena itu
+bisa ikut menghapus berkas aslinya di D. Periksa dulu jenisnya:
+
+```powershell
+Get-Item "$env:USERPROFILE\.cargo" -Force | Select-Object Name, LinkType, Target
+```
 
 ## Menjalankan engine
 
