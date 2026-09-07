@@ -14,6 +14,7 @@ import {
   DEFAULT_ENGINE_ORIGIN,
   WS_SUBPROTOCOL,
   asEngineStatus,
+  asActionPlan,
   asNotify,
   asOpenPlan,
   asPositions,
@@ -23,6 +24,8 @@ import {
   type ClientMessage,
   type EnginePing,
   type EngineStatus,
+  type ActionPlanView,
+  type JenisAksi,
   type Kejadian,
   type OpenPlanView,
   type PositionsView,
@@ -48,6 +51,7 @@ interface Handlers {
   onOpenPlan?: (plan: OpenPlanView) => void;
   onSendResult?: (result: SendResultView) => void;
   onPositions?: (view: PositionsView) => void;
+  onActionPlan?: (plan: ActionPlanView) => void;
   onNotify?: (k: Kejadian) => void;
   onNotifyHistory?: (riwayat: Kejadian[]) => void;
 }
@@ -171,6 +175,11 @@ export class EngineClient {
         this.handlers.onPositions?.(posisi);
         return;
       }
+      const aksi = asActionPlan(msg);
+      if (aksi) {
+        this.handlers.onActionPlan?.(aksi);
+        return;
+      }
       const kabar = asNotify(msg);
       if (kabar) {
         this.handlers.onNotify?.(kabar);
@@ -278,6 +287,16 @@ export class EngineClient {
   /** Muat ulang posisi LP wallet dari rantai. */
   getPositions() {
     this.send({ type: "get_positions" });
+  }
+
+  /** Susun rencana sebuah aksi pada posisi. Tidak mengirim apa pun. */
+  planAction(tokenId: string, action: JenisAksi) {
+    this.send({ type: "plan_action", token_id: tokenId, action });
+  }
+
+  /** Setujui aksi terakhir. Ini yang benar benar memindahkan dana. */
+  executeAction() {
+    this.send({ type: "execute_action" });
   }
 
   /** Minta riwayat notifikasi terakhir. */

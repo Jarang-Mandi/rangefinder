@@ -60,6 +60,15 @@ pub enum ClientMessage {
     /// pernah dari panel.
     ApproveToken { token: String },
 
+    /// Susun rencana sebuah aksi pada posisi. Tidak mengirim apa pun.
+    PlanAction {
+        token_id: String,
+        action: crate::exec::aksi::JenisAksi,
+    },
+
+    /// Setujui aksi terakhir dan kirim transaksinya.
+    ExecuteAction,
+
     /// Minta riwayat notifikasi terakhir.
     GetNotifications,
 
@@ -116,6 +125,9 @@ pub enum ServerMessage {
 
     /// Riwayat notifikasi, terbaru lebih dulu.
     NotifyHistory { items: Vec<crate::notify::Kejadian> },
+
+    /// Rencana aksi pada posisi beserta hasil pemeriksaannya.
+    ActionPlan(Box<crate::api::execute::ActionPlanView>),
 
     /// Daftar posisi LP milik wallet beserta keadaannya.
     Positions(Box<PositionsView>),

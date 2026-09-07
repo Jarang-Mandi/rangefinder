@@ -295,6 +295,30 @@ export interface RingkasanPnl {
   perkiraan: number;
 }
 
+/** Aksi yang bisa dijalankan pada sebuah posisi. */
+export type JenisAksi = "klaim_fee" | "tutup_posisi";
+
+/**
+ * Rencana aksi beserta hasil pemeriksaannya.
+ *
+ * `siap` datang dari engine, bukan disimpulkan panel. Panel yang
+ * menyimpulkan sendiri akan menyimpang begitu ada gate baru ditambahkan.
+ */
+export interface ActionPlanView {
+  token_id: string;
+  action: JenisAksi;
+  nama: string;
+  gates: GateResult[];
+  gas_estimate: number;
+  dry_run: boolean;
+  /** Benar kalau aksi ini akan menghabiskan posisinya. */
+  menutup: boolean;
+  siap: boolean;
+  expires_at: string;
+  fee0: string;
+  fee1: string;
+}
+
 /** Satu posisi LP beserta keadaannya sekarang. */
 export interface Posisi {
   token_id: string;
@@ -378,6 +402,7 @@ export type ServerMessage =
   | ({ type: "open_plan" } & Partial<OpenPlanView>)
   | ({ type: "send_result" } & Partial<SendResultView>)
   | ({ type: "positions" } & Partial<PositionsView>)
+  | ({ type: "action_plan" } & Partial<ActionPlanView>)
   | ({ type: "notify" } & Partial<Kejadian>)
   | { type: "notify_history"; items: Kejadian[] }
   | { type: "alert"; level: AlertLevel; code: string; message: string };
@@ -394,6 +419,8 @@ export type ClientMessage =
   | { type: "approve_token"; token: string }
   | { type: "get_positions" }
   | { type: "get_notifications" }
+  | { type: "plan_action"; token_id: string; action: JenisAksi }
+  | { type: "execute_action" }
   | { type: "swap_zap" }
   | { type: "open_position" };
 
@@ -403,6 +430,10 @@ export function asRangeView(msg: unknown): RangeView | null {
   if (m.type !== "range_view") return null;
   const { type: _type, ...rest } = m;
   return rest as unknown as RangeView;
+}
+
+export function asActionPlan(msg: unknown): ActionPlanView | null {
+  return untag<ActionPlanView>(msg, "action_plan");
 }
 
 export function asPositions(msg: unknown): PositionsView | null {

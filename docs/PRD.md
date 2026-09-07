@@ -1097,6 +1097,8 @@ Panel ke engine:
 | `close` | `{ positionId, swapToEth }` | 3 |
 | `get_positions` | tanpa isi. Muat ulang posisi LP wallet dari rantai. Menyentuh jaringan, jadi jawabannya datang belakangan sebagai `positions` | 5 |
 | `get_notifications` | tanpa isi. Minta riwayat notifikasi terakhir | 5 |
+| `plan_action` | `{ tokenId, action }` dengan `action` bernilai `klaim_fee` atau `tutup_posisi`. Menyusun dan menyimulasikan aksi, TIDAK mengirim apa pun | 5 |
+| `execute_action` | tanpa isi. Menyetujui aksi terakhir yang tersimpan di engine | 5 |
 | `scan` | `{ filters }` | 6 |
 
 Engine ke panel:
@@ -1107,11 +1109,12 @@ Engine ke panel:
 | `engine_status` | `{ engineVersion, uptimeSecs, chain, wallet, registry, canExecute, blockedReasons[] }` | 1 |
 | `pong` | balasan denyut | 1 |
 | `open_plan` | rencana lengkap beserta hasil tiap gate, `version` bernilai `v3` atau `v4`, daftar langkah izin yang masih kurang, `zap` kalau modal perlu ditukar lebih dulu, dan kapan rencananya kedaluwarsa. Setiap langkah izin membawa `{ jenis, token, needed, current, label }`, dan bentuknya seragam untuk kedua protokol | 3 |
-| `send_result` | `{ kind, txHash, nonce, gasLimit, status, blockNumber, gasUsed, tokenId, verification, sentAt }`. `kind` bernilai `approve`, `zap`, atau `open`. `status` bernilai `sukses`, `revert`, atau `menggantung` | 3 |
+| `send_result` | `{ kind, txHash, nonce, gasLimit, status, blockNumber, gasUsed, tokenId, verification, sentAt }`. `kind` bernilai `approve`, `zap`, `open`, atau `action`. `status` bernilai `sukses`, `revert`, atau `menggantung` | 3 |
 | `alert` | `{ level, code, message, positionId }` | 1 |
 | `positions` | `{ positions[], owner, keluarRange, error, dimuatPada }`. Setiap posisi membawa versi protokol, PoolKey, tick, likuiditas, status in range, dan fee yang belum diklaim | 5 |
 | `notify` | `{ level, code, message, subject, at, ditahan }`. Berbeda dari `alert`: pesan ini melewati pendinginan, masuk riwayat, dan membawa petunjuk durasi serta suara. `alert` dipakai untuk kegagalan seketika pada aksi yang sedang dijalankan user | 5 |
 | `notify_history` | daftar kejadian terakhir, terbaru lebih dulu, paling banyak 50 | 5 |
+| `action_plan` | `{ tokenId, action, nama, gates[], gasEstimate, dryRun, menutup, siap, expiresAt, fee0, fee1 }`. Simulasi ditampilkan sebelum tombol konfirmasi aktif, sesuai 3.5 | 5 |
 | `token_state` | `{ address, meta, quotes[], pools[], selectedQuote, selectedPoolId, error }`. Setiap `quote` membawa `{ quote, quoteSymbol, quoteDecimals, canonical, pools[] }`. Dikirim dua kali saat memuat: sekali cepat dari kunci pool yang tersimpan, sekali lagi setelah pemindaian selesai kalau ada yang berubah. Lihat 4.3c | 2 |
 | `range_view` | `{ poolId, tickSpacing, ethUsd, current, lower, upper, widthPct, inRange, warnings[] }`. Tiap batas memuat `tick`, `priceWeth`, `priceUsd`, `mcapUsd`, dan `driftBps`, yaitu selisih akibat pembulatan ke grid tick | 2 |
 | `price_tick` | `{ address, priceUsd, priceWeth, mcapUsd }` | 2 |

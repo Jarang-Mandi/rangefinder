@@ -28,6 +28,8 @@ import {
   gmgnTokenUrl,
   isEvmAddress,
   type EngineStatus,
+  type ActionPlanView,
+  type JenisAksi,
   type Kejadian,
   type OpenPlanView,
   type PoolInfo,
@@ -67,6 +69,8 @@ export function App() {
   const [execBusy, setExecBusy] = useState(false);
   const [positions, setPositions] = useState<PositionsView | null>(null);
   const [posBusy, setPosBusy] = useState(false);
+  const [actionPlan, setActionPlan] = useState<ActionPlanView | null>(null);
+  const [actionBusy, setActionBusy] = useState(false);
   /** Riwayat notifikasi, terbaru lebih dulu. */
   const [riwayat, setRiwayat] = useState<Kejadian[]>([]);
 
@@ -106,6 +110,10 @@ export function App() {
         drawnRef.current = "";
       },
       onRangeView: setRangeView,
+      onActionPlan: (p) => {
+        setActionPlan(p);
+        setActionBusy(false);
+      },
       onPositions: (v) => {
         setPositions(v);
         setPosBusy(false);
@@ -120,6 +128,7 @@ export function App() {
       onOpenPlan: (plan) => {
         setOpenPlan(plan);
         setExecBusy(false);
+        setActionBusy(false);
       },
       onSendResult: (result) => {
         setSendResult(result);
@@ -130,6 +139,7 @@ export function App() {
         // Setelah zap, saldo berubah sehingga jumlah pada rencana lama tidak
         // lagi tepat. Rencananya dibuang supaya user menyusun ulang.
         if (result.kind === "zap" && result.status === "sukses") setOpenPlan(null);
+        if (result.kind === "action") setActionPlan(null);
       },
       onAlert: (level, code, message) => {
         // Kegagalan eksekusi datang sebagai alert, dan tanpa ini tombolnya
@@ -336,9 +346,20 @@ export function App() {
           <PositionsTab
             view={positions}
             busy={posBusy}
+            plan={actionPlan}
+            actionBusy={actionBusy}
             onMuat={() => {
               setPosBusy(true);
               clientRef.current?.getPositions();
+            }}
+            onPlanAction={(id, a) => {
+              setActionBusy(true);
+              setActionPlan(null);
+              clientRef.current?.planAction(id, a);
+            }}
+            onExecuteAction={() => {
+              setActionBusy(true);
+              clientRef.current?.executeAction();
             }}
           />
         ) : (
@@ -881,11 +902,19 @@ function angka(v: number): string {
 function PositionsTab({
   view,
   busy,
+  plan,
+  actionBusy,
   onMuat,
+  onPlanAction,
+  onExecuteAction,
 }: {
   view: PositionsView | null;
   busy: boolean;
+  plan: ActionPlanView | null;
+  actionBusy: boolean;
   onMuat: () => void;
+  onPlanAction: (tokenId: string, action: JenisAksi) => void;
+  onExecuteAction: () => void;
 }) {
   if (!view) {
     return (
@@ -953,7 +982,14 @@ function PositionsTab({
       </section>
 
       {view.positions.map((p) => (
-        <PositionCard key={`${p.version}:${p.token_id}`} pos={p} />
+        <PositionCard
+          key={`${p.version}:${p.token_id}`}
+          pos={p}
+          plan={plan?.token_id === p.token_id ? plan : null}
+          busy={actionBusy}
+          onPlanAction={onPlanAction}
+          onExecuteAction={onExecuteAction}
+        />
       ))}
 
       {view.positions.length === 0 && !view.error ? (
@@ -975,7 +1011,19 @@ function PositionsTab({
  * Bar posisi harga di dalam range memakai warna datar, bukan gradient, sesuai
  * aturan desain proyek.
  */
-function PositionCard({ pos }: { pos: Posisi }) {
+function PositionCard({
+  pos,
+  plan,
+  busy,
+  onPlanAction,
+  onExecuteAction,
+}: {
+  pos: Posisi;
+  plan: ActionPlanView | null;
+  busy: boolean;
+  onPlanAction: (tokenId: string, action: JenisAksi) => void;
+  onExecuteAction: () => void;
+}) {
   const porsi = porsiDalamRange(pos);
   const nada = pos.kosong ? "" : pos.in_range ? "ok" : "bad";
   const status = pos.kosong ? "kosong" : pos.in_range ? "di dalam" : "di luar";
@@ -1026,14 +1074,102 @@ function PositionCard({ pos }: { pos: Posisi }) {
         </p>
       ) : null}
 
+      <div class="stack" style="margin-top: var(--s3)">
+        <div class="row" style="gap: var(--s2)">
+          <button
+            type="button"
+            style="flex: 1"
+            disabled={busy || !punyaFee(pos)}
+            onClick={() => onPlanAction(pos.token_id, "klaim_fee")}
+          >
+            Klaim fee
+          </button>
+          <button
+            type="button"
+            style="flex: 1"
+            disabled={busy}
+            onClick={() => onPlanAction(pos.token_id, "tutup_posisi")}
+          >
+            Tutup posisi
+          </button>
+        </div>
+
+        {plan ? <ActionPlanCard plan={plan} busy={busy} onKirim={onExecuteAction} /> : null}
+      </div>
+
       <p class="hint">
-        Aksi tambah, rebalance, klaim, dan tutup hidup di fase berikutnya. Kartu
-        ini sudah membaca keadaan sungguhan dari rantai.
+        Tambah likuiditas dan rebalance menyusul. Untuk sekarang, rebalance
+        dilakukan dengan menutup posisi lalu membuka range baru dari tab Range,
+        dan itu memang dua transaksi terpisah.
       </p>
     </section>
   );
 }
 
+/**
+ * Hasil pemeriksaan sebuah aksi, ditampilkan sebelum tombol konfirmasi aktif.
+ *
+ * PRD 3.5 menuntut simulasi ditampilkan lebih dulu. `siap` datang dari engine,
+ * bukan disimpulkan di sini, karena panel yang menyimpulkan sendiri akan
+ * menyimpang begitu ada gate baru ditambahkan.
+ */
+function ActionPlanCard({
+  plan,
+  busy,
+  onKirim,
+}: {
+  plan: ActionPlanView;
+  busy: boolean;
+  onKirim: () => void;
+}) {
+  return (
+    <div class="stack" style="border-top: 1px solid var(--border); padding-top: var(--s2)">
+      {plan.gates.map((g) => (
+        <div key={g.id} class="row">
+          <span class="label">
+            <span class={`dot ${g.passed ? "ok" : "bad"}`} /> {g.id} {g.name}
+          </span>
+          <span class="value muted">{g.detail}</span>
+        </div>
+      ))}
+      <div class="row">
+        <span class="label">Gas perkiraan</span>
+        <span class="value num">{plan.gas_estimate.toLocaleString("id-ID")}</span>
+      </div>
+
+      <button
+        type="button"
+        class="primary"
+        style="width: 100%"
+        disabled={!plan.siap || busy}
+        onClick={onKirim}
+      >
+        {plan.dry_run
+          ? "Dry run aktif, tidak akan dikirim"
+          : plan.siap
+            ? `Konfirmasi ${plan.nama}`
+            : "Ada pemeriksaan yang gagal"}
+      </button>
+
+      {plan.menutup ? (
+        <p class="hint">
+          Aksi ini menghabiskan posisinya. Likuiditas beserta fee ditarik ke
+          wallet, lalu NFT posisinya dibakar.
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Benar kalau posisinya punya fee yang belum diklaim.
+ *
+ * Tombol klaim dimatikan kalau tidak ada, karena mengirimnya tetap berhasil
+ * tapi hanya membakar gas untuk memindahkan nol.
+ */
+function punyaFee(p: Posisi): boolean {
+  return p.fee0 !== "0" || p.fee1 !== "0";
+}
 /**
  * Seberapa jauh harga sekarang di dalam range, sebagai porsi 0 sampai 1.
  *

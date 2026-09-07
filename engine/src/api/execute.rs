@@ -99,10 +99,46 @@ pub struct OpenPlanView {
     pub expires_at: String,
 }
 
+/// Aksi pada posisi yang sudah disusun dan menunggu persetujuan.
+pub struct AksiTersimpan {
+    pub token_id: String,
+    pub calldata: alloy::primitives::Bytes,
+    /// Kontrak tujuan, dipilih menurut versi posisinya.
+    pub tujuan: Address,
+    pub menutup: bool,
+    pub nama: &'static str,
+    pub disusun_pada: chrono::DateTime<chrono::Utc>,
+}
+
+impl AksiTersimpan {
+    pub fn kedaluwarsa(&self) -> bool {
+        (chrono::Utc::now() - self.disusun_pada).num_seconds() > RENCANA_KEDALUWARSA_DETIK
+    }
+}
+
+/// Rencana aksi beserta hasil pemeriksaannya, untuk ditampilkan panel.
+#[derive(Debug, Clone, Serialize)]
+pub struct ActionPlanView {
+    pub token_id: String,
+    pub action: crate::exec::aksi::JenisAksi,
+    pub nama: &'static str,
+    pub gates: Vec<crate::exec::pipeline::GateResult>,
+    pub gas_estimate: u64,
+    pub dry_run: bool,
+    /// Benar kalau aksi ini akan menghabiskan posisinya.
+    pub menutup: bool,
+    /// Benar hanya kalau seluruh gate lolos dan bukan dry run.
+    pub siap: bool,
+    pub expires_at: String,
+    /// Fee yang akan diambil, dalam satuan terkecil.
+    pub fee0: String,
+    pub fee1: String,
+}
+
 /// Hasil satu pengiriman, apa pun jenisnya.
 #[derive(Debug, Clone, Serialize)]
 pub struct SendResultView {
-    /// `approve` atau `open`, supaya panel tahu kartu mana yang diperbarui.
+    /// `approve`, `zap`, `open`, atau `action`, supaya panel tahu kartu mana
     pub kind: &'static str,
     #[serde(flatten)]
     pub outcome: SendOutcome,

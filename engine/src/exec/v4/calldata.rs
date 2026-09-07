@@ -148,6 +148,40 @@ pub fn mint(req: &MintV4Request) -> Result<Bytes, CalldataV4Error> {
     ))
 }
 
+/// Ambil fee yang terkumpul tanpa menyentuh likuiditasnya.
+///
+/// V4 tidak punya `collect`. Fee diambil dengan mengurangi likuiditas sebanyak
+/// NOL, yang tetap memicu penyelesaian fee di dalam PoolManager, lalu mengambil
+/// kedua currency. Ini pola yang dipakai periphery Uniswap sendiri.
+pub fn klaim_fee(
+    token_id: U256,
+    currency0: Address,
+    currency1: Address,
+    penerima: Address,
+    deadline: U256,
+) -> Result<Bytes, CalldataV4Error> {
+    if deadline.is_zero() {
+        return Err(CalldataV4Error::DeadlineNol);
+    }
+    if penerima.is_zero() {
+        return Err(CalldataV4Error::OwnerKosong);
+    }
+
+    let aksi = vec![
+        actions::decrease_liquidity(token_id, 0, 0, 0, Bytes::new()),
+        actions::take_pair(currency0, currency1, penerima),
+    ];
+    let unlock = actions::unlock_data(&aksi).expect("decrease selalu berpasangan dengan take");
+
+    Ok(Bytes::from(
+        Pm::modifyLiquiditiesCall {
+            unlockData: unlock,
+            deadline,
+        }
+        .abi_encode(),
+    ))
+}
+
 /// Bangun calldata menutup posisi: kurangi seluruh likuiditas, bakar NFT-nya,
 /// lalu ambil kedua currency.
 pub fn close_position(

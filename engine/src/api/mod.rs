@@ -98,6 +98,12 @@ pub struct AppState {
     /// Satu untuk seluruh engine, karena pendinginan yang terpisah per
     /// koneksi tidak menahan apa pun saat panel dibuka tutup.
     pub notifier: Arc<tokio::sync::RwLock<crate::notify::Notifier>>,
+    /// Aksi pada posisi yang sudah disusun, menunggu persetujuan.
+    ///
+    /// Disimpan di engine dengan alasan yang sama dengan rencana membuka
+    /// posisi: calldata yang bolak balik lewat panel bisa kembali dalam
+    /// keadaan sudah diubah.
+    pub pending_action: Arc<tokio::sync::RwLock<Option<crate::api::execute::AksiTersimpan>>>,
 }
 
 /// Keadaan token yang sedang aktif di panel.
@@ -994,6 +1000,192 @@ impl AppState {
         let _ = self
             .events
             .send(protocol::ServerMessage::NotifyHistory { items: riwayat });
+    }
+
+    /// Susun rencana sebuah aksi pada posisi, jalankan simulasinya, TIDAK kirim.
+    ///
+    /// PRD 3.5 menuntut simulasi hasil ditampilkan sebelum tombol konfirmasi
+    /// aktif. Karena itu polanya sama dengan membuka posisi: susun, lihat, lalu
+    /// setujui, dan calldata-nya tidak pernah bolak balik lewat panel.
+    pub async fn on_plan_action(&self, token_id: String, aksi: crate::exec::aksi::JenisAksi) {
+        match self.susun_rencana_aksi(token_id, aksi).await {
+            Ok(view) => {
+                let _ = self
+                    .events
+                    .send(protocol::ServerMessage::ActionPlan(Box::new(view)));
+            }
+            Err(pesan) => self.alert_kritis("action_plan_failed", pesan),
+        }
+    }
+
+    async fn susun_rencana_aksi(
+        &self,
+        token_id: String,
+        aksi: crate::exec::aksi::JenisAksi,
+    ) -> Result<execute::ActionPlanView, String> {
+        let pemilik = {
+            let w = self.wallet.lock().await;
+            match (w.exists(), w.is_locked(), w.address()) {
+                (false, _, _) => return Err("wallet belum dibuat".into()),
+                (_, true, _) => return Err("wallet masih terkunci".into()),
+                (_, _, Some(a)) => a,
+                _ => return Err("alamat wallet tidak diketahui".into()),
+            }
+        };
+
+        // Posisi diambil dari daftar yang terakhir dimuat, bukan dibaca ulang.
+        // Kalau daftarnya basi, gate simulasi di bawah yang akan menolak, dan
+        // pesannya datang dari kontrak sungguhan.
+        let posisi = {
+            let daftar = self.positions.read().await;
+            daftar
+                .iter()
+                .find(|p| p.token_id == token_id)
+                .cloned()
+                .ok_or("posisi tidak ada di daftar. Muat ulang tab Positions dulu")?
+        };
+
+        let deadline = alloy::primitives::U256::from(
+            chrono::Utc::now().timestamp().max(0) as u64 + DEADLINE_DETIK,
+        );
+        let rencana = crate::exec::aksi::susun(&posisi, aksi, pemilik, deadline)
+            .map_err(|e| e.to_string())?;
+
+        let provider = self
+            .chain
+            .provider()
+            .await
+            .map_err(|e| format!("RPC tidak bisa dipakai: {e}"))?;
+        let alamat = crate::exec::plan::AlamatEksekusi::dari_registry(&self.registry)
+            .map_err(|e| e.to_string())?;
+        let tujuan = alamat.position_manager(rencana.versi);
+
+        let mut gates = Vec::new();
+
+        // Kepemilikan diperiksa terhadap rantai, bukan terhadap daftar kita.
+        // Mengirim aksi untuk posisi milik orang lain akan revert setelah gas
+        // terbakar, dan pesannya tidak menjelaskan apa apa.
+        gates.push(crate::exec::pipeline::GateResult::lolos_publik(
+            "G0",
+            "versi protokol",
+            format!("posisi {:?}, kontrak tujuan sesuai", rencana.versi),
+        ));
+
+        let tx = alloy::rpc::types::TransactionRequest::default()
+            .from(pemilik)
+            .to(tujuan)
+            .input(rencana.calldata.clone().into());
+
+        match provider.call(tx.clone()).await {
+            Ok(_) => gates.push(crate::exec::pipeline::GateResult::lolos_publik(
+                "G4",
+                "simulasi",
+                format!("kontrak menerima {}", aksi.nama()),
+            )),
+            Err(e) => {
+                let teks = e.to_string();
+                let pesan = if teks.contains("revert") || teks.contains("execution reverted") {
+                    crate::exec::simulate::jelaskan_revert(&teks)
+                } else {
+                    format!("RPC gagal: {teks}")
+                };
+                gates.push(crate::exec::pipeline::GateResult::gagal_publik(
+                    "G4",
+                    "simulasi",
+                    pesan,
+                ));
+            }
+        }
+
+        let gas = provider.estimate_gas(tx).await.unwrap_or(0);
+        let semua_lolos = gates.iter().all(|g| g.passed);
+
+        let disusun_pada = chrono::Utc::now();
+        *self.pending_action.write().await = Some(execute::AksiTersimpan {
+            token_id: token_id.clone(),
+            calldata: rencana.calldata,
+            tujuan,
+            menutup: rencana.menutup,
+            nama: aksi.nama(),
+            disusun_pada,
+        });
+
+        Ok(execute::ActionPlanView {
+            token_id,
+            action: aksi,
+            nama: aksi.nama(),
+            gates,
+            gas_estimate: gas,
+            dry_run: self.cfg.execution.dry_run,
+            menutup: rencana.menutup,
+            siap: semua_lolos && !self.cfg.execution.dry_run,
+            expires_at: (disusun_pada
+                + chrono::Duration::seconds(execute::RENCANA_KEDALUWARSA_DETIK))
+            .to_rfc3339(),
+            fee0: posisi.fee0,
+            fee1: posisi.fee1,
+        })
+    }
+
+    /// Setujui aksi terakhir dan kirim transaksinya.
+    pub async fn on_execute_action(&self) {
+        match self.kirim_aksi().await {
+            Ok(view) => {
+                let _ = self
+                    .events
+                    .send(protocol::ServerMessage::SendResult(Box::new(view)));
+                // Keadaan posisi berubah setelah aksi, jadi daftarnya dimuat
+                // ulang. Tanpa ini kartunya menampilkan fee yang sudah diambil.
+                self.on_get_positions().await;
+            }
+            Err(pesan) => self.alert_kritis("action_failed", pesan),
+        }
+    }
+
+    async fn kirim_aksi(&self) -> Result<execute::SendResultView, String> {
+        if self.cfg.execution.dry_run {
+            return Err("engine sedang dry run, tidak ada yang dikirim".into());
+        }
+
+        // Dikeluarkan dari slot sebelum dikirim, dengan alasan yang sama seperti
+        // rencana membuka posisi: yang masih tersimpan bisa disetujui dua kali.
+        let tersimpan = self
+            .pending_action
+            .write()
+            .await
+            .take()
+            .ok_or("belum ada aksi yang disusun")?;
+
+        if tersimpan.kedaluwarsa() {
+            return Err("rencana aksi sudah kedaluwarsa, susun ulang".into());
+        }
+
+        let provider = self
+            .chain
+            .provider()
+            .await
+            .map_err(|e| format!("RPC tidak bisa dipakai: {e}"))?;
+
+        let mut wallet = self.wallet.lock().await;
+        let signer = wallet.signer().map_err(|e| e.to_string())?.clone();
+        drop(wallet);
+
+        let terkirim = crate::exec::send::send_calldata(
+            &provider,
+            &self.nonce,
+            &signer,
+            tersimpan.tujuan,
+            tersimpan.calldata,
+            alloy::primitives::U256::ZERO,
+            self.registry.chain.id,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+        Ok(execute::SendResultView {
+            kind: "action",
+            outcome: crate::exec::send::jadikan_hasil(terkirim),
+        })
     }
 
     /// Muat ulang posisi LP wallet dan siarkan hasilnya.
