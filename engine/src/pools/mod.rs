@@ -50,6 +50,37 @@ pub const ASSUMED_DYNAMIC_FEE: u32 = 3_000;
 
 pub const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 
+/// Fee tertinggi yang masih masuk akal untuk pool yang benar benar dipakai.
+///
+/// KENAPA ADA BATAS INI
+/// Pemindaian FIG di Robinhood Chain menemukan pool dengan fee 80,27 persen,
+/// 81,00 persen, dan 20,00 persen, dan ketiganya PUNYA likuiditas. Tidak ada
+/// swap waras yang mau membayar 80 persen, jadi pool seperti itu tidak akan
+/// pernah menghasilkan fee bagi LP. Yang lebih berbahaya, pemeringkatan
+/// `likuiditas x fee` justru menaruhnya di puncak daftar, tepat di tempat user
+/// paling mungkin memilihnya.
+///
+/// Ambangnya 10 persen, bukan angka Uniswap baku, karena di chain ini pool 8
+/// persen memang benar benar diperdagangkan dengan volume ratusan ribu dolar.
+/// Membatasi ke 1 persen akan membuang pool yang sah.
+pub const MAX_PLAUSIBLE_FEE: u32 = 100_000;
+
+/// Benar kalau fee-nya di luar batas kewajaran untuk LP.
+///
+/// Dua arah, dan keduanya sama sama tidak berguna:
+///
+/// Fee terlalu tinggi berarti tidak akan ada yang mau swap lewat sana, jadi
+/// tidak ada fee yang mengalir ke kita. Fee nol berarti swap memang lewat, tapi
+/// kita tidak dibayar sepeser pun sambil tetap menanggung impermanent loss.
+/// Pool fee nol yang ditemukan pada FIG bahkan punya likuiditas sangat besar,
+/// yang membuatnya menang telak di pemeringkatan mana pun yang tidak menyaring.
+pub fn implausible_fee(p: &PoolInfo) -> bool {
+    if p.dynamic_fee {
+        return false;
+    }
+    p.fee == 0 || p.fee > MAX_PLAUSIBLE_FEE
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct TokenMeta {
     pub address: String,
@@ -286,6 +317,315 @@ pub async fn discover_v4<P: Provider>(
     Ok(out)
 }
 
+/// Cari pool V4 untuk satu token, TANPA mengandaikan pasangannya.
+///
+/// KENAPA INI ADA
+/// `discover_v4` menyaring dua currency sekaligus, jadi ia hanya menemukan
+/// pool kalau kita sudah menebak benar token lawannya. Tebakan itu ternyata
+/// sering salah: banyak memecoin di chain ini berpasangan dengan stablecoin,
+/// bukan WETH, dan hasilnya kita melaporkan tidak ada pool padahal ada puluhan.
+///
+/// Fungsi ini memindai dua kali, sekali dengan token pada posisi currency0 dan
+/// sekali pada currency1, lalu menggabungkan hasilnya. Token lawannya ikut
+/// terbaca dari log, jadi tidak perlu diketahui lebih dulu.
+pub async fn discover_v4_any<P: Provider>(
+    provider: &P,
+    registry: &Registry,
+    token: Address,
+) -> Result<Vec<PoolInfo>> {
+    let pool_manager = registry.contract("uniswap_v4", "pool_manager")?;
+    let state_view = registry.contract("uniswap_v4", "state_view")?;
+    let view = abi::IStateView::new(state_view, provider);
+
+    let latest = provider
+        .get_block_number()
+        .await
+        .context("gagal membaca blok terakhir")?;
+
+    let mut out = Vec::new();
+    let mut terlihat: Vec<String> = Vec::new();
+
+    // Urutan currency ditentukan alamat, dan kita tidak tahu token ini yang
+    // lebih kecil atau lebih besar, jadi kedua posisi harus dicoba.
+    for sebagai_currency0 in [true, false] {
+        // Batas bawah adalah jendela mundur, bukan deploy_block, karena pool
+        // yang dicari selalu yang baru. Tidak pernah turun di bawah blok
+        // pemasangan protokol.
+        let batas_bawah = latest
+            .saturating_sub(SCAN_LOOKBACK_DEFAULT)
+            .max(registry.chain.deploy_block);
+
+        let logs = scan_initialize_logs(
+            provider,
+            pool_manager,
+            token,
+            sebagai_currency0,
+            batas_bawah,
+            latest,
+        )
+        .await?;
+
+        for log in logs {
+            let Ok(decoded) = abi::Initialize::decode_log(&log.inner) else {
+                continue;
+            };
+            let pool_id: FixedBytes<32> = decoded.id;
+            let id = format!("0x{}", hex::encode(pool_id));
+            if terlihat.contains(&id) {
+                continue;
+            }
+            terlihat.push(id.clone());
+
+            let Ok(slot0) = view.getSlot0(pool_id).call().await else {
+                continue;
+            };
+            let liquidity = view.getLiquidity(pool_id).call().await.unwrap_or(0);
+            let sqrt = U256::from(slot0.sqrtPriceX96);
+            let fee = decoded.fee.to::<u32>();
+
+            out.push(PoolInfo {
+                version: PoolVersion::V4,
+                id,
+                token0: decoded.currency0.to_string(),
+                token1: decoded.currency1.to_string(),
+                fee,
+                dynamic_fee: fee & DYNAMIC_FEE_FLAG != 0,
+                tick_spacing: decoded.tickSpacing.as_i32(),
+                hooks: Some(decoded.hooks.to_string()),
+                sqrt_price_x96: sqrt.to_string(),
+                tick: slot0.tick.as_i32(),
+                liquidity: liquidity.to_string(),
+                raw_price: raw_price_from_sqrt_x96(sqrt),
+            });
+        }
+    }
+
+    Ok(out)
+}
+
+/// Rentang blok terlebar yang dicoba sekali jalan.
+///
+/// RPC publik menolak rentang yang terlalu lebar, dan chain ini sudah melewati
+/// 55 juta blok karena waktu bloknya sekitar 100 ms. Memindai sekaligus akan
+/// selalu ditolak.
+const SCAN_CHUNK_AWAL: u64 = 500_000;
+const SCAN_CHUNK_MINIMUM: u64 = 5_000;
+
+/// Sejauh mana mundur dari blok terakhir sebelum menyerah.
+///
+/// Tiga juta blok kira kira tiga setengah hari pada waktu blok 100 ms. Itu
+/// cukup untuk seluruh memecoin yang masih relevan untuk LP, dan jauh lebih
+/// murah daripada menyapu 55 juta blok sejarah.
+pub const SCAN_LOOKBACK_DEFAULT: u64 = 3_000_000;
+
+/// Pindai log `Initialize` mundur dari blok terakhir.
+///
+/// KENAPA MUNDUR, BUKAN MAJU
+/// Percobaan pertama memindai maju dari `deploy_block`, dan itu keliru dua
+/// kali. Pertama, chain ini sudah melewati 55 juta blok karena waktu bloknya
+/// 100 ms, jadi menyapu seluruhnya butuh ribuan permintaan dan pasti kena rate
+/// limit. Kedua, pool yang kita cari selalu yang baru, jadi sejarah lama itu
+/// justru bagian yang paling tidak berguna.
+///
+/// Mundur dari blok terakhir menemukan yang relevan pada permintaan pertama.
+///
+/// KESALAHAN TIDAK DITELAN
+/// Versi pertama memakai `continue` saat pemindaian gagal, sehingga hasilnya
+/// nol pool tanpa satu pun pesan, padahal pool-nya ada puluhan. Kegagalan yang
+/// tidak terlihat lebih buruk daripada kegagalan yang berisik.
+async fn scan_initialize_logs<P: Provider>(
+    provider: &P,
+    pool_manager: Address,
+    token: Address,
+    sebagai_currency0: bool,
+    batas_bawah: u64,
+    sampai_blok: u64,
+) -> Result<Vec<alloy::rpc::types::Log>> {
+    let mut out = Vec::new();
+    let mut chunk = SCAN_CHUNK_AWAL;
+    let mut hingga = sampai_blok;
+
+    while hingga > batas_bawah {
+        let mulai = hingga.saturating_sub(chunk).max(batas_bawah);
+
+        let dasar = Filter::new()
+            .address(pool_manager)
+            .event_signature(abi::Initialize::SIGNATURE_HASH)
+            .from_block(mulai)
+            .to_block(hingga);
+
+        let filter = if sebagai_currency0 {
+            dasar.topic2(token.into_word())
+        } else {
+            dasar.topic3(token.into_word())
+        };
+
+        match provider.get_logs(&filter).await {
+            Ok(mut l) => {
+                out.append(&mut l);
+                if mulai == batas_bawah {
+                    break;
+                }
+                hingga = mulai - 1;
+            }
+            Err(e) => {
+                if chunk > SCAN_CHUNK_MINIMUM {
+                    // Rentang terlalu lebar. Kecilkan lalu ulangi rentang yang
+                    // sama, bukan lanjut mundur, supaya tidak ada blok terlewat.
+                    chunk /= 2;
+                    tracing::debug!(chunk, "rentang pemindaian dikecilkan");
+                    continue;
+                }
+                return Err(anyhow::anyhow!(
+                    "pemindaian log gagal pada blok {mulai} sampai {hingga} \
+                     bahkan dengan rentang {chunk} blok: {e}"
+                ));
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+/// Token lawan yang muncul pada sekumpulan pool, beserta jumlah pool-nya.
+///
+/// Dipakai untuk menjawab pertanyaan "token ini sebenarnya berpasangan dengan
+/// apa", tanpa perlu menebak lebih dulu.
+pub fn counterparties(pools: &[PoolInfo], token: &str) -> Vec<(String, usize)> {
+    let t = token.to_lowercase();
+    let mut hitung: std::collections::BTreeMap<String, usize> = Default::default();
+
+    for p in pools {
+        let lawan = if p.token0.to_lowercase() == t {
+            &p.token1
+        } else if p.token1.to_lowercase() == t {
+            &p.token0
+        } else {
+            continue;
+        };
+        *hitung.entry(lawan.clone()).or_insert(0) += 1;
+    }
+
+    let mut v: Vec<_> = hitung.into_iter().collect();
+    v.sort_by_key(|x| std::cmp::Reverse(x.1));
+    v
+}
+
+/// Sekelompok pool yang berbagi token lawan yang sama.
+#[derive(Debug, Clone, Serialize)]
+pub struct QuoteGroup {
+    /// Alamat token lawan. Nol berarti ETH asli, yang hanya ada di V4.
+    pub quote: String,
+    pub quote_symbol: String,
+    pub quote_decimals: u8,
+    pub pools: Vec<PoolInfo>,
+}
+
+/// Cari seluruh pool untuk sebuah token, dikelompokkan menurut token lawannya.
+///
+/// KENAPA DIKELOMPOKKAN
+/// Membandingkan pool FIG/USDG dengan FIG/ETH berdasarkan likuiditas tidak
+/// bermakna, karena harganya berada di sumbu yang berbeda. User memilih
+/// pasangannya dulu, baru fee tier di dalam pasangan itu.
+///
+/// KENAPA TIDAK MENEBAK PASANGANNYA
+/// Versi pertama hanya mencari pasangan terhadap WETH, dan itu keliru. Pada FIG
+/// di Robinhood Chain, 33 dari 39 pool berpasangan dengan USDG dan tidak satu
+/// pun dengan WETH. Hasilnya kita melaporkan tidak ada pool sama sekali,
+/// padahal alat lain menemukan puluhan.
+pub async fn discover_for_token<P: Provider>(
+    provider: &P,
+    registry: &Registry,
+    token: Address,
+) -> Vec<QuoteGroup> {
+    let mut semua: Vec<PoolInfo> = Vec::new();
+
+    // V4 tidak perlu tahu pasangannya lebih dulu.
+    match discover_v4_any(provider, registry, token).await {
+        Ok(mut v) => semua.append(&mut v),
+        Err(e) => tracing::warn!(error = %e, "penemuan pool V4 gagal"),
+    }
+
+    // V3 butuh kedua alamat, jadi setiap token kutipan yang dikenal dicoba.
+    for (nama, entry) in &registry.tokens {
+        let Ok(quote) = entry.address.parse::<Address>() else {
+            continue;
+        };
+        if quote == token {
+            continue;
+        }
+        match discover_v3(provider, registry, token, quote).await {
+            Ok(mut v) => semua.append(&mut v),
+            Err(e) => tracing::warn!(quote = %nama, error = %e, "penemuan pool V3 gagal"),
+        }
+    }
+
+    kelompokkan(semua, token, registry)
+}
+
+fn kelompokkan(pools: Vec<PoolInfo>, token: Address, registry: &Registry) -> Vec<QuoteGroup> {
+    let t = token.to_string().to_lowercase();
+    let mut per_quote: std::collections::BTreeMap<String, Vec<PoolInfo>> = Default::default();
+
+    for p in pools {
+        let lawan = if p.token0.to_lowercase() == t {
+            p.token1.clone()
+        } else if p.token1.to_lowercase() == t {
+            p.token0.clone()
+        } else {
+            continue;
+        };
+        per_quote.entry(lawan).or_default().push(p);
+    }
+
+    let mut out: Vec<QuoteGroup> = per_quote
+        .into_iter()
+        .map(|(quote, pools)| {
+            let (symbol, decimals) = kenali_quote(&quote, registry);
+            QuoteGroup {
+                quote,
+                quote_symbol: symbol,
+                quote_decimals: decimals,
+                pools: usable_pools(pools),
+            }
+        })
+        .filter(|g| !g.pools.is_empty())
+        .collect();
+
+    // Kelompok dengan likuiditas terbesar lebih dulu, karena itu yang paling
+    // mungkin jadi pasar sebenarnya.
+    out.sort_by(|a, b| {
+        let total = |g: &QuoteGroup| -> f64 {
+            g.pools
+                .iter()
+                .map(|p| p.liquidity.parse::<f64>().unwrap_or(0.0))
+                .sum()
+        };
+        total(b)
+            .partial_cmp(&total(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    out
+}
+
+/// Kenali token lawan dari registry, atau tandai sebagai tidak dikenal.
+///
+/// Token yang tidak dikenal bukan berarti buruk, tapi wajib terlihat. Pasangan
+/// dengan token asing bisa berarti pasar yang tipis, atau token tiruan.
+fn kenali_quote(alamat: &str, registry: &Registry) -> (String, u8) {
+    if alamat.eq_ignore_ascii_case(ZERO_ADDRESS) {
+        // V4 mendukung ETH asli sebagai currency, bukan hanya WETH.
+        return ("ETH".into(), 18);
+    }
+    for (nama, entry) in &registry.tokens {
+        if entry.address.eq_ignore_ascii_case(alamat) {
+            return (nama.to_uppercase(), entry.decimals);
+        }
+    }
+    ("?".into(), 18)
+}
+
 /// Cari seluruh pool untuk sepasang token, V3 dan V4 sekaligus.
 ///
 /// Kegagalan salah satu versi tidak menggagalkan yang lain, karena V4 memakai
@@ -337,8 +677,22 @@ pub fn usable_pools(mut pools: Vec<PoolInfo>) -> Vec<PoolInfo> {
                 fee = p.fee,
                 "pool tanpa likuiditas dilewati, harganya tidak bisa dipercaya"
             );
+            return false;
         }
-        likuid && p.raw_price.is_finite() && p.raw_price > 0.0
+
+        // Pool berfee mustahil dibuang, BUKAN sekadar diturunkan peringkatnya.
+        // Tanpa ini, pool fee 80 persen justru menang karena skornya
+        // likuiditas dikali fee. Lihat MAX_PLAUSIBLE_FEE.
+        if implausible_fee(p) {
+            tracing::warn!(
+                pool = %p.id,
+                fee_persen = p.fee as f64 / 10_000.0,
+                "pool dengan fee di luar akal sehat dibuang"
+            );
+            return false;
+        }
+
+        p.raw_price.is_finite() && p.raw_price > 0.0
     });
 
     pools.sort_by(|a, b| {
@@ -453,6 +807,52 @@ mod tests {
     }
 
     #[test]
+    fn pool_berfee_mustahil_dibuang_bukan_dimenangkan() {
+        // Angka nyata dari pemindaian FIG di Robinhood Chain. Tanpa penyaringan
+        // ini, pool 80 persen menang telak karena skornya likuiditas dikali fee,
+        // dan ia akan muncul di puncak daftar tepat di tempat user memilih.
+        let jebakan = pool("jebakan", 802_700, "12581485599219836851", 1.0);
+        let wajar = pool("wajar", 80_000, "223191483590178319", 1.0);
+
+        assert!(implausible_fee(&jebakan));
+        assert!(!implausible_fee(&wajar), "8 persen masih wajar di chain ini");
+
+        let hasil = usable_pools(vec![jebakan, wajar]);
+        assert_eq!(hasil.len(), 1);
+        assert_eq!(hasil[0].id, "wajar");
+    }
+
+    #[test]
+    fn pool_dynamic_fee_tidak_ikut_disaring_batas_fee() {
+        // Penanda dynamic fee nilainya 8388608, jauh di atas ambang, tapi itu
+        // bukan besaran fee. Menyaringnya akan membuang seluruh pool dinamis.
+        let mut dinamis = pool("dinamis", DYNAMIC_FEE_FLAG, "1000", 1.0);
+        dinamis.dynamic_fee = true;
+        assert!(!implausible_fee(&dinamis));
+        assert_eq!(usable_pools(vec![dinamis]).len(), 1);
+    }
+
+    #[test]
+    fn batas_fee_tepat_di_ambang() {
+        assert!(!implausible_fee(&pool("a", MAX_PLAUSIBLE_FEE, "1", 1.0)));
+        assert!(implausible_fee(&pool("b", MAX_PLAUSIBLE_FEE + 1, "1", 1.0)));
+    }
+
+    #[test]
+    fn pool_fee_nol_dibuang_meski_likuiditasnya_raksasa() {
+        // Angka nyata dari FIG: fee nol dengan likuiditas 2,8e23, jauh lebih
+        // besar daripada pool mana pun yang sah. Tanpa penyaringan, ia menang
+        // telak padahal tidak membayar apa apa ke LP.
+        let nol = pool("nol", 0, "282361371356284006478705", 1.0);
+        let wajar = pool("wajar", 80_000, "223191483590178319", 1.0);
+
+        assert!(implausible_fee(&nol));
+        let hasil = usable_pools(vec![nol, wajar]);
+        assert_eq!(hasil.len(), 1);
+        assert_eq!(hasil[0].id, "wajar");
+    }
+
+    #[test]
     fn hook_dikenali_dari_alamat() {
         let mut tanpa = pool("tanpa", 3_000, "1", 1.0);
         assert!(!has_hook(&tanpa), "hooks None berarti tanpa hook");
@@ -512,6 +912,63 @@ mod tests {
                 "fee tier {fee} harus punya tick spacing yang dikenal"
             );
         }
+    }
+
+    fn pool_pasangan(token0: &str, token1: &str) -> PoolInfo {
+        let mut p = pool("x", 3000, "1", 1.0);
+        p.token0 = token0.into();
+        p.token1 = token1.into();
+        p
+    }
+
+    #[test]
+    fn lawan_dihitung_dan_diurutkan_dari_yang_terbanyak() {
+        let target = "0xdc4dd8839f02f2242e9552fe4652635fb7f95cc6";
+        let usdg = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
+        let eth = "0x0000000000000000000000000000000000000000";
+
+        let pools = vec![
+            pool_pasangan(usdg, target),
+            pool_pasangan(target, eth),
+            pool_pasangan(usdg, target),
+            pool_pasangan(usdg, target),
+        ];
+
+        let lawan = counterparties(&pools, target);
+        assert_eq!(lawan.len(), 2);
+        assert_eq!(
+            lawan[0],
+            (usdg.to_string(), 3),
+            "yang terbanyak harus di depan"
+        );
+        assert_eq!(lawan[1], (eth.to_string(), 1));
+    }
+
+    #[test]
+    fn lawan_tidak_peduli_besar_kecil_huruf() {
+        // Alamat datang dari dua sumber dengan gaya penulisan berbeda: log
+        // memberi huruf kecil, sedangkan tipe Address mencetak checksum
+        // campuran. Kalau perbandingannya sensitif huruf, token yang dicari
+        // tidak akan pernah cocok dan hasilnya kosong tanpa pesan salah apa
+        // pun, yang persis bentuk bug pasangan WETH.
+        let target = "0xdC4dd8839f02F2242e9552FE4652635fb7f95Cc6";
+        let usdg = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
+        let pools = vec![pool_pasangan(usdg, &target.to_lowercase())];
+
+        let lawan = counterparties(&pools, target);
+        assert_eq!(
+            lawan.len(),
+            1,
+            "alamat yang sama dengan huruf berbeda harus tetap cocok"
+        );
+        assert_eq!(lawan[0].0, usdg);
+    }
+
+    #[test]
+    fn pool_yang_tidak_menyentuh_token_diabaikan() {
+        let target = "0xdc4dd8839f02f2242e9552fe4652635fb7f95cc6";
+        let pools = vec![pool_pasangan("0xaaa", "0xbbb")];
+        assert!(counterparties(&pools, target).is_empty());
     }
 
     /// Uji terhadap chain sungguhan.

@@ -106,10 +106,29 @@ export interface TokenMeta {
  * karena harganya berasal dari saat pool dibuat dan bisa meleset puluhan kali
  * lipat. Panel tidak perlu tahu pool itu ada.
  */
+/** Sekelompok pool yang berbagi token lawan yang sama. */
+export interface QuoteGroup {
+  /** Alamat token lawan. Nol berarti ETH asli, yang hanya ada di V4. */
+  quote: string;
+  quote_symbol: string;
+  quote_decimals: number;
+  pools: PoolInfo[];
+}
+
 export interface TokenState {
   address: string;
   meta: TokenMeta | null;
+  /**
+   * Pool dikelompokkan menurut token lawan.
+   *
+   * Satu token bisa berpasangan dengan beberapa token sekaligus. Pada FIG di
+   * Robinhood Chain, 33 dari 39 poolnya berpasangan dengan USDG dan tidak satu
+   * pun dengan WETH, jadi menebak pasangannya akan melewatkan seluruh pasar.
+   */
+  quotes: QuoteGroup[];
+  /** Pool dari kelompok terpilih, diratakan. */
   pools: PoolInfo[];
+  selected_quote: string | null;
   selected_pool_id: string | null;
   error: string | null;
 }

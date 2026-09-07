@@ -94,3 +94,19 @@ WETH di chain ini adalah proxy aeWETH yang kompatibel WETH9. Alamatnya ada di
 `chain.toml` bagian `[tokens]`. V4 juga mendukung ETH asli sebagai currency,
 bukan hanya WETH, jadi engine memilih jalur yang biayanya paling rendah dan
 mencatat pilihannya di log posisi.
+
+WETH bukan token kutipan yang dominan di sini. USDG di
+`0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168` jauh lebih banyak dipakai, dan
+desimalnya **6**, bukan 18. Karena itu engine tidak pernah menebak dengan token
+apa sebuah memecoin berpasangan. Ia memindai semua pool yang menyentuh token
+itu lalu mengelompokkannya per token lawan. Lihat PRD 4.3b dan
+`memory/005-pasangan-token-dan-fee-jebakan.md`.
+
+Untuk memeriksa sebuah token sendiri:
+
+```
+cargo xtask pairs 0xdc4dd8839f02f2242e9552fe4652635fb7f95cc6
+```
+
+Perintah itu menyebut setiap token lawan beserta jumlah poolnya, dan merinci
+pool yang dibuang karena kosong atau karena feenya di luar akal sehat.

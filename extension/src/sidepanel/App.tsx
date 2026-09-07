@@ -479,7 +479,11 @@ function TokenCard({
       <section class="card">
         <div class="section-title">
           <h2>Pool</h2>
-          <span class="chip">{token.pools.length} layak</span>
+          <span class="chip">
+            {token.quotes.find((q) => q.quote === token.selected_quote)?.quote_symbol ?? "?"}
+            {" · "}
+            {token.pools.length} layak
+          </span>
         </div>
 
         <div class="stack" style="margin-top: var(--s2)">

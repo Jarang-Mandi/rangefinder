@@ -120,6 +120,7 @@ Request gmgn membawa parameter fingerprint: `device_id`, `tab_id`, `fp_did`, `cl
 | RPC publik | `https://rpc.mainnet.chain.robinhood.com` (rate limited) |
 | Explorer | `https://robinhoodchain.blockscout.com` |
 | WETH | `0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73` (aeWETH proxy, kompatibel WETH9) |
+| USDG | `0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168`, **6 desimal**. Token kutipan yang paling banyak dipakai di rantai ini |
 | Permit2 | `0x000000000022D473030F116dDEE9F6B43aC78BA3` |
 | Multicall3 | `0xcA11bde05977b3631167028862bE2a173976CA11` |
 
@@ -404,13 +405,15 @@ Event drag terbit dengan frekuensi tinggi. Panel melakukan throttle pada 30 fps 
 Ini sumber bug paling halus di seluruh proyek. Chart bekerja dalam market cap USD, Uniswap bekerja dalam tick. Rantai konversinya:
 
 ```
-mcap_usd  ->  price_usd  ->  price_weth  ->  raw_price  ->  tick
+mcap_usd  ->  price_usd  ->  price_quote  ->  raw_price  ->  tick
 ```
 
+`price_quote` adalah harga dalam token kutipan pool yang sedang dipilih, dan token itu **tidak selalu WETH**. Lihat 4.3b.
+
 1. `price_usd = mcap_usd / total_supply`. Ambil `total_supply` dari endpoint rank gmgn, verifikasi silang dengan `totalSupply()` on chain. Jika beda lebih dari 0,5 persen, pakai nilai on chain dan tandai.
-2. `price_weth = price_usd / eth_usd`. Harga ETH diambil dari `/api/v1/major_coin_prices` dan diverifikasi silang dengan pool WETH stablecoin on chain.
-3. Tentukan urutan token. `token0` adalah alamat yang lebih kecil secara numerik. Jika memecoin adalah token0, maka harga pool adalah WETH per memecoin. Jika terbalik, semua nilai harus diinversi sebelum masuk rumus tick.
-4. `raw_price = price_weth * 10^(dec1 - dec0)`.
+2. `price_quote = price_usd / quote_usd`. Untuk kutipan WETH, `quote_usd` adalah kurs ETH yang dikalibrasi dari chart. Untuk kutipan stablecoin seperti USDG, `quote_usd` bernilai 1 dan langkah ini tidak menambah error sama sekali, yang membuat pool berkutipan stablecoin lebih akurat sekaligus lebih murah untuk dihitung.
+3. Tentukan urutan token. `token0` adalah alamat yang lebih kecil secara numerik. Jika memecoin adalah token0, maka harga pool adalah kutipan per memecoin. Jika terbalik, semua nilai harus diinversi sebelum masuk rumus tick.
+4. `raw_price = price_quote * 10^(dec1 - dec0)`. Desimal kutipan wajib diambil dari token kutipan yang sebenarnya. USDG berdesimal 6, dan menganggapnya 18 menggeser seluruh harga sebesar 10^12.
 5. `tick = round( ln(raw_price) / ln(1.0001) )`.
 6. Snap ke grid: `tickLower = floor(tick / tickSpacing) * tickSpacing`, `tickUpper = ceil(tick / tickSpacing) * tickSpacing`.
 
@@ -419,6 +422,30 @@ Tick spacing V3 per fee tier: 100 memakai 1, 500 memakai 10, 3000 memakai 60, 10
 Aturan tampilan: panel selalu menunjukkan harga hasil pembulatan tick, bukan harga mentah yang digeser user, supaya angka di panel sama persis dengan yang akan tercatat on chain. Selisih pembulatan ditampilkan dalam basis poin.
 
 Chart gmgn punya toggle `Price / MC` dan `USD / ETH`, dan toggle skala `log`. Content script membaca simbol aktif melalui `activeChart().symbol()` untuk mendeteksi mode, lalu menyesuaikan konversi. Perubahan mode oleh user memicu penggambaran ulang garis.
+
+### 4.3b Pencarian pool tanpa asumsi pasangan
+
+Engine tidak menebak dengan token apa sebuah memecoin berpasangan. Ia memindai seluruh event `Initialize` PoolManager yang menyentuh alamat token itu, lalu mengelompokkan hasilnya per token lawan menjadi `QuoteGroup`. Kelompok dengan likuiditas layak terbesar dipilih otomatis, dan panel menampilkan pilihan itu beserta kelompok lain yang tersedia.
+
+Aturan ini lahir dari kasus nyata. Pada FIG di `0xdc4Dd8839F02F2242E9552fe4652635fB7F95cC6`, dari 39 pool V4 yang ada, 33 berpasangan dengan USDG, 5 dengan ETH asli, dan **nol** dengan WETH. Pencarian yang mengandaikan WETH melaporkan token itu tidak punya pool sama sekali, padahal pasarnya ramai.
+
+Tiga hal yang mengikuti dari situ:
+
+1. **ETH asli ikut dicari.** Di V4, currency `0x0000...0000` berarti ETH asli, bukan alamat kosong, dan itu tidak akan pernah cocok dengan pencarian berbasis WETH.
+2. **Simbol bukan identitas.** Token lain yang juga bernama FIG ada di `0x41F4267525a8AFf329540eF24fD83d9044758B33` dan punya pool terhadap FIG yang asli. Yang mengikat posisi hanya alamat.
+3. **Pemindaian log berjalan mundur** dari blok terbaru dengan potongan adaptif, dan kegagalan RPC dikembalikan sebagai error, tidak pernah dilewati diam diam. Memindai maju dari blok deploy berarti puluhan juta blok dan langsung kena rate limit.
+
+**Penyaringan fee di luar akal sehat.** Pool dengan fee statis nol atau di atas `MAX_PLAUSIBLE_FEE` yaitu 10 persen **dibuang**, bukan diturunkan peringkatnya. Alasannya terlihat pada token yang sama:
+
+| Fee | Likuiditas | Kenapa berbahaya |
+| --- | --- | --- |
+| 99,08 sampai 79,06 persen | sampai 12,58e18 | Tidak ada yang menukar di sana, jadi pendapatan nol sambil skor `likuiditas x fee` memenangkannya |
+| 20,00 persen | 4,03e19 | Sama, hanya lebih halus |
+| 0,00 persen | 2,82e23 | Likuiditas terbesar di seluruh token, 1.286 kali pool teratas yang layak. Menang pada pemeringkatan berbasis likuiditas mana pun, dan membayar LP nol sambil tetap menanggung impermanent loss penuh |
+
+Pool dynamic fee dikecualikan dari aturan ini, karena angka feenya adalah penanda `0x800000`, bukan besaran.
+
+Perintah `cargo xtask pairs <alamat>` menampilkan seluruh rincian ini, termasuk apa yang dibuang beserta alasannya. Penyaringan yang tidak terlihat adalah persis bagaimana bug pasangan WETH bisa bertahan tanpa ketahuan.
 
 ### 4.4 Degradasi bertingkat
 
@@ -886,7 +913,7 @@ Engine ke panel:
 | `engine_status` | `{ engineVersion, uptimeSecs, chain, wallet, registry, canExecute, blockedReasons[] }` | 1 |
 | `pong` | balasan denyut | 1 |
 | `alert` | `{ level, code, message, positionId }` | 1 |
-| `token_state` | `{ address, meta, pools[], selectedPoolId, error }`, jawaban atas `subscribe_token`. Daftar `pools` sudah disaring dan diurutkan, pool tanpa likuiditas tidak pernah ikut | 2 |
+| `token_state` | `{ address, meta, quotes[], pools[], selectedQuote, selectedPoolId, error }`, jawaban atas `subscribe_token`. `quotes` mengelompokkan pool menurut token lawan, karena satu token bisa berpasangan dengan beberapa token sekaligus. `pools` adalah kelompok terpilih yang diratakan. Semuanya sudah disaring: pool tanpa likuiditas, pool berfee mustahil, dan pool tanpa fee tidak pernah ikut | 2 |
 | `range_view` | `{ poolId, tickSpacing, ethUsd, current, lower, upper, widthPct, inRange, warnings[] }`. Tiap batas memuat `tick`, `priceWeth`, `priceUsd`, `mcapUsd`, dan `driftBps`, yaitu selisih akibat pembulatan ke grid tick | 2 |
 | `price_tick` | `{ address, priceUsd, priceWeth, mcapUsd }` | 2 |
 | `range_quote` | `{ quoteId, feeApr, expectedHoursInRange, ilBreakevenHours, crowdedLiquidityUsd, ourSharePct, amount0, amount1, swapNeeded, priceImpact, gasEstimate, warnings[] }` | 3 |
@@ -1141,6 +1168,8 @@ Kalau jam impas lebih panjang daripada ekspektasi waktu bertahan dari 11.2, posi
 ### 11.5 Pemilihan fee tier otomatis
 
 Satu pair bisa punya pool di beberapa fee tier. Yang paling likuid belum tentu paling menguntungkan untuk LP. Engine menghitung `volume x fee_tier / likuiditas` untuk setiap pool yang ada, termasuk lintas V3 dan V4, lalu mengurutkan berdasarkan proyeksi fee per dolar modal. Pada memecoin, pool 1 persen sering mengalahkan pool 0,3 persen meski volumenya lebih kecil.
+
+Pemeringkatan ini berjalan **setelah** penyaringan fee di luar akal sehat pada 4.3b, bukan sebelumnya. Tanpa urutan itu, rumus `volume x fee_tier / likuiditas` justru memilih pool fee 80 persen yang volumenya nol.
 
 ### 11.6 LP satu sisi sebagai alat eksekusi
 

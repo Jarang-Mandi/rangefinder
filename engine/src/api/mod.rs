@@ -117,7 +117,9 @@ impl AppState {
         let mut out = protocol::TokenState {
             address: address.clone(),
             meta: None,
+            quotes: Vec::new(),
             pools: Vec::new(),
+            selected_quote: None,
             selected_pool_id: None,
             error: None,
         };
@@ -126,19 +128,6 @@ impl AppState {
             Ok(a) => a,
             Err(_) => {
                 out.error = Some(format!("`{address}` bukan alamat EVM yang valid"));
-                return out;
-            }
-        };
-
-        let weth = match self
-            .registry
-            .tokens
-            .get("weth")
-            .and_then(|t| t.address.parse::<alloy::primitives::Address>().ok())
-        {
-            Some(a) => a,
-            None => {
-                out.error = Some("alamat WETH tidak ada atau tidak valid di chain.toml".into());
                 return out;
             }
         };
@@ -161,38 +150,56 @@ impl AppState {
             }
         }
 
-        let found = crate::pools::discover_all(&provider, &self.registry, token, weth).await;
-        let usable = crate::pools::usable_pools(found);
+        // Pasangannya TIDAK ditebak. Token bisa berpasangan dengan stablecoin,
+        // ETH asli, atau apa pun. Menebak WETH pernah membuat kita melaporkan
+        // nol pool padahal ada puluhan. Lihat pools::discover_for_token.
+        let groups = crate::pools::discover_for_token(&provider, &self.registry, token).await;
 
-        if usable.is_empty() {
+        if groups.is_empty() {
             out.error = Some(
-                "tidak ada pool dengan likuiditas untuk pasangan ini. \
-                 Pool kosong sengaja tidak ditampilkan karena harganya tidak bisa dipercaya"
+                "tidak ada pool yang layak untuk token ini. Pool tanpa likuiditas, \
+                 pool berfee mustahil, dan pool tanpa fee sengaja tidak ditampilkan \
+                 karena tidak berguna untuk LP"
                     .into(),
             );
+            return out;
         }
 
-        out.selected_pool_id = usable.first().map(|p| p.id.clone());
+        // Kelompok teratas sudah diurutkan menurut total likuiditas, jadi ia
+        // yang paling mungkin merupakan pasar sebenarnya.
+        let terpilih = groups[0].clone();
+        out.selected_quote = Some(terpilih.quote.clone());
+        out.selected_pool_id = terpilih.pools.first().map(|p| p.id.clone());
+        out.pools = terpilih.pools.clone();
+
+        if groups.len() > 1 {
+            let lain: Vec<String> = groups[1..]
+                .iter()
+                .map(|g| format!("{} ({} pool)", g.quote_symbol, g.pools.len()))
+                .collect();
+            tracing::info!(
+                terpilih = %terpilih.quote_symbol,
+                alternatif = %lain.join(", "),
+                "token berpasangan dengan lebih dari satu kutipan"
+            );
+        }
 
         // Simpan sebagai token aktif supaya laporan harga dari chart yang
         // datang berikutnya punya konteks untuk dikalibrasi.
         if let (Some(meta), Some(selected)) = (out.meta.clone(), out.selected_pool_id.clone()) {
             *self.active.write().await = Some(ActiveToken {
                 meta,
-                pools: usable.clone(),
+                pools: terpilih.pools.clone(),
                 selected_pool_id: selected,
-                quote_decimals: self
-                    .registry
-                    .tokens
-                    .get("weth")
-                    .map(|t| t.decimals)
-                    .unwrap_or(18),
+                // Desimal kutipan ikut pasangan terpilih, bukan diandaikan 18.
+                // USDG memakai 6, dan salah desimal menggeser harga sejuta kali.
+                quote_decimals: terpilih.quote_decimals,
                 requested: None,
                 chart_mcap_usd: None,
             });
         }
 
-        out.pools = usable;
+        out.quotes = groups;
         out
     }
 

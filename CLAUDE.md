@@ -90,7 +90,7 @@ engine/                 biner `rangefinder`, plus pustaka `rangefinder_engine`
     routes.rs           handler HTTP
     ws.rs               WebSocket ke panel
 
-xtask/                  verify, docs-check, golden, dryrun
+xtask/                  verify, docs-check, golden, dryrun, pairs
   src/golden.rs         pengambil golden vector dari transaksi sungguhan
   src/dryrun.rs         jalankan pipeline penuh terhadap pool sungguhan
 extension/              ekstensi Chrome MV3
@@ -117,6 +117,9 @@ tersandung:
 | Orientasi token membalik arah tick | `math/mod.rs` | Kalau memecoin adalah token1, harga naik berarti tick turun, dan batas atas bawah bertukar. Terlihat masuk akal saat salah |
 | Pool tanpa likuiditas harus dibuang | `pools/mod.rs::usable_pools` | Pool kosong tetap menjawab `slot0` dengan harga dari saat ia dibuat. Pada PONS/WETH selisihnya 37 kali lipat dari pool yang benar benar likuid |
 | Penyaringan pool hanya di engine | `pools` dan `App.tsx` | Panel menampilkan apa adanya. Dua tempat yang menyaring akan menyimpang |
+| Token lawan tidak pernah ditebak | `pools/mod.rs::discover_for_token` | FIG punya 33 pool USDG, 5 pool ETH asli, dan nol pool WETH. Pencarian yang mengandaikan WETH melaporkan token ramai itu tidak punya pool |
+| Desimal kutipan ikut kelompoknya | `pools::QuoteGroup` dan `api/mod.rs` | USDG berdesimal 6. Menganggapnya 18 menggeser seluruh harga 10^12 |
+| Pool fee nol atau di atas 10 persen dibuang | `pools/mod.rs::implausible_fee` | Skor likuiditas dikali fee memenangkan pool fee 80 persen yang tidak pernah ditukar siapa pun, dan pool fee 0 persen memegang likuiditas terbesar sambil membayar LP nol |
 | Konversi satuan hanya di engine | `range` dan `math` | Panel tidak menghitung apa pun. Angka di layar harus sama persis dengan yang tercatat on chain |
 | Kurs ETH diturunkan dari chart | `math::calibrate_eth_usd` | Sumber luar selalu sedikit meleset dari gmgn, dan garis ikut bergeser |
 | Sisi tampilan bertukar saat memecoin token1 | `range::build_view` | Tick yang lebih besar berarti harga memecoin lebih rendah. Batas atas dan bawah harus ditukar sebelum ditampilkan |

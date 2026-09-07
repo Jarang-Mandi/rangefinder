@@ -18,6 +18,7 @@
 //!   penting tentang UniversalRouter yang merupakan fork.
 
 mod dryrun;
+mod pairs;
 mod golden;
 
 use std::path::{Path, PathBuf};
@@ -56,6 +57,16 @@ fn main() -> Result<()> {
             let ok = rt.block_on(dryrun::run(&root, &token, from.as_deref()))?;
             finish(ok)
         }
+        "pairs" => {
+            let token = args.get(1).cloned().unwrap_or_default();
+            if token.is_empty() {
+                eprintln!("cara pakai: cargo xtask pairs <alamat_token>");
+                std::process::exit(2);
+            }
+            let rt = tokio::runtime::Runtime::new()?;
+            let ok = rt.block_on(pairs::run(&root, &token))?;
+            finish(ok)
+        }
         "golden" => {
             let jumlah = args
                 .get(1)
@@ -66,7 +77,7 @@ fn main() -> Result<()> {
             finish(ok)
         }
         other => {
-            eprintln!("perintah `{other}` tidak dikenal. Yang ada: verify, docs-check, golden, dryrun");
+            eprintln!("perintah `{other}` tidak dikenal. Yang ada: verify, docs-check, golden, dryrun, pairs");
             std::process::exit(2);
         }
     }

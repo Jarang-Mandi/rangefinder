@@ -1,5 +1,4 @@
-
-| `003-rpc-rate-limit.md` | RPC membatasi laju, dan bahaya menelan kegagalan jadi nol |# Memori repo
+# Memori repo
 
 Catatan per topik yang tumbuh seiring waktu. Isinya jebakan yang sudah
 ditemukan, kesalahan yang pernah dibuat, dan alasan sebuah pendekatan
@@ -39,3 +38,4 @@ setiap agent.
 | `002-tradingview-gmgn.md` | Jebakan saat menyentuh chart gmgn |
 | `003-rpc-rate-limit.md` | RPC membatasi laju, dan bahaya menelan kegagalan jadi nol |
 | `004-rust-di-disk-d.md` | Rust dipindah ke D, dan jebakan saat memindahkannya |
+| `005-pasangan-token-dan-fee-jebakan.md` | Token lawan tidak boleh ditebak, dan pool ber-fee ekstrem |

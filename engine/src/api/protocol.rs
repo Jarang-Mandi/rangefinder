@@ -97,7 +97,13 @@ pub struct EngineStatus {
 pub struct TokenState {
     pub address: String,
     pub meta: Option<crate::pools::TokenMeta>,
+    /// Pool dikelompokkan menurut token lawan, karena satu token bisa
+    /// berpasangan dengan beberapa token sekaligus.
+    pub quotes: Vec<crate::pools::QuoteGroup>,
+    /// Pool dari kelompok terpilih. Diratakan supaya panel yang sudah ada
+    /// tidak perlu berubah untuk kasus satu pasangan.
     pub pools: Vec<crate::pools::PoolInfo>,
+    pub selected_quote: Option<String>,
     /// Pool peringkat teratas, dipilih otomatis supaya panel punya titik awal.
     pub selected_pool_id: Option<String>,
     pub error: Option<String>,

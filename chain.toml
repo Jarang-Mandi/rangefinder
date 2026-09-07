@@ -24,6 +24,10 @@ deploy_block = 7887312
 
 [tokens]
 weth = { address = "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73", decimals = 18, note = "aeWETH proxy, kompatibel WETH9" }
+# Stablecoin chain ini. Banyak memecoin justru berpasangan dengan ini, bukan
+# WETH. Ditemukan dari pemindaian log Initialize pada FIG, 33 dari 39 poolnya
+# memakai USDG.
+usdg = { address = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168", decimals = 6, note = "stablecoin, pasangan paling umum untuk memecoin" }
 
 [common]
 permit2 = { address = "0x000000000022D473030F116dDEE9F6B43aC78BA3", code_hash = "5208783f52488f7d3493e5e38311ab707c1d75457fe472a19b0b4d57d66a7fca" }
