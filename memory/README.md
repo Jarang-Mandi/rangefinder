@@ -42,3 +42,4 @@ setiap agent.
 | `006-kecepatan-pencarian-pool.md` | Kenapa pencarian pool lambat, dan kenapa paralel justru memperburuk |
 | `007-pengiriman-transaksi.md` | Invarian pengiriman transaksi, dan tiga hal yang hampir terlewat |
 | `008-eksekusi-v4.md` | Cara kerja V4 dibaca dari rantai, izin dua lapis, dan jebakan kebiasaan V3 |
+| `009-zap-dan-router-fork.md` | Zap satu sisi, bug perbandingan desimal, dan cara memulihkan struct fork |

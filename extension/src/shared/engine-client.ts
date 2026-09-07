@@ -253,6 +253,11 @@ export class EngineClient {
     this.send({ type: "approve_token", token });
   }
 
+  /** Jalankan swap zap dari rencana terakhir. */
+  swapZap() {
+    this.send({ type: "swap_zap" });
+  }
+
   /** Setujui rencana terakhir. Ini yang benar benar memindahkan dana. */
   openPosition() {
     this.send({ type: "open_position" });

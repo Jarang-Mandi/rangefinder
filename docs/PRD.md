@@ -823,7 +823,7 @@ P < Pa:         amount0 = L * (1/sqrt(Pa) - 1/sqrt(Pb)),  amount1 = 0
 P > Pb:         amount0 = 0,  amount1 = L * (sqrt(Pb) - sqrt(Pa))
 ```
 
-Zap dihitung dengan menyelesaikan berapa bagian dari modal yang harus ditukar supaya sisa dua token tepat memenuhi rasio di atas, dengan memperhitungkan dampak harga dari swap itu sendiri. Iterasi Newton dua sampai tiga putaran sudah cukup konvergen, dan hasilnya diverifikasi dengan QuoterV2 atau V4Quoter sebelum dikirim.
+Zap dihitung dengan menyelesaikan berapa bagian dari modal yang harus ditukar supaya sisa dua token tepat memenuhi rasio di atas, dengan memperhitungkan dampak harga dari swap itu sendiri. Penyelesaiannya memakai bagi dua, bukan Newton seperti yang semula direncanakan, dan alasannya beserta angka hasilnya ada di 6.7. Setiap kutipan diverifikasi dengan V4Quoter sebelum dikirim.
 
 Mengikuti LPZenith: jika grid tick tidak memungkinkan penempatan range dalam 1 persen dari harga live, posisi ditolak dan engine menyarankan pool dengan fee tier lebih halus.
 
@@ -927,6 +927,50 @@ Robinhood Chain memakai sequencer first come first served tanpa lelang priority 
 
 ---
 
+### 6.7 Zap satu sisi
+
+User cukup memegang satu token. Engine menghitung berapa bagian yang harus ditukar supaya sisanya tepat memenuhi rasio range.
+
+**Penyelesaiannya iteratif, dan memakai bagi dua bukan Newton.** Bagian 6.1 semula menyebut Newton dua sampai tiga putaran. Newton butuh turunan yang bentuknya bergantung pada model dampak harga, dan model itu berbeda antara V3 dan V4 berhook. Bagi dua tidak butuh turunan sama sekali, dan pada fungsi yang monoton ia pasti konvergen. Empat belas putaran sudah cukup pada pool sungguhan.
+
+**Arah pencarian ditentukan sisi mana yang mengikat, bukan sisa mana yang lebih besar.** Ini kesalahan yang sempat terjadi dan berhasil ditangkap saat pengujian terhadap pool nyata. Membandingkan sisa token0 dengan sisa token1 secara langsung tidak sah, karena keduanya token berbeda dengan desimal berbeda. Pada FIG/USDG, sisa 77.380 satuan USDG berdesimal enam ternyata jauh lebih bernilai daripada 12.325.754 satuan FIG berdesimal delapan belas, tapi perbandingan angka mentah menyatakan sebaliknya.
+
+Yang benar adalah membandingkan likuiditas yang bisa dibentuk tiap sisi seorang diri. Sisi yang menghasilkan lebih sedikit adalah yang mengikat, dan itu perbandingan tanpa satuan sehingga aman terhadap selisih desimal.
+
+Selisihnya bukan hal kecil. Pada pool FIG/USDG dengan modal yang sama, versi yang benar menghasilkan **8,2 persen likuiditas lebih banyak**, dan menyisakan modal menganggur mendekati nol alih alih lima belas persen.
+
+**Kutipan selalu datang dari rantai.** V4Quoter dipanggil lewat `eth_call`, dan hasilnya tidak pernah ditebak. Perlu dicatat bahwa `quoteExactInputSingle` tidak bertanda `view`: ia benar benar menjalankan swap lalu revert untuk membatalkannya, dan hasilnya dibaca dari data revert. Karena itu ia tidak boleh dikirim sebagai transaksi.
+
+Kutipan yang menjawab nol diperlakukan sebagai kegagalan, bukan sebagai jawaban. Nol yang diterima sebagai jawaban sah akan menghasilkan pembagian modal yang sepenuhnya salah.
+
+**Zap dijalankan sebagai transaksi terpisah, bukan atomik.** Bagian 5.1 menyebut zap LPZenith bersifat atomik, dan itu memang lebih baik. Di rantai ini tidak bisa ditiru untuk V4: swap berjalan lewat UniversalRouter sedangkan posisi dibuat lewat PositionManager, dan tidak ada kontrak yang bisa melakukan keduanya dalam satu panggilan.
+
+Konsekuensinya harga bisa bergerak di antara kedua transaksi. Yang menahan itu adalah `amountOutMinimum`, dan kalau pergerakannya melewati batas slippage, swapnya gagal tanpa memindahkan apa pun alih alih menghasilkan posisi timpang.
+
+Setelah swap berhasil, panel membuang rencana lama supaya jumlahnya dihitung ulang dari saldo yang baru. Menyusun posisi dari angka sebelum swap akan meleset persis sebesar hasil swapnya.
+
+**Ambang kelayakan.** Zap hanya ditawarkan kalau modal yang akan menganggur melebihi satu persen. Di bawah itu, biaya gas dan slippage sebuah swap lebih besar daripada perbaikannya.
+
+### 6.8 Encoder swap UniversalRouter
+
+UniversalRouter di rantai ini adalah fork, dan bentuk sebenarnya dibaca dari transaksi swap nyata `0xf15c5f65d6f0372698805158351bf8c13de3578692a721a06094a365449fcd86`, bukan dari kode sumber yang tidak kita punya.
+
+Struktur luarnya `execute(bytes commands, bytes[] inputs, uint256 deadline)`, dengan satu perintah `V4_SWAP` bernilai `0x10`. Isinya rangkaian tiga aksi:
+
+| Kode | Aksi |
+| --- | --- |
+| `0x06` | SWAP_EXACT_IN_SINGLE |
+| `0x0c` | SETTLE_ALL |
+| `0x0f` | TAKE_ALL |
+
+**Field tambahan fork ditemukan lewat aritmetika offset.** Pada transaksi itu, offset `hookData` bernilai `0x140`, yaitu sepuluh kata dari awal struct. Struct Uniswap standar hanya sembilan kata: PoolKey lima kata, lalu `zeroForOne`, `amountIn`, `amountOutMinimum`, dan offset `hookData`. Selisih satu kata itulah `minHopPriceX36`, dan nilainya nol pada transaksi tersebut.
+
+Kalau encoder memakai struct standar, `hookData` akan mendarat di posisi yang salah dan kontrak membaca sampah. Uji golden vector membangun ulang seluruh calldata transaksi itu, 1124 byte, dan membandingkannya byte per byte, sehingga kekeliruan seperti itu tertangkap saat build bukan saat dana bergerak.
+
+`minHopPriceX36` diisi nol kecuali ada alasan yang dipahami. Menebak nilai lain untuk field yang perilakunya belum diketahui lebih berbahaya daripada tidak memakainya.
+
+**Izin swap terpisah dari izin posisi.** UniversalRouter menarik token lewat Permit2 juga, dan izin ke PositionManager tidak berlaku untuknya. Panel menampilkan langkah izin router sebagai bagian dari daftar yang sama.
+
 ## 7. Technical Specifications
 
 ### 7.1 Arsitektur
@@ -988,6 +1032,7 @@ Panel ke engine:
 | `set_range` | `{ lowerMcap, upperMcap }`, user menggeser garis. Batas dalam market cap USD karena itu satuan chart | 2 |
 | `quote_range` | `{ sizeUsd }`. Susun rencana pada pool dan range yang sedang aktif, jalankan seluruh gate, TIDAK mengirim apa pun. Pool dan tick tidak ikut dikirim panel: keduanya sudah ada di engine, dan menerimanya dari panel berarti menerima parameter transaksi dari luar | 3 |
 | `approve_token` | `{ token }`. Kerjakan langkah izin PERTAMA yang masih kurang untuk token itu. Pada V3 satu langkah sudah cukup, pada V4 ada dua karena izinnya lewat Permit2, jadi pesannya dikirim dua kali. Jumlah dan spender datang dari engine, bukan dari panel | 3 |
+| `swap_zap` | tanpa isi. Menjalankan swap zap dari rencana terakhir lewat UniversalRouter. Transaksi terpisah dari membuka posisi, lihat 6.7 | 4 |
 | `open_position` | tanpa isi. Menyetujui rencana terakhir yang tersimpan di engine. Rencana tidak pernah bolak balik lewat panel, karena bagian yang paling menarik untuk diubah justru calldata-nya | 3 |
 | `rebalance` | `{ positionId, tickLower, tickUpper }` | 3 |
 | `claim` | `{ positionId, swapToEth }` | 3 |
@@ -1001,8 +1046,8 @@ Engine ke panel:
 | `hello` | `{ engineVersion, protocolVersion }`, dikirim sekali saat tersambung | 1 |
 | `engine_status` | `{ engineVersion, uptimeSecs, chain, wallet, registry, canExecute, blockedReasons[] }` | 1 |
 | `pong` | balasan denyut | 1 |
-| `open_plan` | rencana lengkap beserta hasil tiap gate, `version` bernilai `v3` atau `v4`, daftar langkah izin yang masih kurang, dan kapan rencananya kedaluwarsa. Setiap langkah membawa `{ jenis, token, needed, current, label }`, dan bentuknya seragam untuk kedua protokol | 3 |
-| `send_result` | `{ kind, txHash, nonce, gasLimit, status, blockNumber, gasUsed, tokenId, verification, sentAt }`. `kind` bernilai `approve` atau `open`. `status` bernilai `sukses`, `revert`, atau `menggantung` | 3 |
+| `open_plan` | rencana lengkap beserta hasil tiap gate, `version` bernilai `v3` atau `v4`, daftar langkah izin yang masih kurang, `zap` kalau modal perlu ditukar lebih dulu, dan kapan rencananya kedaluwarsa. Setiap langkah izin membawa `{ jenis, token, needed, current, label }`, dan bentuknya seragam untuk kedua protokol | 3 |
+| `send_result` | `{ kind, txHash, nonce, gasLimit, status, blockNumber, gasUsed, tokenId, verification, sentAt }`. `kind` bernilai `approve`, `zap`, atau `open`. `status` bernilai `sukses`, `revert`, atau `menggantung` | 3 |
 | `alert` | `{ level, code, message, positionId }` | 1 |
 | `token_state` | `{ address, meta, quotes[], pools[], selectedQuote, selectedPoolId, error }`. Setiap `quote` membawa `{ quote, quoteSymbol, quoteDecimals, canonical, pools[] }`. Dikirim dua kali saat memuat: sekali cepat dari kunci pool yang tersimpan, sekali lagi setelah pemindaian selesai kalau ada yang berubah. Lihat 4.3c | 2 |
 | `range_view` | `{ poolId, tickSpacing, ethUsd, current, lower, upper, widthPct, inRange, warnings[] }`. Tiap batas memuat `tick`, `priceWeth`, `priceUsd`, `mcapUsd`, dan `driftBps`, yaitu selisih akibat pembulatan ke grid tick | 2 |

@@ -29,6 +29,12 @@ pub const RENCANA_KEDALUWARSA_DETIK: i64 = 180;
 /// Rencana yang tersimpan beserta konteks yang dibutuhkan untuk mengirimnya.
 pub struct RencanaTersimpan {
     pub plan: OpenPlan,
+    /// Calldata swap zap beserta nilainya, kalau zap diperlukan.
+    ///
+    /// Disimpan di engine dengan alasan yang sama dengan calldata mint:
+    /// calldata yang bolak balik lewat panel bisa kembali dalam keadaan
+    /// sudah diubah.
+    pub zap_calldata: Option<(alloy::primitives::Bytes, U256)>,
     /// Versi pool yang direncanakan. Menentukan kontrak tujuan, bentuk
     /// izin, dan cara verifikasi pasca kirim.
     pub versi: crate::pools::PoolVersion,
@@ -45,6 +51,34 @@ impl RencanaTersimpan {
     }
 }
 
+/// Swap yang perlu dijalankan lebih dulu supaya modal cocok dengan rasio range.
+///
+/// KENAPA TRANSAKSI TERPISAH, BUKAN SATU YANG ATOMIK
+/// PRD 5.1 menyebut zap LPZenith bersifat atomik. Di rantai ini itu tidak
+/// bisa ditiru untuk V4: swap berjalan lewat UniversalRouter sedangkan posisi
+/// dibuat lewat PositionManager, dan tidak ada kontrak yang bisa melakukan
+/// keduanya dalam satu panggilan.
+///
+/// Konsekuensinya harga bisa bergerak di antara kedua transaksi. Itu ditahan
+/// oleh `amount_out_minimum`, dan kalau pergerakannya melewati batas, swapnya
+/// gagal tanpa memindahkan apa pun alih alih menghasilkan posisi timpang.
+#[derive(Debug, Clone, Serialize)]
+pub struct ZapView {
+    /// Token yang ditukar.
+    pub dari: String,
+    pub ke: String,
+    /// Jumlah yang ditukar, dalam satuan terkecil.
+    pub jumlah: String,
+    /// Perkiraan yang diterima menurut quoter.
+    pub perkiraan_diterima: String,
+    /// Batas bawah yang masih diterima. Satu satunya pengaman slippage.
+    pub minimum_diterima: String,
+    /// Berapa persen modal yang ditukar, untuk ditampilkan.
+    pub porsi_bps: u32,
+    /// Modal yang akan menganggur kalau zap TIDAK dijalankan.
+    pub menganggur_tanpa_zap: String,
+}
+
 /// Ringkasan rencana untuk panel, beserta status izin tiap token.
 #[derive(Debug, Clone, Serialize)]
 pub struct OpenPlanView {
@@ -59,6 +93,9 @@ pub struct OpenPlanView {
     pub allowances: Vec<crate::exec::plan::LangkahIzin>,
     /// `v3` atau `v4`, supaya panel bisa menyebutnya di layar.
     pub version: &'static str,
+    /// Terisi kalau modal user tidak cocok dengan rasio range, sehingga
+    /// sebagian perlu ditukar lebih dulu. Kosong berarti tidak perlu.
+    pub zap: Option<ZapView>,
     pub expires_at: String,
 }
 
@@ -341,6 +378,7 @@ mod tests {
     fn rencana_kedaluwarsa_setelah_batas() {
         let plan = RencanaTersimpan {
             plan: contoh_plan(),
+            zap_calldata: None,
             versi: crate::pools::PoolVersion::V3,
             token0: Address::ZERO,
             token1: Address::ZERO,
@@ -356,6 +394,7 @@ mod tests {
     fn rencana_baru_belum_kedaluwarsa() {
         let plan = RencanaTersimpan {
             plan: contoh_plan(),
+            zap_calldata: None,
             versi: crate::pools::PoolVersion::V3,
             token0: Address::ZERO,
             token1: Address::ZERO,

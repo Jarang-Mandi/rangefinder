@@ -75,3 +75,33 @@ sol! {
         bytes32 salt
     );
 }
+
+sol! {
+    #[sol(rpc)]
+    interface IV4Quoter {
+        struct PoolKeyQ {
+            address currency0;
+            address currency1;
+            uint24 fee;
+            int24 tickSpacing;
+            address hooks;
+        }
+
+        struct QuoteExactSingleParams {
+            PoolKeyQ poolKey;
+            bool zeroForOne;
+            uint128 exactAmount;
+            bytes hookData;
+        }
+
+        /// TIDAK bertanda `view` di kontraknya.
+        ///
+        /// V4Quoter bekerja dengan benar benar menjalankan swap lalu melakukan
+        /// revert untuk membatalkannya, dan menangkap hasilnya dari data revert
+        /// itu. Karena itu ia hanya boleh dipanggil lewat `eth_call`, tidak
+        /// pernah dikirim sebagai transaksi.
+        function quoteExactInputSingle(QuoteExactSingleParams params)
+            external
+            returns (uint256 amountOut, uint256 gasEstimate);
+    }
+}

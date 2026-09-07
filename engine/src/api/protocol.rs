@@ -60,6 +60,13 @@ pub enum ClientMessage {
     /// pernah dari panel.
     ApproveToken { token: String },
 
+    /// Jalankan swap zap dari rencana terakhir.
+    ///
+    /// Transaksi terpisah dari membuka posisi, dan itu bukan pilihan:
+    /// swap berjalan lewat UniversalRouter sedangkan posisi dibuat lewat
+    /// PositionManager, dan tidak ada kontrak yang bisa keduanya sekaligus.
+    SwapZap,
+
     /// Setujui rencana terakhir dan kirim transaksinya.
     ///
     /// Tidak membawa rencana, hanya persetujuan. Rencana yang datang

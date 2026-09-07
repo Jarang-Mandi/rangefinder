@@ -10,6 +10,7 @@
 //! - Chain ini secara resmi dinyatakan tidak stabil oleh gmgn, jadi kegagalan
 //!   RPC adalah kondisi normal yang harus ditangani, bukan kejadian luar biasa.
 
+pub mod endpoint;
 pub mod multicall;
 pub mod registry;
 
@@ -29,6 +30,13 @@ use registry::Registry;
 #[derive(Debug, Clone, Serialize)]
 pub struct ChainHealth {
     pub healthy: bool,
+    /// URL RPC yang sedang dipakai, SUDAH disamarkan.
+    ///
+    /// Field ini dikirim ke panel dan ikut tercetak di layar, sedangkan URL
+    /// penyedia berbayar memuat API key di jalurnya. Penyamarannya wajib
+    /// terjadi sebelum nilainya masuk ke sini, bukan saat ditampilkan, karena
+    /// tempat penampilan bisa bertambah tanpa siapa pun ingat menyamarkannya.
+    /// Lihat `chain::endpoint`.
     pub endpoint: String,
     pub chain_id: Option<u64>,
     pub block_number: Option<u64>,
@@ -42,7 +50,7 @@ impl ChainHealth {
     fn unknown(endpoint: &str, max_lag: u64) -> Self {
         Self {
             healthy: false,
-            endpoint: endpoint.to_string(),
+            endpoint: endpoint::aman(endpoint),
             chain_id: None,
             block_number: None,
             block_lag_secs: None,
@@ -117,7 +125,10 @@ impl ChainClient {
         }
         let mut idx = self.endpoint.write().await;
         *idx = (*idx + 1) % self.cfg.http.len();
-        tracing::warn!(endpoint = %self.cfg.http[*idx], "beralih ke RPC cadangan");
+        tracing::warn!(
+            endpoint = %endpoint::aman(&self.cfg.http[*idx]),
+            "beralih ke RPC cadangan"
+        );
     }
 
     /// Penyedia RPC untuk endpoint yang sedang aktif.
@@ -169,7 +180,7 @@ impl ChainClient {
                 self.rotate_endpoint().await;
                 ChainHealth {
                     healthy: false,
-                    endpoint: endpoint.clone(),
+                    endpoint: endpoint::aman(&endpoint),
                     chain_id: None,
                     block_number: None,
                     block_lag_secs: None,
@@ -214,7 +225,7 @@ impl ChainClient {
 
         Ok(ChainHealth {
             healthy,
-            endpoint: endpoint.to_string(),
+            endpoint: endpoint::aman(endpoint),
             chain_id: Some(chain_id),
             block_number: Some(block_number),
             block_lag_secs: lag,
@@ -381,5 +392,24 @@ mod tests {
         let checks = vec![check(RegistryStatus::Verified); 3];
         let report = registry_gate(&checks).unwrap();
         assert_eq!(report.verified, 3);
+    }
+    #[test]
+    fn api_key_tidak_pernah_masuk_status_yang_dikirim_ke_panel() {
+        // Ini penjaga struktural, bukan sekadar uji fungsi. Kalau suatu saat
+        // ada yang menaruh URL mentah ke ChainHealth lagi, uji ini yang
+        // menangkapnya sebelum key user ikut tercetak di layar.
+        let h = ChainHealth::unknown(
+            "https://robinhood-mainnet.g.alchemy.com/v2/kunci_rahasia_user",
+            5,
+        );
+        assert!(
+            !h.endpoint.contains("kunci_rahasia_user"),
+            "API key bocor ke status: {}",
+            h.endpoint
+        );
+        assert!(
+            h.endpoint.contains("alchemy.com"),
+            "host tetap harus terlihat supaya status kesehatan berguna"
+        );
     }
 }

@@ -182,6 +182,60 @@ pub async fn izin_yang_kurang<P: Provider>(
     }
 }
 
+/// Langkah izin Permit2 untuk sebuah spender selain PositionManager.
+///
+/// Dipakai zap: swap berjalan lewat UniversalRouter, dan router itu menarik
+/// token lewat Permit2 juga. Izin ke PositionManager tidak berlaku untuknya,
+/// dan melewatkan ini membuat swap revert setelah gas terbakar.
+///
+/// ETH asli dilewati karena ia ikut sebagai `msg.value`, bukan ditarik.
+#[allow(clippy::too_many_arguments)]
+pub async fn izin_permit2_untuk<P: Provider>(
+    provider: &P,
+    alamat: &AlamatEksekusi,
+    pemilik: Address,
+    spender: Address,
+    nama_spender: &str,
+    token: Address,
+    jumlah: U256,
+    sekarang_unix: u64,
+) -> Result<Vec<LangkahIzin>, String> {
+    if token.is_zero() || jumlah.is_zero() {
+        return Ok(Vec::new());
+    }
+
+    let izin = super::v4::permit::periksa_izin(
+        provider,
+        alamat.multicall,
+        pemilik,
+        alamat.permit2,
+        spender,
+        token,
+        jumlah,
+        token,
+        U256::ZERO,
+        sekarang_unix,
+    )
+    .await?;
+
+    Ok(izin
+        .into_iter()
+        .flat_map(|i| i.langkah_kurang)
+        .map(|l| LangkahIzin {
+            jenis: l.jenis,
+            label: match l.jenis {
+                "erc20_ke_permit2" => {
+                    format!("Izinkan Permit2 memakai {} untuk zap", ringkas(&l.token))
+                }
+                _ => format!("Izinkan {nama_spender} lewat Permit2 untuk zap"),
+            },
+            token: l.token,
+            needed: l.needed,
+            current: l.current,
+        })
+        .collect())
+}
+
 fn ringkas(alamat: &str) -> String {
     if alamat.len() <= 12 {
         return alamat.to_string();

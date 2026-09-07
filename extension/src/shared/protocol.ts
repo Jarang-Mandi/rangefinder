@@ -228,7 +228,27 @@ export interface OpenPlanView {
   allowances: LangkahIzin[];
   /** `v3` atau `v4`. */
   version: string;
+  /** Terisi kalau modal perlu ditukar lebih dulu supaya cocok rasio range. */
+  zap: ZapView | null;
   expires_at: string;
+}
+
+/**
+ * Swap yang perlu dijalankan sebelum membuka posisi.
+ *
+ * Transaksi terpisah, dan itu bukan pilihan: swap berjalan lewat
+ * UniversalRouter sedangkan posisi dibuat lewat PositionManager, dan tidak ada
+ * kontrak yang bisa keduanya sekaligus.
+ */
+export interface ZapView {
+  dari: string;
+  ke: string;
+  jumlah: string;
+  perkiraan_diterima: string;
+  minimum_diterima: string;
+  porsi_bps: number;
+  /** Modal yang akan menganggur kalau zap tidak dijalankan. */
+  menganggur_tanpa_zap: string;
 }
 
 export type TxStatus = "sukses" | "revert" | "menggantung";
@@ -268,6 +288,7 @@ export type ClientMessage =
   | { type: "set_range"; lower_mcap: number; upper_mcap: number }
   | { type: "quote_range"; size_usd: number }
   | { type: "approve_token"; token: string }
+  | { type: "swap_zap" }
   | { type: "open_position" };
 
 export function asRangeView(msg: unknown): RangeView | null {

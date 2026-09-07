@@ -90,7 +90,7 @@ engine/                 biner `rangefinder`, plus pustaka `rangefinder_engine`
     routes.rs           handler HTTP
     ws.rs               WebSocket ke panel
 
-xtask/                  verify, docs-check, golden, dryrun, pairs, v4probe
+xtask/                  verify, docs-check, golden, dryrun, pairs, v4probe, zap
   src/golden.rs         pengambil golden vector dari transaksi sungguhan
   src/dryrun.rs         jalankan pipeline penuh terhadap pool sungguhan
 extension/              ekstensi Chrome MV3
@@ -137,6 +137,11 @@ tersandung:
 | V4 memakai batas ATAS jumlah, bukan batas bawah | `exec/v4/pipeline.rs::batas_atas` | Itu satu satunya pengaman slippage di V4. Menyetelnya sebesar saldo berarti mengizinkan pool mengambil seluruh saldo |
 | Hook ikut dibandingkan saat verifikasi V4 | `exec/v4/verify.rs` | poolId adalah hash dari kelima field PoolKey. Hook yang berbeda berarti pool yang berbeda, betapapun mirip sisanya |
 | ETH asli tidak punya izin, ia ikut sebagai msg.value | `exec/v4/permit.rs` dan `calldata.rs::value` | Currency nol berarti ETH asli. Mengirim ETH ke pool yang tidak memakainya membuatnya tersangkut di kontrak |
+| URL RPC disamarkan sebelum keluar dari engine | `chain/endpoint.rs` | URL penyedia berbayar memuat API key di jalurnya, dan URL itu masuk ke log serta ke panel. Penyamarannya di tempat pembuatan, bukan di tempat penampilan, karena tempat penampilan bisa bertambah |
+| Angka dua token berbeda tidak pernah dibandingkan langsung | `exec/zap.rs` | Sisa 77.380 USDG berdesimal 6 lebih bernilai daripada 12.325.754 FIG berdesimal 18, tapi perbandingan mentah menyatakan sebaliknya. Bandingkan likuiditas per sisi, yang tanpa satuan |
+| Kutipan quoter yang nol adalah kegagalan | `exec/v4/quote.rs` | Pool tanpa likuiditas di arah itu menjawab nol tanpa revert, dan menerimanya sebagai jawaban sah membuat pembagian modal sepenuhnya salah |
+| Struct UniversalRouter punya `minHopPriceX36` sebelum `hookData` | `exec/router_rbh.rs` | Terbukti dari offset `hookData` bernilai 0x140, sepuluh kata, sedangkan struct standar sembilan kata. Memakai struct standar membuat kontrak membaca sampah |
+| UniversalRouter butuh izin Permit2 sendiri | `exec/plan.rs::izin_permit2_untuk` | Izin ke PositionManager tidak berlaku untuknya, dan melewatkannya membuat swap revert setelah gas terbakar |
 | 429 ditunggu, rentang kelebaran dipecah | `pools::scan_initialize_logs` | Keduanya muncul sebagai kegagalan yang sama tapi obatnya berlawanan. Memecah rentang saat kena 429 menambah permintaan dan memperburuk |
 | Konversi satuan hanya di engine | `range` dan `math` | Panel tidak menghitung apa pun. Angka di layar harus sama persis dengan yang tercatat on chain |
 | Kurs ETH diturunkan dari chart | `math::calibrate_eth_usd` | Sumber luar selalu sedikit meleset dari gmgn, dan garis ikut bergeser |
@@ -187,7 +192,7 @@ bytecode yang tidak cocok dengan yang dipin.
 | 1 | Ekstensi: manifest, side panel, jembatan chart | selesai, typecheck bersih, build menghasilkan dist yang bisa dimuat |
 | 2 | Injeksi chart dan matematika satuan | **selesai**. Penemuan pool, kalibrasi kurs dari chart, konversi tiga satuan, snap tick beserta laporan drift, lingkaran penuh panel ke chart ke engine, dan uji integrasi terhadap snapshot gmgn |
 | 3 | Eksekusi V3 | **selesai**. Gate G0 sampai G7 terangkai dan terbukti jalan terhadap pool sungguhan lewat `cargo xtask dryrun`: versi protokol, pembatas nilai, builder calldata, golden vector, simulasi, asersi invarian, izin ERC20, pengiriman beserta penjaga chain id dan nonce, serta verifikasi pasca kirim. Jalur panel lengkap: `quote_range`, `approve_token`, `open_position`. Yang belum pernah terjadi: satu pengiriman sungguhan, karena `dry_run` menyala secara bawaan dan mematikannya adalah keputusan user |
-| 4 | Eksekusi V4 | **selesai untuk membuka posisi**. ABI dibuktikan ada di bytecode terpasang lewat `cargo xtask v4probe`, encoder aksi menghasilkan byte identik dengan transaksi V4 sungguhan sepanjang 868 byte, izin dua lapis lewat Permit2, gate G0 sampai G7 terangkai, dan `cargo xtask dryrun` hijau terhadap pool V4 nyata. Yang belum: zap satu sisi dan swap lewat UniversalRouter fork |
+| 4 | Eksekusi V4 dan zap | **selesai**. ABI V4 dibuktikan ada di bytecode terpasang lewat `cargo xtask v4probe`, encoder aksi menghasilkan byte identik dengan transaksi V4 sungguhan sepanjang 868 byte, izin dua lapis lewat Permit2, gate G0 sampai G7 terangkai. Zap satu sisi memakai kutipan V4Quoter dan penyelesai bagi dua, dan encoder UniversalRouter fork membangun ulang transaksi swap sungguhan 1124 byte byte per byte termasuk field `minHopPriceX36`. `cargo xtask dryrun` dan `cargo xtask zap` hijau terhadap pool nyata |
 | 5 | Positions, PnL, notifikasi | belum |
 | 6 | Signals, Optimizer, doktrin penempatan | belum |
 | 7 | Self improvement | belum |

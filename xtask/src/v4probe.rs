@@ -27,7 +27,7 @@ use anyhow::{Context, Result};
 use rangefinder_engine::chain::registry::Registry;
 use rangefinder_engine::chain::ChainClient;
 use rangefinder_engine::config::Config;
-use rangefinder_engine::exec::v4::abi::{IPermit2, IPositionManagerV4, ModifyLiquidity};
+use rangefinder_engine::exec::v4::abi::{IPermit2, IPositionManagerV4, IV4Quoter, ModifyLiquidity};
 
 pub async fn run(repo_root: &Path) -> Result<bool> {
     println!("  Pembuktian ABI V4");
@@ -82,6 +82,26 @@ pub async fn run(repo_root: &Path) -> Result<bool> {
         }
         println!(
             "  {} 0x{}  {nama}",
+            if ada { "ada   " } else { "HILANG" },
+            hex::encode(sel)
+        );
+    }
+
+    println!();
+    println!("  Selector di bytecode Quoter V4");
+    let quoter = registry.contract("uniswap_v4", "quoter")?;
+    let kode_quoter = provider
+        .get_code_at(quoter)
+        .await
+        .with_context(|| format!("gagal membaca bytecode {quoter}"))?;
+    {
+        let sel = IV4Quoter::quoteExactInputSingleCall::SELECTOR;
+        let ada = cari_selector(&kode_quoter, &sel);
+        if !ada {
+            semua_ada = false;
+        }
+        println!(
+            "  {} 0x{}  quoteExactInputSingle(QuoteExactSingleParams)",
             if ada { "ada   " } else { "HILANG" },
             hex::encode(sel)
         );
@@ -209,6 +229,32 @@ pub async fn run(repo_root: &Path) -> Result<bool> {
                 Err(e) => {
                     semua_ada = false;
                     println!("    GAGAL ownerOf: {e}");
+                }
+            }
+        }
+    }
+
+    // Kutipan sungguhan terhadap pool yang barusan dibaca. Ini membuktikan
+    // bentuk parameter dan kembaliannya benar, bukan hanya selectornya ada.
+    if let Some(next) = next_id {
+        if next > U256::from(1u8) {
+            let token_id = next - U256::from(1u8);
+            if let Ok(h) = npm.getPoolAndPositionInfo(token_id).call().await {
+                println!();
+                println!("  Kutipan swap sungguhan lewat V4Quoter");
+                let jumlah = U256::from(1_000_000u64);
+                match rangefinder_engine::exec::v4::quote::kutip_exact_in(
+                    &provider, quoter, &h._0, true, jumlah,
+                )
+                .await
+                {
+                    Ok(keluar) => println!(
+                        "  ada    menukar {jumlah} currency0 menghasilkan {keluar} currency1"
+                    ),
+                    Err(e) => {
+                        semua_ada = false;
+                        println!("  GAGAL  {e}");
+                    }
                 }
             }
         }

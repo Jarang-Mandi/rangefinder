@@ -550,6 +550,22 @@ impl AppState {
         let amount0: alloy::primitives::U256 = plan.amount0.parse().unwrap_or_default();
         let amount1: alloy::primitives::U256 = plan.amount1.parse().unwrap_or_default();
 
+        // Zap dihitung setelah rencana, karena ia butuh tahu berapa yang benar
+        // benar terpakai. Kalau modal sudah cocok rasio, hasilnya None.
+        let zap = self
+            .hitung_zap(
+                &provider,
+                &alamat,
+                &pool,
+                tick_lower,
+                tick_upper,
+                available0,
+                available1,
+                amount0,
+                amount1,
+            )
+            .await;
+
         let allowances = crate::exec::plan::izin_yang_kurang(
             &provider,
             &alamat,
@@ -569,6 +585,7 @@ impl AppState {
 
         *self.pending_plan.write().await = Some(execute::RencanaTersimpan {
             plan: plan.clone(),
+            zap_calldata: zap.as_ref().map(|(_, c, v)| (c.clone(), *v)),
             versi: pool.version,
             token0,
             token1,
@@ -577,15 +594,207 @@ impl AppState {
             disusun_pada,
         });
 
+        // Swap zap berjalan lewat UniversalRouter, yang menarik token lewat
+        // Permit2 juga. Izin ke PositionManager tidak berlaku untuknya.
+        let mut allowances = allowances;
+        if let Some((v, _, _)) = zap.as_ref() {
+            if let (Ok(router), Ok(dari)) = (
+                self.registry.contract("uniswap_v4", "universal_router"),
+                v.dari.parse::<alloy::primitives::Address>(),
+            ) {
+                let jumlah: alloy::primitives::U256 = v.jumlah.parse().unwrap_or_default();
+                match crate::exec::plan::izin_permit2_untuk(
+                    &provider,
+                    &alamat,
+                    pemilik,
+                    router,
+                    "UniversalRouter",
+                    dari,
+                    jumlah,
+                    chrono::Utc::now().timestamp().max(0) as u64,
+                )
+                .await
+                {
+                    Ok(mut l) => allowances.append(&mut l),
+                    Err(e) => tracing::warn!(error = %e, "izin router untuk zap tidak terbaca"),
+                }
+            }
+        }
+
         Ok(execute::OpenPlanView {
             plan,
             allowances,
+            zap: zap.as_ref().map(|(v, _, _)| v.clone()),
             version: match pool.version {
                 crate::pools::PoolVersion::V3 => "v3",
                 crate::pools::PoolVersion::V4 => "v4",
             },
             expires_at,
         })
+    }
+
+    /// Hitung zap kalau modal tidak cocok dengan rasio range.
+    ///
+    /// Mengembalikan `None` kalau zap tidak diperlukan, yaitu saat posisinya
+    /// memang satu sisi, atau saat modal yang menganggur sudah kecil.
+    ///
+    /// Zap hanya berlaku untuk V4. Jalur V3 memakai router yang berbeda, dan
+    /// menebak bentuknya tanpa transaksi sungguhan sebagai acuan adalah persis
+    /// kesalahan yang dihindari seluruh proyek ini.
+    #[allow(clippy::too_many_arguments)]
+    async fn hitung_zap<P: alloy::providers::Provider>(
+        &self,
+        provider: &P,
+        alamat: &crate::exec::plan::AlamatEksekusi,
+        pool: &crate::pools::PoolInfo,
+        tick_lower: i32,
+        tick_upper: i32,
+        available0: alloy::primitives::U256,
+        available1: alloy::primitives::U256,
+        pakai0: alloy::primitives::U256,
+        pakai1: alloy::primitives::U256,
+    ) -> Option<(execute::ZapView, alloy::primitives::Bytes, alloy::primitives::U256)> {
+        use alloy::primitives::U256;
+        use crate::exec::zap::{self, SisiSumber};
+
+        if pool.version != crate::pools::PoolVersion::V4 {
+            return None;
+        }
+
+        // Sisi mana yang menganggur. Kalau keduanya terpakai habis, tidak ada
+        // yang perlu ditukar.
+        let nganggur0 = available0.saturating_sub(pakai0);
+        let nganggur1 = available1.saturating_sub(pakai1);
+
+        // Ambang: modal menganggur di bawah satu persen tidak sepadan dengan
+        // biaya gas dan slippage sebuah swap. Menukar demi perbaikan sekecil
+        // itu justru merugikan.
+        let sepadan = |nganggur: U256, punya: U256| -> bool {
+            !punya.is_zero() && nganggur * U256::from(100u8) > punya
+        };
+
+        let (sisi, modal) = if sepadan(nganggur0, available0) {
+            (SisiSumber::Token0, nganggur0)
+        } else if sepadan(nganggur1, available1) {
+            (SisiSumber::Token1, nganggur1)
+        } else {
+            return None;
+        };
+
+        let key = crate::exec::v4::pipeline::pool_key_dari(pool).ok()?;
+        let sqrt_p: U256 = pool.sqrt_price_x96.parse().ok()?;
+        let quoter = self.registry.contract("uniswap_v4", "quoter").ok()?;
+        let zero_for_one = sisi == SisiSumber::Token0;
+
+        // Kutipan dikumpulkan lebih dulu, sekali per titik yang dicoba. Ini
+        // bagian yang menyentuh jaringan, dan jumlah panggilannya dibatasi oleh
+        // penyelesainya sendiri.
+        let mut cache: std::collections::BTreeMap<String, U256> = Default::default();
+        let mut titik = Vec::new();
+        {
+            // Kumpulkan titik yang akan ditanyakan dengan menjalankan penyelesai
+            // memakai kutipan tiruan lebih dulu. Cara ini menghindari memanggil
+            // RPC dari dalam fungsi yang sengaja dibuat murni.
+            let _ = zap::selesaikan(sqrt_p, tick_lower, tick_upper, modal, sisi, |x| {
+                titik.push(x);
+                // Perkiraan kasar hanya untuk memandu titik yang dikunjungi.
+                Ok(x)
+            });
+        }
+        titik.truncate(24);
+        for x in titik {
+            let kunci = x.to_string();
+            if cache.contains_key(&kunci) {
+                continue;
+            }
+            match crate::exec::v4::quote::kutip_exact_in(provider, quoter, &key, zero_for_one, x)
+                .await
+            {
+                Ok(v) => {
+                    cache.insert(kunci, v);
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "kutipan zap gagal, zap dilewati");
+                    return None;
+                }
+            }
+        }
+
+        // Penyelesaian sungguhan memakai kutipan yang sudah dikumpulkan. Titik
+        // yang belum sempat dikutip dijawab dengan interpolasi linear dari
+        // tetangga terdekat, yang cukup untuk memandu pencarian karena hasil
+        // akhirnya diverifikasi lagi lewat kutipan langsung di bawah.
+        let rencana = zap::selesaikan(sqrt_p, tick_lower, tick_upper, modal, sisi, |x| {
+            if let Some(v) = cache.get(&x.to_string()) {
+                return Ok(*v);
+            }
+            let terdekat = cache
+                .iter()
+                .filter_map(|(k, v)| k.parse::<U256>().ok().map(|kk| (kk, *v)))
+                .min_by_key(|(kk, _)| if *kk > x { *kk - x } else { x - *kk });
+            match terdekat {
+                Some((kk, v)) if !kk.is_zero() => Ok(v * x / kk),
+                _ => Err("belum ada kutipan pembanding".to_string()),
+            }
+        })
+        .ok()?;
+
+        if rencana.tukar.is_zero() {
+            return None;
+        }
+
+        // Kutipan final untuk jumlah yang benar benar akan ditukar. Angka inilah
+        // yang dipakai sebagai dasar batas slippage, bukan hasil interpolasi.
+        let diterima = crate::exec::v4::quote::kutip_exact_in(
+            provider,
+            quoter,
+            &key,
+            zero_for_one,
+            rencana.tukar,
+        )
+        .await
+        .ok()?;
+        if diterima.is_zero() {
+            return None;
+        }
+
+        let minimum = crate::exec::limits::apply_slippage(diterima, self.cfg.limits.max_slippage_bps);
+        let (dari, ke) = if zero_for_one {
+            (key.currency0, key.currency1)
+        } else {
+            (key.currency1, key.currency0)
+        };
+
+        let req = crate::exec::router_rbh::SwapExactIn {
+            pool: crate::exec::router_rbh::KunciPool::dari_pool_key(&key),
+            zero_for_one,
+            amount_in: rencana.tukar.try_into().ok()?,
+            amount_out_minimum: minimum.try_into().ok()?,
+            deadline: alloy::primitives::U256::from(
+                chrono::Utc::now().timestamp().max(0) as u64 + DEADLINE_DETIK,
+            ),
+        };
+        let calldata = crate::exec::router_rbh::swap_exact_in(&req).ok()?;
+        let value = req.value();
+        let _ = alamat;
+
+        Some((
+            execute::ZapView {
+                dari: dari.to_string(),
+                ke: ke.to_string(),
+                jumlah: rencana.tukar.to_string(),
+                perkiraan_diterima: diterima.to_string(),
+                minimum_diterima: minimum.to_string(),
+                porsi_bps: if modal.is_zero() {
+                    0
+                } else {
+                    (rencana.tukar * U256::from(10_000u32) / modal).to::<u32>()
+                },
+                menganggur_tanpa_zap: modal.to_string(),
+            },
+            calldata,
+            value,
+        ))
     }
 
     /// Kirim `approve` untuk satu token sebesar yang dibutuhkan rencana terakhir.
@@ -719,6 +928,67 @@ impl AppState {
             outcome,
         })
     }
+    /// Jalankan swap zap dari rencana terakhir.
+    ///
+    /// Rencananya TIDAK dikeluarkan dari slot, karena setelah swap user
+    /// masih perlu menyusun ulang rencana dengan saldo yang sudah berubah.
+    /// Yang dikosongkan hanya calldata zapnya, supaya swap yang sama tidak
+    /// bisa dijalankan dua kali.
+    pub async fn on_swap_zap(&self) {
+        match self.kirim_zap().await {
+            Ok(view) => {
+                let _ = self
+                    .events
+                    .send(protocol::ServerMessage::SendResult(Box::new(view)));
+            }
+            Err(pesan) => self.alert_kritis("zap_failed", pesan),
+        }
+    }
+
+    async fn kirim_zap(&self) -> Result<execute::SendResultView, String> {
+        let (calldata, value) = {
+            let mut guard = self.pending_plan.write().await;
+            let r = guard.as_mut().ok_or("belum ada rencana yang disusun")?;
+            if r.kedaluwarsa() {
+                return Err("rencana sudah kedaluwarsa, susun ulang".into());
+            }
+            r.zap_calldata
+                .take()
+                .ok_or("rencana ini tidak memerlukan zap")?
+        };
+
+        let provider = self
+            .chain
+            .provider()
+            .await
+            .map_err(|e| format!("RPC tidak bisa dipakai: {e}"))?;
+        let router = self
+            .registry
+            .contract("uniswap_v4", "universal_router")
+            .map_err(|e| e.to_string())?;
+
+        let mut wallet = self.wallet.lock().await;
+        let signer = wallet.signer().map_err(|e| e.to_string())?.clone();
+        drop(wallet);
+
+        let terkirim = crate::exec::send::send_calldata(
+            &provider,
+            &self.nonce,
+            &signer,
+            router,
+            calldata,
+            value,
+            self.registry.chain.id,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+        Ok(execute::SendResultView {
+            kind: "zap",
+            outcome: crate::exec::send::jadikan_hasil(terkirim),
+        })
+    }
+
     /// Setujui rencana terakhir dan kirim transaksinya.
     ///
     /// Rencana dikeluarkan dari slot SEBELUM dikirim, apa pun hasilnya. Rencana

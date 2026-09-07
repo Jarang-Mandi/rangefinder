@@ -20,6 +20,7 @@
 mod dryrun;
 mod pairs;
 mod v4probe;
+mod zap;
 mod golden;
 
 use std::path::{Path, PathBuf};
@@ -61,6 +62,17 @@ fn main() -> Result<()> {
             let from = args.get(2).cloned();
             let rt = tokio::runtime::Runtime::new()?;
             let ok = rt.block_on(dryrun::run(&root, &token, from.as_deref()))?;
+            finish(ok)
+        }
+        "zap" => {
+            let token = args.get(1).cloned().unwrap_or_default();
+            if token.is_empty() {
+                eprintln!("cara pakai: cargo xtask zap <alamat_token> [nominal]");
+                std::process::exit(2);
+            }
+            let nominal = args.get(2).cloned();
+            let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+            let ok = rt.block_on(zap::run(&root, &token, nominal.as_deref()))?;
             finish(ok)
         }
         "v4probe" => {

@@ -109,6 +109,9 @@ export function App() {
         // Rencana sudah dipakai engine dan dikeluarkan dari slotnya, jadi
         // menampilkannya lagi akan menawarkan tombol yang pasti ditolak.
         if (result.kind === "open") setOpenPlan(null);
+        // Setelah zap, saldo berubah sehingga jumlah pada rencana lama tidak
+        // lagi tepat. Rencananya dibuang supaya user menyusun ulang.
+        if (result.kind === "zap" && result.status === "sukses") setOpenPlan(null);
       },
       onAlert: (level, code, message) => {
         // Kegagalan eksekusi datang sebagai alert, dan tanpa ini tombolnya
@@ -289,6 +292,10 @@ export function App() {
               setExecBusy(true);
               clientRef.current?.approveToken(t);
             }}
+            onSwapZap={() => {
+              setExecBusy(true);
+              clientRef.current?.swapZap();
+            }}
             onOpenPosition={() => {
               setExecBusy(true);
               clientRef.current?.openPosition();
@@ -387,6 +394,7 @@ function RangeTab({
   execBusy,
   onQuoteRange,
   onApproveToken,
+  onSwapZap,
   onOpenPosition,
   onForget,
 }: {
@@ -405,6 +413,7 @@ function RangeTab({
   execBusy: boolean;
   onQuoteRange: (sizeUsd: number) => void;
   onApproveToken: (token: string) => void;
+  onSwapZap: () => void;
   onOpenPosition: () => void;
   onForget: () => void;
 }) {
@@ -441,6 +450,7 @@ function RangeTab({
           blockedReasons={status.blocked_reasons}
           onQuote={onQuoteRange}
           onApprove={onApproveToken}
+          onZap={onSwapZap}
           onOpen={onOpenPosition}
         />
         </>
@@ -613,6 +623,7 @@ function ExecuteCard({
   blockedReasons,
   onQuote,
   onApprove,
+  onZap,
   onOpen,
 }: {
   plan: OpenPlanView | null;
@@ -622,6 +633,7 @@ function ExecuteCard({
   blockedReasons: string[];
   onQuote: (sizeUsd: number) => void;
   onApprove: (token: string) => void;
+  onZap: () => void;
   onOpen: () => void;
 }) {
   const [size, setSize] = useState("");
@@ -634,8 +646,15 @@ function ExecuteCard({
   // memutuskan hal yang sama pasti menyimpang.
   const kurang = plan?.allowances ?? [];
   const gateGagal = plan?.gates.filter((g) => !g.passed) ?? [];
+  // Zap yang belum dijalankan menahan pembukaan posisi. Membukanya sekarang
+  // tetap berhasil, tapi sebagian modal akan menganggur tanpa menghasilkan
+  // fee apa pun, dan itu kerugian yang tidak terlihat di layar mana pun.
   const siapKirim =
-    plan !== null && !plan.dry_run && gateGagal.length === 0 && kurang.length === 0;
+    plan !== null &&
+    !plan.dry_run &&
+    gateGagal.length === 0 &&
+    kurang.length === 0 &&
+    plan.zap === null;
 
   return (
     <section class="card">
@@ -735,6 +754,37 @@ function ExecuteCard({
             </div>
           ) : null}
 
+          {plan.zap ? (
+            <div class="stack" style="margin-top: var(--s3)">
+              <div class="row">
+                <span class="label">Zap</span>
+                <span class="value num">
+                  {(plan.zap.porsi_bps / 100).toFixed(1)}% ditukar
+                </span>
+              </div>
+              <div class="row">
+                <span class="label">Perkiraan diterima</span>
+                <span class="value num">{plan.zap.perkiraan_diterima}</span>
+              </div>
+              <div class="row">
+                <span class="label">Minimum diterima</span>
+                <span class="value num">{plan.zap.minimum_diterima}</span>
+              </div>
+              <p class="hint">
+                Modal belum sesuai rasio range, jadi sebagian perlu ditukar
+                lebih dulu. Tanpa ini {plan.zap.menganggur_tanpa_zap} satuan
+                akan menganggur tanpa menghasilkan fee.
+              </p>
+              <button type="button" disabled={busy || kurang.length > 0} onClick={onZap}>
+                Tukar {shortAddress(plan.zap.dari)} ke {shortAddress(plan.zap.ke)}
+              </button>
+              <p class="hint">
+                Setelah swap selesai, susun rencana lagi supaya jumlahnya
+                dihitung ulang dari saldo yang baru.
+              </p>
+            </div>
+          ) : null}
+
           <button
             type="button"
             class="primary"
@@ -742,7 +792,11 @@ function ExecuteCard({
             disabled={!siapKirim || busy}
             onClick={onOpen}
           >
-            {plan.dry_run ? "Dry run aktif, tidak akan dikirim" : "Buka posisi"}
+            {plan.dry_run
+              ? "Dry run aktif, tidak akan dikirim"
+              : plan.zap
+                ? "Jalankan zap dulu"
+                : "Buka posisi"}
           </button>
 
           <p class="hint">Rencana berlaku sampai {waktuSingkat(plan.expires_at)}.</p>

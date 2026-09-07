@@ -134,6 +134,72 @@ sudah diambil sadar. Artinya pengaman satu satunya adalah isi wallet itu
 sendiri. Pakai wallet terpisah khusus operasi ini, isi hanya sebanyak yang siap
 dipertaruhkan.
 
+## Memakai RPC berbayar untuk menghindari 429
+
+RPC publik `rpc.mainnet.chain.robinhood.com` membatasi laju, dan batasnya
+tercapai pada pemakaian yang sepenuhnya wajar: memuat token dengan puluhan pool
+sudah cukup. Engine sudah menunggu dan mengulang saat kena 429, tapi itu
+menambah waktu tunggu, bukan menghilangkannya.
+
+Alchemy mendukung Robinhood Chain mainnet, chain id 4663, jadi ia bisa dipakai
+langsung tanpa mengubah kode apa pun.
+
+### Cara memasangnya
+
+Ambil API key di dashboard Alchemy, lalu buka
+`%LOCALAPPDATA%\Rangefinder\config.toml` dan taruh endpointnya **di urutan
+pertama**:
+
+```toml
+[rpc]
+http = [
+  "https://robinhood-mainnet.g.alchemy.com/v2/API_KEY_ANDA",
+  "https://rpc.mainnet.chain.robinhood.com",
+]
+```
+
+Yang pertama dipakai, sisanya cadangan. Menyisakan RPC publik di urutan kedua
+disengaja: kalau kuota Alchemy habis atau layanannya sedang bermasalah, engine
+berpindah sendiri alih alih berhenti. Perpindahan itu tercatat di log.
+
+Jalankan ulang engine setelah mengubah berkas ini.
+
+### API key tidak akan tercetak
+
+URL Alchemy memuat API key di jalurnya, dan URL itu mengalir ke dua tempat yang
+terlihat: log engine dan status yang dikirim ke panel. Keduanya mudah ikut
+tersalin saat mengirim tangkapan layar.
+
+Karena itu URL selalu disamarkan sebelum keluar dari engine:
+
+```
+https://robinhood-mainnet.g.alchemy.com/v2/[disamarkan]
+```
+
+Host tetap ditampilkan supaya masih terlihat RPC mana yang sedang dipakai.
+Penyamarannya terjadi saat nilainya dibuat, bukan saat ditampilkan, karena
+tempat penampilan bisa bertambah tanpa siapa pun ingat menyamarkannya.
+
+Berkas `config.toml` sendiri tetap memuat key aslinya. Ia ada di direktori data
+lokal user dan tidak pernah dikirim ke mana pun, tapi perlakukan seperti berkas
+rahasia lain: jangan disalin ke repo, jangan dibagikan.
+
+### WebSocket
+
+Alchemy juga menyediakan WebSocket. Isi `ws` kalau mau, formatnya sama dan
+penyamarannya berlaku juga:
+
+```toml
+ws = ["wss://robinhood-mainnet.g.alchemy.com/v2/API_KEY_ANDA"]
+```
+
+### Apakah 429 hilang sepenuhnya
+
+Tidak dijamin. Paket gratis mana pun punya batas, dan yang berubah hanya di mana
+batasnya berada. Karena itu penanganan 429 tetap ada di dua tempat, yaitu
+pemindaian log dan multicall, dan keduanya menunggu lalu mengulang alih alih
+menyerah. Lihat `memory/006-kecepatan-pencarian-pool.md`.
+
 ## Mode dry run
 
 `execution.dry_run` di `config.toml` menyala secara bawaan. Dalam mode ini
@@ -241,6 +307,7 @@ cargo xtask golden [n]    ambil n golden vector dari transaksi mint sungguhan
 cargo xtask dryrun <token> [pengirim]   jalankan seluruh pipeline tanpa mengirim
 cargo xtask pairs <token>  lihat token itu berpasangan dengan apa saja di V4
 cargo xtask v4probe       buktikan ABI V4 ada di bytecode yang terpasang
+cargo xtask zap <token> [nominal]   jalankan penyelesai zap terhadap pool sungguhan
 cargo test                seluruh uji unit engine
 cargo clippy --all-targets
 ```
