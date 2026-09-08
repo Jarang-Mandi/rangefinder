@@ -278,6 +278,10 @@ export interface OpenPlanView {
    * sendiri ikut terhitung dan angkanya mengecil seiring posisi membesar.
    */
   apr_estimasi: number | null;
+  /** Perkiraan biaya gas dalam token gas. Null berarti harga gas tak terbaca. */
+  gas_biaya: number | null;
+  /** Harga gas yang dipakai menghitungnya, dalam gwei. */
+  gas_gwei: number | null;
   expires_at: string;
 }
 

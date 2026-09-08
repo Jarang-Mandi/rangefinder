@@ -108,6 +108,17 @@ pub struct OpenPlanView {
     /// pengenceran oleh modal kita sendiri ikut terhitung. Makin besar posisi,
     /// makin kecil angkanya, dan itu memang kenyataannya.
     pub apr_estimasi: Option<f64>,
+    /// Perkiraan biaya gas transaksi ini, dalam token gas.
+    ///
+    /// `gas_estimate` sendiri hanya jumlah unit, dan jumlah unit tidak bisa
+    /// dinilai tanpa harga gas. Yang ingin diketahui user adalah berapa yang
+    /// benar benar terpotong dari saldonya.
+    pub gas_biaya: Option<f64>,
+    /// Harga gas yang dipakai menghitungnya, dalam gwei.
+    ///
+    /// Ikut dikirim karena biaya tanpa harga gas tidak bisa diperiksa ulang,
+    /// dan harga gas berubah dari blok ke blok.
+    pub gas_gwei: Option<f64>,
     pub expires_at: String,
 }
 

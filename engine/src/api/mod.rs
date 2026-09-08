@@ -511,7 +511,7 @@ impl AppState {
             }
         };
 
-        let (pool, meta, quote_decimals, requested, mcap) = {
+        let (pool, meta, quote_decimals, requested, mcap, quote_alamat) = {
             let guard = self.active.read().await;
             let active = guard.as_ref().ok_or("belum ada token yang dimuat")?;
             let pool = active
@@ -527,14 +527,22 @@ impl AppState {
                 active.quote_decimals,
                 active.requested,
                 mcap,
+                active.selected_quote.clone(),
             )
         };
 
         // Range yang dipakai persis yang sedang tergambar di chart, termasuk
         // pembulatan ke grid tick. Menghitungnya ulang di sini dengan cara lain
         // akan membuat yang dikirim berbeda dari yang dilihat user.
-        let view = crate::range::build_view(&pool, &meta, quote_decimals, mcap, requested)
-            .map_err(|e| format!("range belum bisa disusun: {e}"))?;
+        let view = crate::range::build_view(
+            &pool,
+            &meta,
+            quote_decimals,
+            mcap,
+            requested,
+            self.quote_adalah_eth(&quote_alamat),
+        )
+        .map_err(|e| format!("range belum bisa disusun: {e}"))?;
 
         // Nama `lower` dan `upper` di RangeView mengikuti harga, bukan tick.
         // Keduanya bertukar saat memecoin menempati token1. Lihat
@@ -718,12 +726,31 @@ impl AppState {
 
         let (setor, apr_estimasi) = self.ringkas_setoran(&pool, &plan).await;
 
+        // Harga gas dibaca sekarang, bukan diandaikan. Ia berubah dari blok ke
+        // blok, dan biaya yang dihitung dari angka tetap akan meleset persis
+        // saat rantai sedang sibuk, yaitu saat angkanya paling penting.
+        let (gas_biaya, gas_gwei) = match provider.get_gas_price().await {
+            Ok(wei) => {
+                let harga = wei as f64;
+                (
+                    Some(plan.gas_estimate as f64 * harga / 1e18),
+                    Some(harga / 1e9),
+                )
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "harga gas tidak terbaca");
+                (None, None)
+            }
+        };
+
         Ok(execute::OpenPlanView {
             plan,
             allowances,
             zap: zap.as_ref().map(|(v, _, _)| v.clone()),
             setor,
             apr_estimasi,
+            gas_biaya,
+            gas_gwei,
             version: match pool.version {
                 crate::pools::PoolVersion::V3 => "v3",
                 crate::pools::PoolVersion::V4 => "v4",
@@ -2150,6 +2177,19 @@ impl AppState {
         self.broadcast_range_view().await;
     }
 
+    /// Benar kalau kutipan yang sedang aktif adalah ETH terbungkus.
+    ///
+    /// Dipakai memutuskan apakah pemeriksaan rentang kurs berlaku. Pada pool
+    /// berpasangan stablecoin, harga satu kutipan memang kira kira satu dolar,
+    /// dan memeriksanya terhadap rentang harga ETH akan memunculkan peringatan
+    /// pada setiap pool yang sebenarnya sehat.
+    fn quote_adalah_eth(&self, quote: &str) -> bool {
+        match self.registry.tokens.get("weth") {
+            Some(w) => w.address.eq_ignore_ascii_case(quote),
+            None => false,
+        }
+    }
+
     async fn broadcast_range_view(&self) {
         let guard = self.active.read().await;
         let Some(active) = guard.as_ref() else { return };
@@ -2162,6 +2202,7 @@ impl AppState {
             active.quote_decimals,
             mcap,
             active.requested,
+            self.quote_adalah_eth(&active.selected_quote),
         ) {
             Ok(view) => {
                 let _ = self

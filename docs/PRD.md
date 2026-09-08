@@ -1248,6 +1248,37 @@ garis persis di tempat kursor dilepas, dan hasil pembulatan ke grid tick tetap
 terbaca sebagai angka di kartu Range. Penggambaran ulang hanya berlaku untuk
 perubahan yang bukan dari chart: preset, custom, dan ganti pool.
 
+**Peringatan kurs hanya berlaku untuk kutipan ETH.** Field `eth_usd` sebenarnya
+harga satu token KUTIPAN dalam USD, dan namanya menyesatkan. Pada pool
+berpasangan stablecoin angkanya kira kira satu, dan itu benar. Memeriksanya
+terhadap rentang harga ETH memunculkan peringatan pada setiap pool USDG yang
+sebenarnya sehat. Nilainya sendiri tidak lagi ditampilkan di panel, karena ia
+tidak mengubah keputusan apa pun: yang menentukan posisi adalah batas range,
+dan batas itu sudah tampil dalam tiga satuan.
+
+**Histogram diringkas di panel, bukan di engine.** Pool V3 yang ramai bisa punya
+ratusan tick terinisialisasi, dan satu baris per pita menghasilkan dinding
+batang yang tidak terbaca. Panel menggabungkan pita yang berdekatan sampai
+paling banyak dua puluh empat baris, menjumlahkan nilainya sehingga total yang
+tergambar tetap sama, dan tidak pernah menggabung pita yang memuat harga
+sekarang. Engine tetap mengirim data lengkap, karena meringkas di sana berarti
+membuang informasi yang tidak bisa dikembalikan.
+
+**Preset range menandai dirinya dari lebar yang sebenarnya berlaku**, bukan dari
+tombol mana yang terakhir ditekan. Engine membulatkan batas ke grid tick,
+sehingga lebarnya bisa bergeser sedikit, dan menandai tombol menurut ingatan
+panel akan berbohong setelah pembulatan.
+
+**Perkiraan biaya gas ditampilkan dalam token gas, bukan jumlah unit.** Jumlah
+unit tidak bisa dinilai tanpa harga gas, dan harga gas berubah dari blok ke
+blok, jadi ia dibaca saat rencana disusun dan ikut dikirim supaya angkanya bisa
+diperiksa ulang.
+
+**Wallet dibuat dari satu isian.** User menempelkan passphrase atau kunci privat
+ke kotak yang sama, dan panel mengenalinya dari bentuknya. Kotak kedua hanya
+muncul kalau yang ditempel ternyata kunci privat, karena keystore tetap harus
+dienkripsi dan kunci privat bukan passphrase.
+
 **Nama event menentukan topicnya, dan salah nama tidak memunculkan error.**
 Event `Swap` V3 sempat dideklarasikan sebagai `SwapV3` supaya tidak bentrok
 dengan padanan V4. Topic dihitung dari nama beserta tipe argumennya, sehingga

@@ -118,6 +118,7 @@ pub fn build_view(
     quote_decimals: u8,
     chart_mcap_usd: f64,
     requested: Option<(f64, f64)>,
+    quote_adalah_eth: bool,
 ) -> Result<RangeView, String> {
     let mut warnings = Vec::new();
 
@@ -136,9 +137,13 @@ pub fn build_view(
         || "kalibrasi kurs gagal, market cap atau suplai tidak masuk akal".to_string(),
     )?;
 
-    // Kurs yang jauh di luar akal sehat berarti salah satu masukannya keliru,
-    // paling sering karena suplai token dilaporkan berbeda oleh chart.
-    if !(100.0..=100_000.0).contains(&eth_usd) {
+    // RENTANG WAJAR HANYA BERLAKU UNTUK ETH
+    //
+    // `eth_usd` sebenarnya harga satu token KUTIPAN dalam USD, dan namanya
+    // menyesatkan. Pada pool berpasangan stablecoin angkanya kira kira satu,
+    // dan itu benar. Memeriksanya terhadap rentang 100 sampai 100.000 membuat
+    // setiap pool USDG memunculkan peringatan yang tidak ada artinya.
+    if quote_adalah_eth && !(100.0..=100_000.0).contains(&eth_usd) {
         warnings.push(format!(
             "kurs tersirat {eth_usd:.0} USD per ETH di luar rentang wajar. \
              Periksa suplai token, chart dan rantai mungkin tidak sepakat"
@@ -299,6 +304,28 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn peringatan_kurs_tidak_berlaku_untuk_kutipan_stablecoin() {
+        // `eth_usd` sebenarnya harga satu token KUTIPAN dalam USD. Pada pool
+        // berpasangan stablecoin angkanya kira kira satu, dan itu benar.
+        // Memeriksanya terhadap rentang harga ETH memunculkan peringatan pada
+        // setiap pool USDG yang sebenarnya sehat.
+        let p = pool_memecoin_token1(2638.0);
+        let m = meta();
+
+        let dengan = build_view(&p, &m, 18, 937_234_340.0, None, true).unwrap();
+        let tanpa = build_view(&p, &m, 18, 937_234_340.0, None, false).unwrap();
+
+        let sebut = |v: &RangeView| v.warnings.iter().any(|w| w.contains("kurs tersirat"));
+        assert!(
+            !sebut(&tanpa),
+            "kutipan bukan ETH tidak boleh diperiksa terhadap rentang harga ETH"
+        );
+        // Yang memakai ETH tetap diperiksa, kalau kursnya memang di luar akal.
+        let _ = sebut(&dengan);
+    }
+
     #[test]
     fn orientasi_dikenali_dari_kedua_sisi() {
         let p = pool_memecoin_token1(2638.0);
@@ -321,7 +348,7 @@ mod tests {
         // Angka nyata: PONS pada 937,23 juta market cap, pool fee 3000.
         let p = pool_memecoin_token1(2638.0);
         let m = meta();
-        let view = build_view(&p, &m, 18, 937_234_340.0, None).unwrap();
+        let view = build_view(&p, &m, 18, 937_234_340.0, None, true).unwrap();
 
         // Harga sekarang harus persis sama dengan yang dibaca chart.
         assert_eq!(view.current.mcap_usd, 937_234_340.0);
@@ -350,11 +377,11 @@ mod tests {
     fn batas_yang_diminta_dihormati_setelah_snap() {
         let p = pool_memecoin_token1(2638.0);
         let m = meta();
-        let dasar = build_view(&p, &m, 18, 937_234_340.0, None).unwrap();
+        let dasar = build_view(&p, &m, 18, 937_234_340.0, None, true).unwrap();
 
         let minta_bawah = 8.0e8;
         let minta_atas = 1.1e9;
-        let view = build_view(&p, &m, 18, 937_234_340.0, Some((minta_bawah, minta_atas))).unwrap();
+        let view = build_view(&p, &m, 18, 937_234_340.0, Some((minta_bawah, minta_atas)), true).unwrap();
 
         // Hasilnya harus dekat dengan yang diminta, tapi tidak wajib sama
         // persis karena tick dibulatkan ke grid.
@@ -374,7 +401,7 @@ mod tests {
         let p = pool_memecoin_token1(2638.0);
         let m = meta();
         // Range seluruhnya di atas harga sekarang.
-        let view = build_view(&p, &m, 18, 937_234_340.0, Some((1.5e9, 2.0e9))).unwrap();
+        let view = build_view(&p, &m, 18, 937_234_340.0, Some((1.5e9, 2.0e9)), true).unwrap();
         assert!(!view.in_range);
         assert!(view.warnings.iter().any(|w| w.contains("luar range")));
     }
@@ -385,7 +412,7 @@ mod tests {
         let m = meta();
         // Dua batas yang jatuh di sel grid yang sama pada pool spacing lebar
         // tetap harus menghasilkan range yang sah, bukan lebar nol.
-        let view = build_view(&p, &m, 18, 937_234_340.0, Some((9.3e8, 9.3000001e8))).unwrap();
+        let view = build_view(&p, &m, 18, 937_234_340.0, Some((9.3e8, 9.3000001e8)), true).unwrap();
         assert!(view.lower.mcap_usd < view.upper.mcap_usd);
     }
 
@@ -395,7 +422,7 @@ mod tests {
         let mut m = meta();
         // Suplai seribu kali lebih besar membuat kurs tersirat jadi janggal.
         m.total_supply = 1e12;
-        let view = build_view(&p, &m, 18, 937_234_340.0, None).unwrap();
+        let view = build_view(&p, &m, 18, 937_234_340.0, None, true).unwrap();
         assert!(
             view.warnings.iter().any(|w| w.contains("kurs tersirat")),
             "peringatan kurs harus muncul: {:?}",
@@ -407,12 +434,12 @@ mod tests {
     fn pool_rusak_menghasilkan_error_yang_menjelaskan() {
         let mut p = pool_memecoin_token1(2638.0);
         p.tick_spacing = 0;
-        let e = build_view(&p, &meta(), 18, 9.3e8, None).unwrap_err();
+        let e = build_view(&p, &meta(), 18, 9.3e8, None, true).unwrap_err();
         assert!(e.contains("tick spacing"), "pesan: {e}");
 
         let mut p = pool_memecoin_token1(0.0);
         p.tick_spacing = 60;
-        let e = build_view(&p, &meta(), 18, 9.3e8, None).unwrap_err();
+        let e = build_view(&p, &meta(), 18, 9.3e8, None, true).unwrap_err();
         assert!(e.contains("harga pool"), "pesan: {e}");
     }
 }

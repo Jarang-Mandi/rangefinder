@@ -37,6 +37,7 @@ import {
   type JenisAksi,
   type Kriteria,
   type OpenPlanView,
+  type Pita,
   type PoolInfo,
   type PositionsView,
   type Posisi,
@@ -2079,6 +2080,15 @@ function SetoranCard({
       </button>
 
       <div class="row" style="margin-top: var(--s2)">
+        <span class="label">Perkiraan gas</span>
+        <span class="value num">
+          {plan?.gas_biaya == null
+            ? "-"
+            : `${plan.gas_biaya.toFixed(6)} ETH`}
+        </span>
+      </div>
+
+      <div class="row">
         <span class="label">Estimasi APR</span>
         <span class="value num">
           {plan?.apr_estimasi == null
@@ -2482,7 +2492,7 @@ function PoolRow({
 }
 
 /** Preset lebar range, dalam persen ke tiap arah. */
-const PRESET_LEBAR = [0.2, 1, 5, 10, 20];
+const PRESET_LEBAR = [1, 5, 10, 20];
 
 /**
  * Atur range di atas gambar likuiditas yang sudah ada di pool.
@@ -2514,6 +2524,15 @@ function DepthCard({
   const [custom, setCustom] = useState(false);
   const [bawah, setBawah] = useState("");
   const [atas, setAtas] = useState("");
+
+  // Preset mana yang sedang berlaku ditentukan lebar range yang sebenarnya,
+  // bukan tombol mana yang terakhir ditekan. Engine membulatkan batas ke grid
+  // tick, jadi lebarnya bisa bergeser sedikit, dan menandai tombol menurut
+  // ingatan panel akan berbohong setelah pembulatan.
+  const lebarSekarang = view.width_pct / 2;
+  const presetAktif =
+    PRESET_LEBAR.find((x) => Math.abs(lebarSekarang - x) / x < 0.1) ?? null;
+  const penuhAktif = view.width_pct > 1_000;
 
   const pilihLebar = (persen: number) => {
     setCustom(false);
@@ -2561,11 +2580,15 @@ function DepthCard({
 
       <div class="preset-row">
         {PRESET_LEBAR.map((x) => (
-          <button key={x} class="preset" onClick={() => pilihLebar(x)}>
+          <button
+            key={x}
+            class={`preset${presetAktif === x ? " aktif" : ""}`}
+            onClick={() => pilihLebar(x)}
+          >
             ±{x}%
           </button>
         ))}
-        <button class="preset" onClick={pilihPenuh}>
+        <button class={`preset${penuhAktif ? " aktif" : ""}`} onClick={pilihPenuh}>
           penuh
         </button>
         <button
@@ -2625,6 +2648,61 @@ function DepthCard({
   );
 }
 
+/**
+ * Berapa baris paling banyak digambar histogram.
+ *
+ * Pool V3 yang ramai bisa punya ratusan tick terinisialisasi, dan menggambar
+ * satu baris per tick menghasilkan dinding batang yang tidak bisa dibaca.
+ * Dua puluh empat baris cukup untuk melihat bentuk poolnya, dan cukup sedikit
+ * untuk setiap barisnya tetap punya label harga yang terbaca.
+ */
+const MAKS_BARIS_HISTOGRAM = 24;
+
+/**
+ * Gabungkan pita yang berdekatan sampai jumlah barisnya masuk akal.
+ *
+ * Nilainya dijumlahkan dan rentang harganya disatukan, sehingga total modal
+ * yang tergambar tetap sama persis. Pita yang memuat harga sekarang tidak
+ * pernah digabung dengan tetangganya, karena letaknya itulah yang paling
+ * ingin dilihat user.
+ */
+function ringkasPita(pita: Pita[], maks: number): Pita[] {
+  if (pita.length <= maks) return pita;
+
+  const per = Math.ceil(pita.length / maks);
+  const keluar: Pita[] = [];
+  let kelompok: Pita[] = [];
+
+  const dorong = () => {
+    if (kelompok.length === 0) return;
+    const pertama = kelompok[0];
+    const terakhir = kelompok[kelompok.length - 1];
+    keluar.push({
+      tick_bawah: Math.min(...kelompok.map((p) => p.tick_bawah)),
+      tick_atas: Math.max(...kelompok.map((p) => p.tick_atas)),
+      harga_bawah: Math.min(pertama.harga_bawah, terakhir.harga_bawah),
+      harga_atas: Math.max(pertama.harga_atas, terakhir.harga_atas),
+      liquidity: pertama.liquidity,
+      nilai_quote: kelompok.reduce((t, p) => t + p.nilai_quote, 0),
+      aktif: kelompok.some((p) => p.aktif),
+    });
+    kelompok = [];
+  };
+
+  for (const p of pita) {
+    if (p.aktif) {
+      dorong();
+      keluar.push(p);
+      continue;
+    }
+    kelompok.push(p);
+    if (kelompok.length >= per) dorong();
+  }
+  dorong();
+
+  return keluar;
+}
+
 function Histogram({
   depth,
   kelipatanBawah,
@@ -2639,7 +2717,8 @@ function Histogram({
   // Diurutkan menurut HARGA, bukan menurut tick, lalu digambar dari yang
   // tertinggi ke terendah supaya searah dengan chart. Mengurutkan menurut tick
   // akan menggambar terbalik pada pool yang memecoinnya token1.
-  const baris = [...depth.pita].sort((a, b) => b.harga_bawah - a.harga_bawah);
+  const urut = [...depth.pita].sort((a, b) => b.harga_bawah - a.harga_bawah);
+  const baris = ringkasPita(urut, MAKS_BARIS_HISTOGRAM);
 
   const dalamRange = (p: { harga_bawah: number; harga_atas: number }) => {
     const bawah = p.harga_bawah / depth.harga_sekarang;
@@ -2724,10 +2803,6 @@ function RangeCard({ view }: { view: RangeView }) {
       <div class="row">
         <span class="label">Tick spacing</span>
         <span class="value num">{view.tick_spacing}</span>
-      </div>
-      <div class="row">
-        <span class="label">Kurs tersirat</span>
-        <span class="value num">{formatUsd(view.eth_usd)} per ETH</span>
       </div>
 
       {view.warnings.map((w) => (
@@ -2822,7 +2897,14 @@ function WalletCard({
 }) {
   const w = status.wallet;
   const [passphrase, setPassphrase] = useState("");
-  const [privateKey, setPrivateKey] = useState("");
+
+  // Satu isian yang menerima keduanya. Bentuknya yang menentukan artinya,
+  // bukan pilihan terpisah dari user.
+  const [isian, setIsian] = useState("");
+  const isianKunci = isPrivateKey(isian);
+  const siapBuat = isianKunci
+    ? passphrase.length >= 8
+    : isian.length >= 8;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
 
@@ -2836,7 +2918,7 @@ function WalletCard({
         body: JSON.stringify(body ?? {}),
       });
       setPassphrase("");
-      setPrivateKey("");
+      setIsian("");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -2899,48 +2981,45 @@ function WalletCard({
         </button>
       ) : null}
 
-      {/* SATU FORM SAJA
-          Kunci privat bersifat pilihan: diisi berarti mengimpor, dikosongkan
-          berarti engine membuat kunci acak. Ceklis terpisah hanya menambah
-          satu keputusan tanpa mengubah apa pun yang tidak sudah terjawab oleh
-          isi kotaknya sendiri. */}
+      {/* SATU ISIAN SAJA
+          User menempelkan passphrase atau kunci privat ke kotak yang sama, dan
+          panel mengenalinya dari bentuknya: 0x diikuti 64 karakter heksadesimal
+          adalah kunci privat, selain itu passphrase.
+
+          Kotak kedua hanya muncul kalau yang ditempel ternyata kunci privat,
+          karena keystore tetap harus dienkripsi dan kunci privat bukan
+          passphrase. Pada pemakaian biasa yang terlihat cuma satu kotak. */}
       {!w.exists ? (
         <div class="stack" style="margin-top: var(--s3)">
           <input
             type="password"
-            value={passphrase}
-            placeholder="Passphrase baru, minimal 8 karakter"
-            onInput={(e) => setPassphrase((e.target as HTMLInputElement).value)}
+            value={isian}
+            placeholder="Passphrase baru, atau tempel kunci privat"
+            spellcheck={false}
+            onInput={(e) => setIsian((e.target as HTMLInputElement).value)}
           />
 
-          <input
-            type="password"
-            value={privateKey}
-            placeholder="Kunci privat, kosongkan untuk kunci acak"
-            spellcheck={false}
-            onInput={(e) => setPrivateKey((e.target as HTMLInputElement).value)}
-          />
+          {isianKunci ? (
+            <input
+              type="password"
+              value={passphrase}
+              placeholder="Passphrase untuk mengunci kunci itu"
+              onInput={(e) => setPassphrase((e.target as HTMLInputElement).value)}
+            />
+          ) : null}
 
           <button
             class="primary"
-            disabled={
-              busy ||
-              passphrase.length < 8 ||
-              (privateKey.trim().length > 0 && !isPrivateKey(privateKey))
-            }
+            disabled={busy || !siapBuat}
             onClick={() =>
               void act("/v1/wallet/create", {
-                passphrase,
-                ...(privateKey.trim() ? { private_key: privateKey.trim() } : {}),
+                passphrase: isianKunci ? passphrase : isian,
+                ...(isianKunci ? { private_key: isian.trim() } : {}),
               })
             }
           >
-            {privateKey.trim() ? "Impor wallet" : "Buat wallet"}
+            {isianKunci ? "Impor wallet" : "Buat wallet"}
           </button>
-
-          {privateKey.trim() && !isPrivateKey(privateKey) ? (
-            <p class="error">0x diikuti 64 karakter heksadesimal.</p>
-          ) : null}
         </div>
       ) : null}
 
