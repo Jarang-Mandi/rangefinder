@@ -132,6 +132,40 @@ pub struct PoolInfo {
     pub liquidity: String,
     /// Harga mentah token1 per token0 pada satuan terkecil.
     pub raw_price: f64,
+    /// Angka yang membantu memilih pool, kalau sudah terukur.
+    ///
+    /// `None` berarti belum diukur, bukan berarti nol. Pool yang volumenya
+    /// benar benar nol tetap punya `Some` dengan volume nol, dan keduanya
+    /// menuntun ke keputusan yang berbeda.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats: Option<PoolStats>,
+}
+
+/// Angka pembanding antar pool pada token yang sama.
+///
+/// Seluruhnya dinyatakan dalam token kutipan pool itu, dengan alasan yang sama
+/// seperti di `kandidat`: satuan terkecil menghasilkan angka yang terbaca
+/// seperti dolar padahal bukan, dan kurs dolar yang ditebak memasukkan
+/// kesalahan ke angka yang seharusnya murni hasil penjumlahan.
+#[derive(Debug, Clone, Serialize)]
+pub struct PoolStats {
+    /// Volume pada jendela yang diukur, dalam kutipan.
+    pub volume: f64,
+    /// Lamanya jendela itu, dalam menit. Volume tanpa jendela tidak berarti.
+    pub jendela_menit: f64,
+    /// Modal yang tertanam pada pita sekitar harga, dalam kutipan.
+    ///
+    /// Diberi label TVL di panel, dengan lebar pitanya disebutkan. Ini bukan
+    /// seluruh nilai pool: likuiditas yang jauh dari harga tidak ikut, dan
+    /// memang tidak seharusnya ikut, karena ia tidak menerima fee apa pun.
+    pub tvl: f64,
+    /// Lebar pita yang dipakai mengukur `tvl`, dalam persen ke tiap arah.
+    pub tvl_lebar_persen: f64,
+    /// Proyeksi fee setahun terhadap modal acuan, dalam persen.
+    ///
+    /// `None` untuk fee dinamis, yang besarannya baru diketahui saat swap
+    /// terjadi, dan untuk pool yang kedalamannya tidak terbaca.
+    pub apr: Option<f64>,
 }
 
 /// Ubah `sqrtPriceX96` menjadi harga mentah token1 per token0.
@@ -409,6 +443,7 @@ async fn hydrate_v3<P: Provider>(
             tick: slot0.tick.as_i32(),
             liquidity: liquidity.to_string(),
             raw_price: raw_price_from_sqrt_x96(sqrt),
+            stats: None,
         });
     }
 
@@ -491,6 +526,7 @@ pub async fn discover_v4<P: Provider>(
             tick: slot0.tick.as_i32(),
             liquidity: liquidity.to_string(),
             raw_price: raw_price_from_sqrt_x96(sqrt),
+            stats: None,
         });
     }
 
@@ -682,10 +718,102 @@ pub async fn muat_token<P: Provider>(
     // ternyata memakai 6.
     let dikenal = kenali_lawan_asing(provider, registry, token, &semua).await;
 
-    Ok(TokenSnapshot {
-        meta,
-        quotes: kelompokkan(semua, token, registry, &dikenal),
-    })
+    let mut quotes = kelompokkan(semua, token, registry, &dikenal);
+
+    // Angka pembanding diukur untuk kelompok kutipan teratas saja. Kelompok
+    // lain jarang dibuka, dan mengukur semuanya berarti satu permintaan log
+    // tambahan per kelompok pada jalur yang harus terasa seketika.
+    if let (Some(m), Some(k)) = (meta.as_ref(), quotes.first_mut()) {
+        ukur_stats(provider, registry, m, k).await;
+    }
+
+    Ok(TokenSnapshot { meta, quotes })
+}
+
+/// Lebar pita yang dipakai menghitung TVL sebuah pool, ke tiap arah.
+///
+/// Likuiditas yang jauh dari harga tidak menerima fee apa pun, jadi
+/// memasukkannya ke dalam angka yang dipakai memilih pool akan menyesatkan.
+/// Sepuluh persen cukup lebar untuk memuat range yang masuk akal, dan cukup
+/// sempit untuk tetap menggambarkan modal yang benar benar bekerja.
+pub const TVL_LEBAR_PERSEN: f64 = 10.0;
+
+/// Isi `stats` untuk seluruh pool dalam satu kelompok kutipan.
+///
+/// Kegagalan tidak menggagalkan pemuatan token: `stats` tetap `None`, dan panel
+/// menampilkan garis alih alih angka. Angka nol akan terbaca sebagai pool yang
+/// sepi, kesimpulan yang sangat berbeda dari tidak bisa diukur.
+async fn ukur_stats<P: Provider>(
+    provider: &P,
+    registry: &Registry,
+    meta: &TokenMeta,
+    kelompok: &mut QuoteGroup,
+) {
+    use crate::pools::kandidat;
+
+    if kelompok.pools.is_empty() {
+        return;
+    }
+
+    let ids: Vec<String> = kelompok.pools.iter().map(|p| p.id.clone()).collect();
+    let terukur = match volume::ukur_volume(provider, registry, &ids).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "volume pool gagal diukur, statistik dilewati");
+            return;
+        }
+    };
+
+    let jendela_detik = terukur.jendela_detik(registry.chain.block_time_ms);
+    let skala_meme = 10f64.powi(meta.decimals as i32);
+    let skala_quote = 10f64.powi(kelompok.quote_decimals as i32);
+    let lebar_tick = (TVL_LEBAR_PERSEN / 100.0 + 1.0).ln() / 1.0001_f64.ln();
+    let lebar_tick = lebar_tick as i32;
+
+    for pool in &mut kelompok.pools {
+        let kunci = pool.id.to_lowercase();
+        let quote_adalah_token1 = pool.token0.eq_ignore_ascii_case(&meta.address);
+
+        let mentah = if quote_adalah_token1 {
+            terukur.per_pool1.get(&kunci).copied().unwrap_or(0)
+        } else {
+            terukur.per_pool.get(&kunci).copied().unwrap_or(0)
+        };
+        let volume = mentah as f64 / skala_quote;
+
+        let harga = if quote_adalah_token1 {
+            pool.raw_price * skala_meme / skala_quote
+        } else {
+            (1.0 / pool.raw_price) * skala_meme / skala_quote
+        };
+
+        let likuiditas: u128 = pool.liquidity.parse().unwrap_or(0);
+        let tvl = kandidat::kedalaman_rentang(
+            pool.tick,
+            pool.tick - lebar_tick,
+            pool.tick + lebar_tick,
+            likuiditas,
+            quote_adalah_token1,
+            kandidat::Satuan {
+                harga,
+                skala_meme,
+                skala_quote,
+            },
+        );
+
+        let apr = (!pool.dynamic_fee)
+            .then_some(())
+            .and(tvl)
+            .and_then(|d| kandidat::proyeksi_apr(volume, pool.fee, d, jendela_detik));
+
+        pool.stats = Some(PoolStats {
+            volume,
+            jendela_menit: jendela_detik / 60.0,
+            tvl: tvl.unwrap_or(0.0),
+            tvl_lebar_persen: TVL_LEBAR_PERSEN,
+            apr,
+        });
+    }
 }
 
 /// Baca simbol dan desimal token lawan yang belum dikenal registry.
@@ -876,6 +1004,7 @@ fn baca_v4_dari_batch(
             tick: slot0.tick.as_i32(),
             liquidity: liquidity.to_string(),
             raw_price: raw_price_from_sqrt_x96(sqrt),
+            stats: None,
         });
     }
 
@@ -1128,6 +1257,7 @@ async fn hydrate_v4<P: Provider>(
             tick: slot0.tick.as_i32(),
             liquidity: liquidity.to_string(),
             raw_price: raw_price_from_sqrt_x96(sqrt),
+            stats: None,
         });
     }
 
@@ -1535,6 +1665,7 @@ mod tests {
             tick: 0,
             liquidity: liquidity.into(),
             raw_price,
+            stats: None,
         }
     }
 

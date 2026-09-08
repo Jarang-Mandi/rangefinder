@@ -219,6 +219,56 @@ impl Config {
 
 /// Direktori data engine. Bisa ditimpa lewat `RANGEFINDER_DATA_DIR`,
 /// yang dipakai tes integrasi supaya tidak menyentuh data asli user.
+/// Tulis ulang daftar endpoint HTTP di `config.toml`.
+///
+/// KENAPA HANYA MENULIS, TIDAK MENERAPKAN LANGSUNG
+/// `ChainClient` dibangun sekali saat start dan dipegang seluruh engine. Menukar
+/// endpointnya saat sedang jalan berarti ada permintaan yang berangkat ke satu
+/// RPC dan jawabannya ditunggu dari yang lain, dan itu bukan jenis kekeliruan
+/// yang layak ditanggung demi menghindari satu kali start ulang.
+///
+/// Berkasnya dibaca ulang, disunting bagian `rpc.http` saja, lalu ditulis
+/// kembali. Bagian lain tidak disentuh, karena user bisa saja sudah menyunting
+/// batas nominal atau `dry_run` sendiri, dan menimpanya diam diam akan
+/// mengembalikan `dry_run` ke keadaan bawaan tanpa ada yang memberi tahu.
+pub fn tulis_rpc(http: &[String]) -> Result<PathBuf> {
+    let bersih: Vec<String> = http
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if bersih.is_empty() {
+        anyhow::bail!("daftar endpoint kosong, engine tidak akan bisa jalan");
+    }
+    for e in &bersih {
+        if !(e.starts_with("http://") || e.starts_with("https://")) {
+            anyhow::bail!("`{e}` bukan endpoint HTTP");
+        }
+    }
+
+    let path = data_dir()?.join("config.toml");
+    let teks = std::fs::read_to_string(&path)
+        .with_context(|| format!("gagal membaca {}", path.display()))?;
+    let mut doc: toml::Value = toml::from_str(&teks)
+        .with_context(|| format!("{} tidak valid", path.display()))?;
+
+    let rpc = doc
+        .get_mut("rpc")
+        .and_then(|v| v.as_table_mut())
+        .ok_or_else(|| anyhow::anyhow!("bagian [rpc] tidak ada di config.toml"))?;
+    rpc.insert(
+        "http".to_string(),
+        toml::Value::Array(bersih.into_iter().map(toml::Value::String).collect()),
+    );
+
+    let keluaran = toml::to_string_pretty(&doc)?;
+    std::fs::write(&path, keluaran)
+        .with_context(|| format!("gagal menulis {}", path.display()))?;
+
+    Ok(path)
+}
+
 pub fn data_dir() -> Result<PathBuf> {
     if let Ok(custom) = std::env::var("RANGEFINDER_DATA_DIR") {
         return Ok(PathBuf::from(custom));

@@ -91,6 +91,13 @@ pub enum ClientMessage {
     /// Cabut persetujuan sebuah hook.
     ForgetHook { hook: String },
 
+    /// Ganti daftar endpoint RPC di config.toml.
+    ///
+    /// Hanya menulis berkas. Endpoint yang sedang dipakai tidak ditukar saat
+    /// engine berjalan, karena permintaan yang sudah berangkat ke satu RPC
+    /// tidak boleh ditunggu jawabannya dari RPC yang lain.
+    SetRpc { http: Vec<String> },
+
     /// Minta distribusi likuiditas pool yang sedang aktif.
     ///
     /// Terpisah dari `range_view` dengan sengaja. Distribusi butuh dua
@@ -210,6 +217,12 @@ pub struct EngineStatus {
     pub can_execute: bool,
     /// Alasan `can_execute` bernilai salah, supaya panel tidak perlu menebak.
     pub blocked_reasons: Vec<String>,
+    /// Endpoint HTTP yang sedang dipakai, kunci API sudah disunting.
+    ///
+    /// Penyuntingan terjadi di `chain::endpoint` saat endpointnya dibuat, bukan
+    /// saat ditampilkan, supaya tidak ada jalur mana pun yang bisa lolos
+    /// membawa kunci utuh.
+    pub rpc_http: Vec<String>,
 }
 
 /// Keadaan satu token beserta pool yang bisa dipakai.

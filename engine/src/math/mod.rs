@@ -276,8 +276,18 @@ pub fn range_from_prices(
         (tick_b, tick_a)
     };
 
-    let lower = floor_to_spacing(raw_lower, spacing).max(MIN_TICK);
-    let upper = ceil_to_spacing(raw_upper, spacing).min(MAX_TICK);
+    // BATAS DIJEPIT KE TICK YANG MASIH KELIPATAN SPACING
+    //
+    // `MIN_TICK` dan `MAX_TICK` belum tentu kelipatan spacing. Menjepit ke
+    // angka itu apa adanya menghasilkan tick yang di luar grid, dan Uniswap
+    // menolak posisi yang ticknya tidak kelipatan spacing. Kekeliruan ini tidak
+    // pernah muncul selama range yang diminta sempit, dan langsung muncul pada
+    // range penuh.
+    let batas_bawah = ceil_to_spacing(MIN_TICK, spacing);
+    let batas_atas = floor_to_spacing(MAX_TICK, spacing);
+
+    let lower = floor_to_spacing(raw_lower, spacing).max(batas_bawah);
+    let upper = ceil_to_spacing(raw_upper, spacing).min(batas_atas);
 
     // Kedua harga bisa jatuh di sel grid yang sama pada pool dengan spacing
     // lebar. Range dengan lebar nol tidak sah di Uniswap, jadi dilebarkan satu
@@ -357,6 +367,22 @@ pub fn concentration_ratio(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn batas_range_penuh_tetap_kelipatan_spacing() {
+        // MIN_TICK dan MAX_TICK bukan kelipatan spacing mana pun. Menjepit ke
+        // angka itu apa adanya menghasilkan tick di luar grid, dan Uniswap
+        // menolaknya. Kekeliruannya tidak pernah terlihat selama range yang
+        // diminta sempit, dan langsung terlihat pada range penuh.
+        for spacing in [1, 10, 60, 200, 2_000] {
+            let bawah = ceil_to_spacing(MIN_TICK, spacing);
+            let atas = floor_to_spacing(MAX_TICK, spacing);
+            assert_eq!(bawah % spacing, 0, "batas bawah spacing {spacing}");
+            assert_eq!(atas % spacing, 0, "batas atas spacing {spacing}");
+            assert!(bawah >= MIN_TICK, "batas bawah keluar rentang sah");
+            assert!(atas <= MAX_TICK, "batas atas keluar rentang sah");
+        }
+    }
     use alloy::primitives::address;
 
     /// Memecoin 18 desimal sebagai token0, WETH sebagai token1.

@@ -417,6 +417,7 @@ mod tests {
             tick,
             liquidity: "1000000".into(),
             raw_price: 1.0,
+            stats: None,
         }
     }
 

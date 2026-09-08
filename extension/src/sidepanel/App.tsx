@@ -34,7 +34,6 @@ import {
   type LabelScan,
   type HasilBasis,
   type JenisAksi,
-  type Kejadian,
   type Kriteria,
   type OpenPlanView,
   type PoolInfo,
@@ -53,6 +52,15 @@ import {
 } from "../shared/protocol";
 
 const TOKEN_KEY = "rangefinder.pairingToken";
+
+/**
+ * Berapa lama garis dianggap masih digeser setelah gerakan terakhir.
+ *
+ * Terlalu pendek, garis tersentak di tengah geseran. Terlalu panjang, hasil
+ * pembulatan ke grid tick baru terlihat lama setelah tetikus dilepas. Dua ratus
+ * milidetik kira kira jeda antar gerakan tetikus yang masih terasa menyatu.
+ */
+const JEDA_SETTLE_MS = 200;
 
 type TabId = "range" | "signals" | "positions" | "pnl";
 
@@ -83,10 +91,25 @@ export function App() {
   const [actionBusy, setActionBusy] = useState(false);
   const [signals, setSignals] = useState<SignalsView | null>(null);
   const [scan, setScan] = useState<ScanView | null>(null);
+
+  /**
+   * Kapan garis terakhir digeser user, dalam milidetik.
+   *
+   * KENAPA INI PERLU
+   * Menggeser garis memicu `drawing_event` pada setiap gerakan tetikus. Tiap
+   * gerakan dikirim ke engine, engine membulatkannya ke grid tick, lalu
+   * mengirim balik hasilnya, dan panel menggambar ulang garis di posisi hasil
+   * pembulatan itu. Akibatnya garis tersentak ke belakang di bawah kursor yang
+   * masih bergerak, dan geserannya terasa meloncat loncat.
+   *
+   * Selama user masih menggeser, biarkan chart yang memegang posisi garis.
+   * Panel baru menggambar ulang setelah geserannya berhenti, sekali saja,
+   * supaya pembulatan ke grid tick tetap terlihat tapi hanya di akhir.
+   */
+  const geserTerakhirRef = useRef(0);
+  const [settleTick, setSettleTick] = useState(0);
   const [depth, setDepth] = useState<Distribusi | null>(null);
   const [scanBusy, setScanBusy] = useState(false);
-  /** Riwayat notifikasi, terbaru lebih dulu. */
-  const [riwayat, setRiwayat] = useState<Kejadian[]>([]);
 
   const clientRef = useRef<EngineClient | null>(null);
   /** Tab gmgn yang sedang menampilkan chart. Tujuan perintah gambar garis. */
@@ -150,13 +173,6 @@ export function App() {
         setPositions(v);
         setPosBusy(false);
       },
-      onNotify: (k) => {
-        // Toast-nya muncul di halaman gmgn, bukan di sini. Panel hanya
-        // menyimpan riwayatnya, karena panel bisa saja sedang tertutup saat
-        // kejadiannya terjadi.
-        setRiwayat((r) => [k, ...r].slice(0, 50));
-      },
-      onNotifyHistory: setRiwayat,
       onOpenPlan: (plan) => {
         setOpenPlan(plan);
         setExecBusy(false);
@@ -185,9 +201,6 @@ export function App() {
 
     clientRef.current = client;
     client.connect();
-    // Riwayat diminta sekali saat tersambung, supaya panel yang baru dibuka
-    // tetap bisa menjelaskan apa yang terjadi selagi ia tertutup.
-    self.setTimeout(() => client.getNotifications(), 500);
     return () => {
       client.disconnect();
       clientRef.current = null;
@@ -269,6 +282,15 @@ export function App() {
           const lower = side === "lower" ? price : v.lower.mcap_usd;
           const upper = side === "upper" ? price : v.upper.mcap_usd;
           clientRef.current?.setRange(lower, upper);
+
+          // Selama masih digeser, chart yang memegang posisi garis. Setelah
+          // diam sebentar, panel menggambar ulang sekali supaya hasil
+          // pembulatan ke grid tick terlihat.
+          geserTerakhirRef.current = Date.now();
+          window.clearTimeout(settleTimerRef.current);
+          settleTimerRef.current = window.setTimeout(() => {
+            setSettleTick((n) => n + 1);
+          }, JEDA_SETTLE_MS);
           break;
         }
       }
@@ -279,6 +301,7 @@ export function App() {
 
   // Ref supaya listener di atas selalu melihat tampilan terbaru tanpa harus
   // dipasang ulang setiap kali range berubah.
+  const settleTimerRef = useRef<number>(0);
   const latestViewRef = useRef<RangeView | null>(null);
   latestViewRef.current = rangeView;
 
@@ -292,6 +315,10 @@ export function App() {
   useEffect(() => {
     const tabId = gmgnTabRef.current;
     if (!rangeView || tabId === null) return;
+
+    // Geseran yang masih berlangsung dilewati. Menggambar ulang sekarang akan
+    // menarik garis dari bawah kursor yang masih bergerak.
+    if (Date.now() - geserTerakhirRef.current < JEDA_SETTLE_MS) return;
 
     const sidik = `${rangeView.lower.tick}:${rangeView.upper.tick}:${rangeView.pool_id}`;
     if (sidik === drawnRef.current) return;
@@ -307,7 +334,7 @@ export function App() {
       .catch(() => {
         // Tab gmgn sudah tertutup atau berpindah. Bukan kondisi error.
       });
-  }, [rangeView]);
+  }, [rangeView, settleTick]);
 
   const savePairing = useCallback(async (value: string) => {
     await chrome.storage.local.set({ [TOKEN_KEY]: value });
@@ -431,7 +458,6 @@ export function App() {
           </p>
         )}
 
-        <RiwayatCard riwayat={riwayat} />
       </div>
 
       <StatusBar state={state} status={status} />
@@ -592,7 +618,7 @@ function RangeTab({
 
       <section class="card">
         <div class="section-title">
-          <h2>Status engine</h2>
+          <h2>Settings</h2>
           <button class="chip" style="cursor: pointer" onClick={() => setShowEngine((v) => !v)}>
             {showEngine ? "tutup" : "buka"}
           </button>
@@ -602,7 +628,11 @@ function RangeTab({
             <ChainCard status={status} />
             <WalletCard status={status} client={client} />
             <RegistryCard status={status} />
-            <EngineCard status={status} onForget={onForget} />
+            <EngineCard
+              status={status}
+              onSetRpc={(http) => client?.setRpc(http)}
+              onForget={onForget}
+            />
           </div>
         ) : (
           <p class="muted" style="margin: 0">
@@ -642,7 +672,7 @@ function AddressInput({
           }}
         />
         <button class="primary" disabled={!valid || busy} onClick={() => onSubmit(value)}>
-          {busy ? "Mencari" : "Buka di gmgn"}
+          {busy ? "Mencari" : "Open"}
         </button>
       </div>
       {kotor ? <p class="error">Bukan alamat EVM. Harus 0x diikuti 40 karakter heksadesimal.</p> : null}
@@ -723,10 +753,6 @@ function TokenCard({
           ))}
         </div>
 
-        <p class="hint">
-          Pool tanpa likuiditas tidak ditampilkan. Harganya berasal dari saat pool
-          dibuat dan bisa meleset puluhan kali lipat.
-        </p>
       </section>
 
       {rangeView ? (
@@ -841,13 +867,9 @@ function ScanCard({
             ))}
           </div>
           <p class="hint">
-            Kolom hasil adalah fee sepanjang {scan.jendela_volume_menit.toFixed(0)}{" "}
-            menit terakhir atas modal acuan {ringkas(scan.modal_acuan)} kutipan.
-            Modal adalah kutipan yang dibutuhkan untuk menutup rentang yang harga
-            benar benar lewati.
-            {scan.volume_jendela_pendek
-              ? " Jendela panjang gagal dibaca, jadi angkanya lebih kasar dari biasanya."
-              : ""}
+            Hasil dan APR atas modal {ringkas(scan.modal_acuan)}, jendela{" "}
+            {scan.jendela_volume_menit.toFixed(0)} menit.
+            {scan.volume_jendela_pendek ? " Jendela pendek, angkanya kasar." : ""}
           </p>
         </>
       )}
@@ -1060,11 +1082,7 @@ function SignalsTab({
             Belum ada data candle. Buka halaman token di gmgn, dan deretnya akan
             terkirim sendiri dalam beberapa detik.
           </p>
-          <p class="hint">
-            Bar dibaca dari chart yang sedang Anda lihat, bukan dari sumber lain.
-            Angka yang dipakai untuk keputusan harus sama dengan yang ada di
-            layar.
-          </p>
+          <p class="hint">Bar dibaca dari chart yang sedang Anda lihat.</p>
         </section>
       </div>
     );
@@ -1196,11 +1214,7 @@ function SidewaysCard({ sinyal }: { sinyal: SinyalSideways | null }) {
           <h2>Sideways</h2>
           <span class="chip">data belum cukup</span>
         </div>
-        <p class="hint">
-          Butuh 240 bar, yaitu empat jam pada candle satu menit. Ini berbeda dari
-          skor rendah: yang satu belum bisa diperiksa, yang lain sudah diperiksa
-          dan tidak menarik.
-        </p>
+        <p class="hint">Butuh 240 bar, empat jam pada candle satu menit.</p>
       </section>
     );
   }
@@ -1246,9 +1260,7 @@ function BasisCard({ hasil }: { hasil: HasilBasis | null }) {
           <h2>Dump lalu basis</h2>
           <span class="chip">data belum cukup</span>
         </div>
-        <p class="hint">
-          Butuh cukup bar untuk melihat puncak, penurunan, dan basisnya sekaligus.
-        </p>
+
       </section>
     );
   }
@@ -1325,58 +1337,6 @@ function BarisMetrik({ nama, nilai, ket }: { nama: string; nilai: string; ket: s
   );
 }
 
-/**
- * Riwayat notifikasi, terbaru lebih dulu.
- *
- * Ada di bawah setiap tab, karena PRD 3.7 meminta riwayat bisa dibuka dari
- * side panel tanpa menyebut tab tertentu. Tertutup secara bawaan supaya tidak
- * mendorong isi tab ke bawah.
- *
- * Kejadian yang tertahan pendinginan ikut tercatat di sini, dan ditandai.
- * Toast boleh ditahan, catatan tidak: catatan inilah yang menjelaskan apa yang
- * terjadi saat user tidak menatap layar.
- */
-function RiwayatCard({ riwayat }: { riwayat: Kejadian[] }) {
-  const [buka, setBuka] = useState(false);
-  if (riwayat.length === 0) return null;
-
-  return (
-    <section class="card">
-      <div class="section-title">
-        <h2>Riwayat kabar</h2>
-        <button class="chip" style="cursor: pointer" onClick={() => setBuka((v) => !v)}>
-          {buka ? "tutup" : `${riwayat.length} tersimpan`}
-        </button>
-      </div>
-      {buka ? (
-        <div class="stack" style="margin-top: var(--s2)">
-          {riwayat.map((k, i) => (
-            <div key={`${k.at}:${k.code}:${i}`} class="row">
-              <span class="label">
-                <span
-                  class={`dot ${k.level === "critical" ? "bad" : k.level === "warning" ? "warn" : "ok"}`}
-                />
-                {jamSingkat(k.at)}
-              </span>
-              <span class="value muted">
-                {k.message}
-                {k.ditahan ? " (tertahan pendinginan)" : ""}
-              </span>
-            </div>
-          ))}
-        </div>
-      ) : null}
-    </section>
-  );
-}
-
-/** Jam dan menit dari waktu ISO. Cukup untuk menempatkan kejadian. */
-function jamSingkat(iso: string): string {
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime())
-    ? iso
-    : d.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" });
-}
 /**
  * Tab PnL.
  *
@@ -1457,17 +1417,14 @@ function PnlTab({
 
         {r.perkiraan > 0 ? (
           <p class="hint">
-            {r.perkiraan} dari {r.jumlah} memakai angka perkiraan. Posisi yang
-            dibuka di luar Rangefinder tidak punya catatan berapa yang dulu
-            disetor, jadi impermanent loss-nya tidak bisa dihitung dan dianggap
-            nol.
+            {r.perkiraan} dari {r.jumlah} perkiraan: dibuka di luar Rangefinder,
+            jadi impermanent loss-nya tidak tercatat.
           </p>
         ) : null}
 
         {tanpaSatuan > 0 ? (
           <p class="hint">
-            {tanpaSatuan} posisi tidak bisa dinyatakan nilainya, karena kedua
-            sisinya memecoin dan tidak ada satuan yang berarti.
+            {tanpaSatuan} posisi tanpa satuan: kedua sisinya memecoin.
           </p>
         ) : null}
 
@@ -1727,10 +1684,7 @@ function PositionCard({
       </div>
 
       {pos.hooks && pos.hooks !== "0x0000000000000000000000000000000000000000" ? (
-        <p class="hint">
-          Pool ini memakai hook {shortAddress(pos.hooks)}. Periksa allowlist
-          sebelum menambah dana.
-        </p>
+        <p class="hint">Hook {shortAddress(pos.hooks)}, belum diperiksa.</p>
       ) : null}
 
       <div class="stack" style="margin-top: var(--s3)">
@@ -1756,11 +1710,6 @@ function PositionCard({
         {plan ? <ActionPlanCard plan={plan} busy={busy} onKirim={onExecuteAction} /> : null}
       </div>
 
-      <p class="hint">
-        Tambah likuiditas dan rebalance menyusul. Untuk sekarang, rebalance
-        dilakukan dengan menutup posisi lalu membuka range baru dari tab Range,
-        dan itu memang dua transaksi terpisah.
-      </p>
     </section>
   );
 }
@@ -1811,10 +1760,7 @@ function ActionPlanCard({
       </button>
 
       {plan.menutup ? (
-        <p class="hint">
-          Aksi ini menghabiskan posisinya. Likuiditas beserta fee ditarik ke
-          wallet, lalu NFT posisinya dibakar.
-        </p>
+        <p class="hint">Posisi ditutup habis dan NFT-nya dibakar.</p>
       ) : null}
     </div>
   );
@@ -1853,6 +1799,55 @@ function porsiDalamRange(p: Posisi): number {
  * yang kurang, dan gate mana yang gagal, semuanya datang dari engine. Panel
  * hanya menampilkan dan meneruskan tekanan tombol.
  */
+/**
+ * Jumlah tiap sisi yang akan disetor, beserta proyeksi hasilnya.
+ *
+ * Rasio antara kedua sisi ditentukan range, bukan dipilih user: range yang
+ * seluruhnya di bawah harga hanya berisi kutipan, yang seluruhnya di atas hanya
+ * berisi memecoin, dan yang mengapit harga berisi keduanya. Karena itu di sini
+ * angkanya ditampilkan, bukan diminta.
+ *
+ * APR memakai modal yang benar benar disetor, jadi ia mengecil seiring posisi
+ * membesar. Itu memang kenyataannya: modal kita sendiri mengencerkan poolnya.
+ */
+function SetoranCard({ plan }: { plan: OpenPlanView }) {
+  const s = plan.setor;
+  if (!s) return null;
+
+  return (
+    <div class="setoran">
+      <div class="row">
+        <span class="label">{s.simbol_memecoin}</span>
+        <span class="value num">{formatCompact(s.jumlah_memecoin)}</span>
+      </div>
+      <div class="row">
+        <span class="label">{s.simbol_quote}</span>
+        <span class="value num">{formatCompact(s.jumlah_quote)}</span>
+      </div>
+      <div class="row">
+        <span class="label">Nilai setoran</span>
+        <span class="value num">
+          {formatCompact(s.nilai_quote)} {s.simbol_quote}
+        </span>
+      </div>
+      <div class="row">
+        <span class="label">Estimasi APR</span>
+        <span class="value num">
+          {plan.apr_estimasi == null
+            ? "-"
+            : `${Math.round(plan.apr_estimasi).toLocaleString("id-ID")}%`}
+        </span>
+      </div>
+      {plan.zap ? (
+        <p class="hint">
+          Zap dulu: {formatCompact(Number(plan.zap.menganggur_tanpa_zap))} akan
+          menganggur tanpa itu.
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 function ExecuteCard({
   plan,
   result,
@@ -1930,6 +1925,8 @@ function ExecuteCard({
         >
           Susun rencana
         </button>
+
+          {plan ? <SetoranCard plan={plan} /> : null}
       </div>
 
       {plan ? (
@@ -2142,6 +2139,18 @@ function QuotePicker({
   );
 }
 
+/**
+ * Satu pool beserta angka yang menentukan pilihannya.
+ *
+ * APR adalah proyeksi dari jendela yang diukur, bukan hasil. TVL hanya
+ * mencakup pita di sekitar harga, karena likuiditas yang jauh dari harga tidak
+ * menerima fee apa pun dan memasukkannya akan membuat pool tebal terlihat
+ * lebih baik daripada yang sebenarnya.
+ *
+ * Tick spacing TIDAK ditampilkan. Ia menentukan grid tempat batas range
+ * dibulatkan, tapi akibatnya sudah terlihat langsung sebagai selisih harga di
+ * kartu Range, dan angkanya sendiri tidak mengubah keputusan memilih pool.
+ */
 function PoolRow({
   pool,
   active,
@@ -2151,22 +2160,36 @@ function PoolRow({
   active: boolean;
   onSelect: () => void;
 }) {
+  const s = pool.stats ?? null;
+  const berhook =
+    pool.hooks && pool.hooks !== "0x0000000000000000000000000000000000000000";
+
   return (
     <button class={`pool-row${active ? " active" : ""}`} onClick={onSelect}>
-      <span class="pool-main">
+      <span class="pool-kiri">
         <span class="chip">{pool.version.toUpperCase()}</span>
         <span class="num">
           {/* Pool dynamic fee tidak punya besaran fee yang bisa ditampilkan.
               Angkanya di PoolKey hanya penanda, dan menampilkannya sebagai
               persen akan tertulis 838,86 persen. */}
-          {pool.dynamic_fee ? "fee dinamis" : `${(pool.fee / 10_000).toFixed(2)} persen`}
+          {pool.dynamic_fee ? "fee dinamis" : `${(pool.fee / 10_000).toFixed(2)}%`}
         </span>
+        {berhook ? <span class="chip warn">hook</span> : null}
       </span>
-      <span class="pool-meta muted num">
-        spacing {pool.tick_spacing}
-        {pool.hooks && pool.hooks !== "0x0000000000000000000000000000000000000000"
-          ? " · hook"
-          : ""}
+
+      <span class="pool-angka num">
+        <span>
+          <i>APR</i>
+          {s?.apr == null ? "-" : `${Math.round(s.apr).toLocaleString("id-ID")}%`}
+        </span>
+        <span>
+          <i>TVL</i>
+          {s ? formatCompact(s.tvl) : "-"}
+        </span>
+        <span>
+          <i>vol</i>
+          {s ? formatCompact(s.volume) : "-"}
+        </span>
       </span>
     </button>
   );
@@ -2176,26 +2199,25 @@ function PoolRow({
 const PRESET_LEBAR = [0.2, 1, 5, 10, 20];
 
 /**
- * Distribusi likuiditas beserta cara menempatkan range di atasnya.
+ * Pengali batas untuk range penuh.
  *
- * KENAPA HISTOGRAM INI ADA
- * Porsi fee kita bukan ditentukan oleh besarnya modal kita, melainkan oleh
- * perbandingan modal kita terhadap likuiditas lain yang aktif di pita tempat
- * harga bergerak. Dua range selebar sama bisa berbeda hasilnya berkali lipat
- * hanya karena yang satu ditaruh di pita padat dan yang lain di pita lengang.
- * Tanpa gambar ini, satu satunya cara mengetahuinya adalah menaruh dana dulu.
+ * Cukup besar untuk melewati tick terjauh yang sah, sehingga engine yang
+ * menjepitnya ke grid, bukan panel yang menebak angkanya.
+ */
+const PENGALI_PENUH = 1e40;
+
+/**
+ * Atur range di atas gambar likuiditas yang sudah ada di pool.
  *
- * KENAPA BATANGNYA MENDATAR, BUKAN TEGAK SEPERTI REFERENSINYA
- * Panel ini lebarnya 320 sampai 480 piksel. Sumbu harga yang tegak memberi
- * setiap pita satu baris penuh, sehingga label harganya terbaca. Sumbu harga
- * yang mendatar akan menyisakan beberapa piksel per pita dan labelnya hilang.
+ * Porsi fee kita adalah modal kita dibagi likuiditas lain yang aktif di pita
+ * tempat harga bergerak. Histogram inilah yang menunjukkannya.
  *
- * SEMUA PERBANDINGAN RELATIF TERHADAP HARGA SEKARANG
- * Distribusi datang dalam satuan token kutipan, sedangkan batas range dalam
- * market cap USD. Keduanya tidak perlu dipertemukan: gerakan satu persen pada
- * harga adalah gerakan satu persen pada market cap, jadi keduanya dibandingkan
- * sebagai kelipatan terhadap harga sekarang, dan tidak ada konversi satuan
- * yang bisa meleset.
+ * Batangnya mendatar karena panel ini lebarnya 320 sampai 480 piksel: sumbu
+ * harga yang tegak tidak menyisakan ruang untuk label harga tiap pita.
+ *
+ * Batas range dan batas pita dibandingkan sebagai kelipatan terhadap harga
+ * sekarang. Gerakan satu persen pada harga adalah gerakan satu persen pada
+ * market cap, jadi tidak ada konversi satuan yang bisa meleset.
  */
 function DepthCard({
   view,
@@ -2209,26 +2231,47 @@ function DepthCard({
   onMuat: () => void;
 }) {
   const mcapSekarang = view.current.mcap_usd;
+  const [custom, setCustom] = useState(false);
+  const [bawah, setBawah] = useState("");
+  const [atas, setAtas] = useState("");
 
   const pilihLebar = (persen: number) => {
+    setCustom(false);
     const f = persen / 100;
     onSetRange(mcapSekarang * (1 - f), mcapSekarang * (1 + f));
   };
 
-  // Batas range sebagai kelipatan terhadap harga sekarang. Inilah satuan
-  // bersama antara histogram dan garis range.
+  const pilihPenuh = () => {
+    setCustom(false);
+    onSetRange(mcapSekarang / PENGALI_PENUH, mcapSekarang * PENGALI_PENUH);
+  };
+
+  const bukaCustom = () => {
+    // Diisi dengan batas yang sedang berlaku, supaya user menyunting angka
+    // yang sedang dilihatnya, bukan kotak kosong.
+    setBawah(String(view.lower.price_usd));
+    setAtas(String(view.upper.price_usd));
+    setCustom(true);
+  };
+
+  const terapkanCustom = () => {
+    const b = Number(bawah);
+    const a = Number(atas);
+    if (!Number.isFinite(b) || !Number.isFinite(a) || b <= 0 || a <= 0) return;
+    // Harga USD diubah menjadi market cap lewat perbandingan terhadap harga
+    // sekarang, satuan yang sudah dipakai seluruh kartu ini.
+    const skala = mcapSekarang / view.current.price_usd;
+    onSetRange(b * skala, a * skala);
+  };
+
   const kelipatanBawah = view.lower.mcap_usd / mcapSekarang;
   const kelipatanAtas = view.upper.mcap_usd / mcapSekarang;
 
   return (
     <section class="card">
       <div class="section-title">
-        <h2>Likuiditas di sekitar harga</h2>
-        {depth ? null : (
-          <button class="toggle" onClick={onMuat}>
-            muat
-          </button>
-        )}
+        <h2>Atur range</h2>
+        <span class="chip">{view.width_pct.toFixed(1)}% lebar</span>
       </div>
 
       <div class="preset-row">
@@ -2237,19 +2280,50 @@ function DepthCard({
             ±{x}%
           </button>
         ))}
+        <button class="preset" onClick={pilihPenuh}>
+          penuh
+        </button>
+        <button
+          class={`preset${custom ? " aktif" : ""}`}
+          onClick={() => (custom ? setCustom(false) : bukaCustom())}
+        >
+          custom
+        </button>
       </div>
 
+      {custom ? (
+        <div class="custom-range">
+          <label>
+            <span>Batas bawah, USD</span>
+            <input
+              type="text"
+              value={bawah}
+              spellcheck={false}
+              onInput={(e) => setBawah((e.target as HTMLInputElement).value)}
+            />
+          </label>
+          <label>
+            <span>Batas atas, USD</span>
+            <input
+              type="text"
+              value={atas}
+              spellcheck={false}
+              onInput={(e) => setAtas((e.target as HTMLInputElement).value)}
+            />
+          </label>
+          <button class="lebar" onClick={terapkanCustom}>
+            terapkan
+          </button>
+        </div>
+      ) : null}
+
       {!depth ? (
-        <p class="muted" style="margin: var(--s3) 0 0">
-          Membaca bentuk pool dari rantai.
-        </p>
+        <p class="muted" style="margin: var(--s3) 0 0">Membaca bentuk pool.</p>
       ) : depth.error ? (
         <p class="error" style="margin: var(--s3) 0 0">{depth.error}</p>
       ) : depth.pita.length === 0 ? (
         <p class="muted" style="margin: var(--s3) 0 0">
-          Tidak ada likuiditas lain di sekitar harga ini. Kalau Anda masuk, Anda
-          hampir seluruh poolnya, dan porsi fee Anda mendekati penuh selama
-          harga tetap di dalam range.
+          Belum ada likuiditas lain di sekitar harga ini.
         </p>
       ) : (
         <Histogram
@@ -2259,12 +2333,11 @@ function DepthCard({
         />
       )}
 
-      <p class="hint">
-        Panjang batang adalah modal yang sudah tertanam di pita itu. Porsi fee
-        Anda adalah modal Anda dibagi batang di pita tempat harga bergerak, jadi
-        pita yang pendek justru yang paling menguntungkan selama harga betul
-        betul lewat sana.
-      </p>
+      <p class="hint">Batang biru: modal yang akan berbagi fee dengan Anda.</p>
+
+      <button class="lebar" onClick={onMuat}>
+        muat ulang bentuk pool
+      </button>
     </section>
   );
 }
@@ -2314,8 +2387,7 @@ function Histogram({
 
 /**
  * Harga memecoin biasanya jauh di bawah satu, dan pembulatan biasa akan
- * menampilkan seluruh baris sebagai 0.00. Angka penting yang dipertahankan
- * membuat pita pita yang berdekatan tetap bisa dibedakan.
+ * menampilkan seluruh baris sebagai 0.00.
  */
 function formatHargaKecil(v: number): string {
   if (!Number.isFinite(v)) return "-";
@@ -2381,10 +2453,7 @@ function RangeCard({ view }: { view: RangeView }) {
         </p>
       ))}
 
-      <p class="hint">
-        Angka yang ditampilkan adalah hasil pembulatan ke grid tick, bukan yang
-        digeser. Kurs diturunkan dari chart, bukan dari sumber luar.
-      </p>
+      <p class="hint">Angka sudah dibulatkan ke grid tick.</p>
     </section>
   );
 }
@@ -2697,11 +2766,87 @@ function RegistryCard({ status }: { status: EngineStatus }) {
   );
 }
 
+/**
+ * Sunting daftar endpoint RPC.
+ *
+ * Yang pertama dipakai, sisanya cadangan. Kunci API di dalam URL aman ditulis
+ * di sini: engine menyuntingnya sebelum URL pernah masuk ke log atau ke status,
+ * dan yang ditampilkan di bawah adalah versi yang sudah tersunting.
+ *
+ * Engine tidak menukar endpoint saat sedang jalan, jadi perubahannya baru
+ * berlaku setelah engine dijalankan ulang. Itu dikatakan apa adanya, karena
+ * user yang mengira RPC barunya sudah bekerja akan salah menilai kecepatannya.
+ */
+function RpcEditor({
+  endpoints,
+  onSimpan,
+}: {
+  endpoints: string[];
+  onSimpan: (http: string[]) => void;
+}) {
+  const [buka, setBuka] = useState(false);
+  const [teks, setTeks] = useState("");
+
+  const mulai = () => {
+    // Kotak dibiarkan kosong, bukan diisi versi tersunting. Menyimpan kembali
+    // teks bertanda bintang akan mengganti endpoint yang bekerja dengan URL
+    // yang tidak sah, dan itu baru ketahuan setelah engine dijalankan ulang.
+    setTeks("");
+    setBuka(true);
+  };
+
+  return (
+    <div class="rpc">
+      <div class="row">
+        <span class="label">RPC</span>
+        <button class="chip" style="cursor: pointer" onClick={() => (buka ? setBuka(false) : mulai())}>
+          {buka ? "batal" : "ganti"}
+        </button>
+      </div>
+
+      {endpoints.map((e, i) => (
+        <p key={e} class="rpc-baris">
+          {i === 0 ? "dipakai" : "cadangan"} · {e}
+        </p>
+      ))}
+
+      {buka ? (
+        <>
+          <textarea
+            class="rpc-input"
+            rows={3}
+            spellcheck={false}
+            placeholder={"Satu endpoint per baris. Yang pertama dipakai."}
+            value={teks}
+            onInput={(e) => setTeks((e.target as HTMLTextAreaElement).value)}
+          />
+          <button
+            class="lebar"
+            onClick={() => {
+              const baris = teks
+                .split("\n")
+                .map((x) => x.trim())
+                .filter((x) => x.length > 0);
+              if (baris.length === 0) return;
+              onSimpan(baris);
+              setBuka(false);
+            }}
+          >
+            simpan, lalu jalankan ulang engine
+          </button>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
 function EngineCard({
   status,
+  onSetRpc,
   onForget,
 }: {
   status: EngineStatus;
+  onSetRpc: (http: string[]) => void;
   onForget: () => void;
 }) {
   return (
@@ -2723,6 +2868,10 @@ function EngineCard({
           ))}
         </ul>
       ) : null}
+
+      <RpcEditor endpoints={status.rpc_http} onSimpan={onSetRpc} />
+
+      
 
       <button style="margin-top: var(--s3); width: 100%" onClick={onForget}>
         Lupakan pairing

@@ -63,9 +63,26 @@ export interface EngineStatus {
   registry: RegistrySummary;
   can_execute: boolean;
   blocked_reasons: string[];
+  /** Endpoint HTTP yang sedang dipakai, kunci API sudah disunting engine. */
+  rpc_http: string[];
 }
 
 export type PoolVersion = "v3" | "v4";
+
+/**
+ * Angka pembanding antar pool pada token yang sama.
+ *
+ * Seluruhnya dalam token kutipan pool itu, bukan dolar. `tvl` hanya mencakup
+ * pita di sekitar harga selebar `tvl_lebar_persen`, karena likuiditas yang jauh
+ * dari harga tidak menerima fee apa pun.
+ */
+export interface PoolStats {
+  volume: number;
+  jendela_menit: number;
+  tvl: number;
+  tvl_lebar_persen: number;
+  apr: number | null;
+}
 
 export interface PoolInfo {
   version: PoolVersion;
@@ -90,6 +107,8 @@ export interface PoolInfo {
   liquidity: string;
   /** Harga mentah token1 per token0 pada satuan terkecil. */
   raw_price: number;
+  /** Angka pembanding antar pool. Null berarti belum diukur, bukan nol. */
+  stats?: PoolStats | null;
 }
 
 export interface TokenMeta {
@@ -230,7 +249,25 @@ export interface OpenPlanView {
   version: string;
   /** Terisi kalau modal perlu ditukar lebih dulu supaya cocok rasio range. */
   zap: ZapView | null;
+  /** Jumlah tiap sisi yang akan disetor, sudah berdesimal. */
+  setor: SetoranView | null;
+  /**
+   * Proyeksi fee setahun untuk ukuran posisi ini, dalam persen.
+   *
+   * Berbeda dari APR di daftar pool, yang memakai modal acuan tetap. Yang ini
+   * memakai modal yang benar benar disetor, jadi pengenceran oleh modal kita
+   * sendiri ikut terhitung dan angkanya mengecil seiring posisi membesar.
+   */
+  apr_estimasi: number | null;
   expires_at: string;
+}
+
+export interface SetoranView {
+  simbol_memecoin: string;
+  jumlah_memecoin: number;
+  simbol_quote: string;
+  jumlah_quote: number;
+  nilai_quote: number;
 }
 
 /**
@@ -631,6 +668,7 @@ export type ClientMessage =
   | { type: "get_notifications" }
   | { type: "scan" }
   | { type: "get_depth" }
+  | { type: "set_rpc"; http: string[] }
   | { type: "approve_hook"; hook: string }
   | { type: "forget_hook"; hook: string }
   | { type: "plan_action"; token_id: string; action: JenisAksi }

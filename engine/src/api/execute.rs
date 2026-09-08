@@ -96,7 +96,30 @@ pub struct OpenPlanView {
     /// Terisi kalau modal user tidak cocok dengan rasio range, sehingga
     /// sebagian perlu ditukar lebih dulu. Kosong berarti tidak perlu.
     pub zap: Option<ZapView>,
+    /// Berapa banyak dari tiap sisi yang akan disetor, sudah berdesimal.
+    ///
+    /// `amount0` dan `amount1` di dalam `plan` adalah satuan terkecil, dan
+    /// angka seperti itu tidak bisa dibaca manusia. Yang ini bisa.
+    pub setor: Option<SetoranView>,
+    /// Proyeksi fee setahun untuk ukuran posisi ini, dalam persen.
+    ///
+    /// Berbeda dari `stats.apr` pada daftar pool, yang memakai modal acuan
+    /// tetap. Yang ini memakai modal yang benar benar akan disetor, sehingga
+    /// pengenceran oleh modal kita sendiri ikut terhitung. Makin besar posisi,
+    /// makin kecil angkanya, dan itu memang kenyataannya.
+    pub apr_estimasi: Option<f64>,
     pub expires_at: String,
+}
+
+/// Jumlah tiap sisi yang akan disetor, dalam satuan yang bisa dibaca.
+#[derive(Debug, Clone, Serialize)]
+pub struct SetoranView {
+    pub simbol_memecoin: String,
+    pub jumlah_memecoin: f64,
+    pub simbol_quote: String,
+    pub jumlah_quote: f64,
+    /// Nilai seluruh setoran dalam token kutipan.
+    pub nilai_quote: f64,
 }
 
 /// Aksi pada posisi yang sudah disusun dan menunggu persetujuan.

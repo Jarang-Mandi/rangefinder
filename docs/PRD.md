@@ -1204,6 +1204,52 @@ ke tiap arah. Gerakan satu persen pada harga adalah gerakan satu persen pada
 market cap, jadi preset dinyatakan sebagai kelipatan terhadap market cap
 sekarang dan tidak ada konversi satuan yang bisa meleset.
 
+### 6.15 Penyesuaian antarmuka setelah dipakai
+
+Perubahan berikut datang dari user setelah memakai panelnya, dan sebagian
+menyimpang dari bagian 3 yang ditulis sebelum apa pun berjalan.
+
+**Garis range tidak digambar ulang selagi digeser.** Menggeser garis memicu
+peristiwa pada setiap gerakan tetikus. Tiap gerakan dikirim ke engine, dibulatkan
+ke grid tick, lalu dikirim balik, dan panel menggambar ulang garis di posisi
+hasil pembulatan itu. Akibatnya garis tersentak ke belakang di bawah kursor yang
+masih bergerak. Sekarang chart yang memegang posisi selama geseran berlangsung,
+dan panel menggambar ulang sekali setelah geserannya berhenti, sehingga
+pembulatan tetap terlihat tapi hanya di akhir.
+
+**Batas range dijepit ke tick yang masih kelipatan spacing.** `MIN_TICK` dan
+`MAX_TICK` belum tentu kelipatan spacing, dan menjepit ke angka itu apa adanya
+menghasilkan tick di luar grid yang ditolak Uniswap. Kekeliruan ini tidak pernah
+muncul selama range yang diminta sempit, dan langsung muncul begitu preset
+range penuh ditambahkan.
+
+**Tick spacing tidak lagi ditampilkan di daftar pool.** Ia menentukan grid
+tempat batas range dibulatkan, tapi akibatnya sudah terlihat langsung sebagai
+selisih harga di kartu Range, dan angkanya sendiri tidak mengubah keputusan
+memilih pool. Yang menggantikannya adalah APR, TVL, dan volume, yang memang
+menentukan pilihan.
+
+**TVL sebuah pool hanya mencakup pita di sekitar harga**, selebar sepuluh persen
+ke tiap arah. Likuiditas yang jauh dari harga tidak menerima fee apa pun, dan
+memasukkannya akan membuat pool tebal terlihat lebih baik daripada yang
+sebenarnya.
+
+**Riwayat notifikasi dihapus dari panel**, menyimpang dari 3.7. Toast di halaman
+gmgn tetap berjalan lewat koneksi content script sendiri, dan itulah jalur yang
+benar benar dipakai. Daftar riwayat di panel jarang dibuka dan hanya menambah
+panjang halaman.
+
+**Endpoint RPC bisa diganti dari panel.** Engine hanya menulis config.toml dan
+mengatakan bahwa ia perlu dijalankan ulang. Menukar endpoint saat engine
+berjalan berarti ada permintaan yang berangkat ke satu RPC dan jawabannya
+ditunggu dari yang lain, dan itu bukan jenis kekeliruan yang layak ditanggung
+demi menghindari satu kali start ulang.
+
+**Keterangan panjang di bawah setiap bagian dipendekkan.** Yang tersisa hanya
+kalimat yang mengubah keputusan user, bukan yang menjelaskan cara kerja bagian
+dalam. Alasan teknisnya tetap ada, tapi tempatnya di komentar kode dan di
+dokumen ini.
+
 ## 7. Technical Specifications
 
 ### 7.1 Arsitektur
@@ -1277,6 +1323,7 @@ Panel ke engine:
 | `execute_action` | tanpa isi. Menyetujui aksi terakhir yang tersimpan di engine | 5 |
 | `approve_hook` | `{ hook }`. Catat persetujuan sadar user atas sebuah hook V4 yang belum lolos kriteria adopsi 5.4. Engine menilai ulang hooknya sendiri sebelum mencatat, karena penilaian yang datang dari panel bisa saja sudah diubah, dan bagian yang paling menarik untuk diubah justru kesimpulan bisa diupgrade atau tidaknya. Hook yang masih bisa diupgrade ditolak di sini juga | 6 |
 | `forget_hook` | `{ hook }`. Cabut persetujuan sebuah hook | 6 |
+| `set_rpc` | `{ http[] }`. Tulis daftar endpoint RPC baru ke config.toml. HANYA menulis: endpoint yang sedang dipakai tidak ditukar saat engine berjalan, karena permintaan yang sudah berangkat ke satu RPC tidak boleh ditunggu jawabannya dari yang lain. Panel diberi tahu bahwa engine perlu dijalankan ulang | 6 |
 | `get_depth` | tanpa isi. Minta distribusi likuiditas pool yang sedang aktif. Terpisah dari `range_view` dengan sengaja: distribusi butuh dua perjalanan ke rantai sedangkan `range_view` dikirim ulang setiap geseran garis, dan menggabungkannya membuat garis terasa berat persis saat digeser | 6 |
 | `scan` | tanpa isi. Pindai pool paling ramai di rantai dan nilai kelayakannya. Mahal, karena engine membaca setiap swap pada jendela terakhir, jadi ia hanya berjalan saat user memintanya. Jawabannya datang belakangan sebagai `scan_results`. Penyaring belum ikut dikirim panel: seluruh penyaringan masih berjalan di engine, lihat 6.13 | 6 |
 
@@ -1285,9 +1332,9 @@ Engine ke panel:
 | Pesan | Isi | Fase |
 | --- | --- | --- |
 | `hello` | `{ engineVersion, protocolVersion }`, dikirim sekali saat tersambung | 1 |
-| `engine_status` | `{ engineVersion, uptimeSecs, chain, wallet, registry, canExecute, blockedReasons[] }` | 1 |
+| `engine_status` | `{ engineVersion, uptimeSecs, chain, wallet, registry, canExecute, blockedReasons[], rpcHttp[] }`. `rpcHttp` sudah tersunting kuncinya oleh `chain::endpoint` saat endpointnya dibuat, bukan saat ditampilkan | 1 |
 | `pong` | balasan denyut | 1 |
-| `open_plan` | rencana lengkap beserta hasil tiap gate, `version` bernilai `v3` atau `v4`, daftar langkah izin yang masih kurang, `zap` kalau modal perlu ditukar lebih dulu, dan kapan rencananya kedaluwarsa. Setiap langkah izin membawa `{ jenis, token, needed, current, label }`, dan bentuknya seragam untuk kedua protokol | 3 |
+| `open_plan` | rencana lengkap beserta hasil tiap gate, `setor` berisi jumlah tiap sisi yang sudah berdesimal beserta nilainya dalam kutipan, `aprEstimasi` memakai modal yang benar benar disetor sehingga pengenceran oleh modal sendiri ikut terhitung, `version` bernilai `v3` atau `v4`, daftar langkah izin yang masih kurang, `zap` kalau modal perlu ditukar lebih dulu, dan kapan rencananya kedaluwarsa. Setiap langkah izin membawa `{ jenis, token, needed, current, label }`, dan bentuknya seragam untuk kedua protokol | 3 |
 | `send_result` | `{ kind, txHash, nonce, gasLimit, status, blockNumber, gasUsed, tokenId, verification, sentAt }`. `kind` bernilai `approve`, `zap`, `open`, atau `action`. `status` bernilai `sukses`, `revert`, atau `menggantung` | 3 |
 | `alert` | `{ level, code, message, positionId }` | 1 |
 | `positions` | `{ positions[], owner, keluarRange, error, dimuatPada }`. Setiap posisi membawa versi protokol, PoolKey, tick, likuiditas, status in range, dan fee yang belum diklaim | 5 |

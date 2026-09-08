@@ -171,6 +171,7 @@ mod tests {
             tick: 0,
             liquidity: liquidity.into(),
             raw_price: 1.0,
+            stats: None,
         }
     }
 

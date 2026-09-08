@@ -360,6 +360,16 @@ export class EngineClient {
   }
 
   /**
+   * Ganti daftar endpoint RPC.
+   *
+   * Engine hanya menulis config.toml. Endpoint yang sedang dipakai tidak
+   * ditukar saat engine berjalan, jadi engine harus dijalankan ulang.
+   */
+  setRpc(http: string[]) {
+    this.send({ type: "set_rpc", http });
+  }
+
+  /**
    * Setujui sebuah hook V4 secara sadar, PRD 5.4.
    *
    * Engine menilai ulang hooknya sendiri sebelum mencatat. Panel tidak pernah

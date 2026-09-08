@@ -199,16 +199,36 @@
   background: var(--surface-raised);
 }
 
-.pool-main {
+.pool-kiri {
   display: flex;
   align-items: center;
   gap: var(--s2);
   min-width: 0;
 }
 
-.pool-meta {
+/* Angka rata kanan, satu kolom per besaran, supaya antar pool bisa
+ * dibandingkan dengan mata tanpa membaca labelnya satu per satu. */
+.pool-angka {
+  display: flex;
+  gap: var(--s3);
+  margin-left: auto;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.pool-angka span {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
   font-size: 11px;
-  white-space: nowrap;
+  color: var(--text);
+}
+
+.pool-angka i {
+  font-style: normal;
+  font-size: 9px;
+  color: var(--text-muted);
 }
 
 .phase-note {
@@ -602,4 +622,104 @@
 .depth-nilai {
   color: var(--text-muted);
   text-align: right;
+}
+
+/* Tombol selebar kartu, dipakai untuk aksi yang menutup sebuah bagian. */
+.lebar {
+  display: block;
+  width: 100%;
+  margin-top: var(--s3);
+  padding: 8px 0;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: var(--r-control);
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
+  color: var(--text-muted);
+}
+
+.lebar:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.preset.aktif {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.chip.warn {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.custom-range {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--s2);
+  margin-top: var(--s3);
+}
+
+.custom-range label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.custom-range input {
+  width: 100%;
+  padding: 6px var(--s2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  border-radius: var(--r-control);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.custom-range .lebar {
+  grid-column: 1 / -1;
+  margin-top: 0;
+}
+
+/* Penyunting endpoint RPC di Settings. */
+.rpc {
+  margin-top: var(--s3);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--border);
+}
+
+.rpc-baris {
+  margin: var(--s1) 0 0;
+  font-size: 10px;
+  color: var(--text-muted);
+  word-break: break-all;
+}
+
+.rpc-input {
+  width: 100%;
+  margin-top: var(--s2);
+  padding: var(--s2);
+  font-family: inherit;
+  font-size: 11px;
+  resize: vertical;
+  border-radius: var(--r-control);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+
+/* Ringkasan setoran di dalam kartu Eksekusi. */
+.setoran {
+  margin-top: var(--s3);
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-control);
+  background: var(--surface-raised);
+}
+
+.setoran .hint {
+  margin-bottom: 0;
 }

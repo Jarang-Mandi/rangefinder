@@ -160,6 +160,15 @@ impl AppState {
             registry: self.registry_summary(),
             can_execute,
             blocked_reasons,
+            // Disunting saat dibuat, bukan saat ditampilkan. Uji struktural di
+            // chain/mod.rs menjaga kunci Alchemy tidak pernah sampai ke sini.
+            rpc_http: self
+                .cfg
+                .rpc
+                .http
+                .iter()
+                .map(|u| crate::chain::endpoint::aman(u))
+                .collect(),
         }
     }
 
@@ -650,16 +659,95 @@ impl AppState {
             }
         }
 
+        let (setor, apr_estimasi) = self.ringkas_setoran(&pool, &plan).await;
+
         Ok(execute::OpenPlanView {
             plan,
             allowances,
             zap: zap.as_ref().map(|(v, _, _)| v.clone()),
+            setor,
+            apr_estimasi,
             version: match pool.version {
                 crate::pools::PoolVersion::V3 => "v3",
                 crate::pools::PoolVersion::V4 => "v4",
             },
             expires_at,
         })
+    }
+
+    /// Ubah jumlah setoran menjadi satuan yang bisa dibaca, lalu proyeksikan
+    /// hasilnya untuk ukuran posisi yang benar benar dipakai.
+    ///
+    /// KENAPA BUKAN MEMAKAI `stats.apr` APA ADANYA
+    /// Angka itu memakai modal acuan tetap. Posisi yang jauh lebih besar akan
+    /// mengencerkan poolnya sendiri, sehingga APR sebenarnya lebih kecil.
+    /// Menampilkan angka modal acuan di sebelah nominal yang berbeda jauh akan
+    /// menjanjikan hasil yang tidak akan pernah tercapai.
+    async fn ringkas_setoran(
+        &self,
+        pool: &crate::pools::PoolInfo,
+        plan: &crate::exec::pipeline::OpenPlan,
+    ) -> (Option<execute::SetoranView>, Option<f64>) {
+        let guard = self.active.read().await;
+        let Some(active) = guard.as_ref() else {
+            return (None, None);
+        };
+        let meta = &active.meta;
+        let Some(kelompok) = active
+            .quotes
+            .iter()
+            .find(|k| k.quote.eq_ignore_ascii_case(&active.selected_quote))
+        else {
+            return (None, None);
+        };
+
+        let quote_adalah_token1 = pool.token0.eq_ignore_ascii_case(&meta.address);
+        let skala_meme = 10f64.powi(meta.decimals as i32);
+        let skala_quote = 10f64.powi(active.quote_decimals as i32);
+
+        let a0: f64 = plan.amount0.to_string().parse().unwrap_or(0.0);
+        let a1: f64 = plan.amount1.to_string().parse().unwrap_or(0.0);
+
+        let (mentah_meme, mentah_quote) = if quote_adalah_token1 {
+            (a0, a1)
+        } else {
+            (a1, a0)
+        };
+
+        let jumlah_memecoin = mentah_meme / skala_meme;
+        let jumlah_quote = mentah_quote / skala_quote;
+
+        let harga = if quote_adalah_token1 {
+            pool.raw_price * skala_meme / skala_quote
+        } else {
+            (1.0 / pool.raw_price) * skala_meme / skala_quote
+        };
+        let nilai_quote = jumlah_quote + jumlah_memecoin * harga;
+
+        // APR memakai modal yang benar benar disetor, bukan modal acuan.
+        // Penyebutnya memuat modal kita sendiri, jadi angkanya tidak pernah
+        // melewati batas yang mungkin dicapai.
+        let apr = pool.stats.as_ref().and_then(|st| {
+            if pool.dynamic_fee || nilai_quote <= 0.0 || st.jendela_menit <= 0.0 {
+                return None;
+            }
+            let fee = pool.fee as f64 / 1_000_000.0;
+            let bagian = nilai_quote / (st.tvl + nilai_quote);
+            let per_jendela = st.volume * fee * bagian / nilai_quote;
+            let periode = 365.0 * 24.0 * 60.0 / st.jendela_menit;
+            Some(per_jendela * periode * 100.0)
+        });
+
+        (
+            Some(execute::SetoranView {
+                simbol_memecoin: meta.symbol.clone(),
+                jumlah_memecoin,
+                simbol_quote: kelompok.quote_symbol.clone(),
+                jumlah_quote,
+                nilai_quote,
+            }),
+            apr,
+        )
     }
 
     /// Hitung zap kalau modal tidak cocok dengan rasio range.
@@ -1280,6 +1368,24 @@ impl AppState {
     /// distribusi kosong. Histogram kosong berarti tidak ada yang menaruh dana
     /// di sekitar harga ini, dan itu justru sinyal yang sangat kuat. Ia tidak
     /// boleh tertukar dengan gagal membaca.
+    /// Tulis daftar endpoint RPC baru ke config.toml.
+    ///
+    /// Tidak menukar endpoint yang sedang dipakai. Panel diberi tahu bahwa
+    /// engine perlu dijalankan ulang, karena mengatakan tersimpan saja akan
+    /// membuat user mengira RPC barunya sudah bekerja padahal belum.
+    pub async fn on_set_rpc(&self, http: Vec<String>) {
+        match crate::config::tulis_rpc(&http) {
+            Ok(path) => self.alert_info(
+                "rpc_saved",
+                format!(
+                    "Endpoint tersimpan di {}. Jalankan ulang engine supaya dipakai.",
+                    path.display()
+                ),
+            ),
+            Err(e) => self.alert_kritis("rpc_failed", e.to_string()),
+        }
+    }
+
     pub async fn on_get_depth(&self) {
         let Some(view) = self.susun_depth().await else {
             return;

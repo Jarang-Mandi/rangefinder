@@ -715,6 +715,7 @@ async fn baca_keadaan<P: Provider>(
                 tick: slot0.tick.as_i32(),
                 liquidity: likuiditas.to_string(),
                 raw_price: super::raw_price_from_sqrt_x96(sqrt),
+                stats: None,
             },
         );
     }
