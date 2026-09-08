@@ -1248,6 +1248,22 @@ garis persis di tempat kursor dilepas, dan hasil pembulatan ke grid tick tetap
 terbaca sebagai angka di kartu Range. Penggambaran ulang hanya berlaku untuk
 perubahan yang bukan dari chart: preset, custom, dan ganti pool.
 
+**Penggambaran garis berantre, satu per satu.** `createShape` mengembalikan
+Promise. Kalau permintaan kedua datang selagi permintaan pertama masih menunggu
+shape pertamanya dibuat, penghapusan miliknya berjalan sebelum id shape itu
+sempat dicatat. Shape yang tidak tercatat tidak pernah dihapus, dan garisnya
+tertinggal di chart. Gejalanya tiga garis: satu batas atas menjadi yatim,
+sehingga ada dua garis berwarna sama. Permintaan yang sudah disusul permintaan
+lain dilewati, karena menggambarnya hanya untuk langsung ditimpa berarti dua
+kali kerja dan satu kedipan.
+
+Shape dibuat dengan `disableSave`, jadi yang terlanjur yatim hilang sendiri
+begitu halaman gmgn dimuat ulang.
+
+**Panel menggambar ke tab gmgn yang sedang aktif.** Kalau user membuka beberapa
+halaman gmgn sekaligus, menggambar di tab yang tidak dilihat terlihat persis
+seperti garisnya tidak pernah muncul.
+
 **Pool tanpa tick terinisialisasi di jendela tetap punya modal.** Likuiditas
 yang sedang aktif membentang dari tick di luar jendela, jadi modalnya nyata dan
 tetap menerima fee. Percobaan sebelumnya berhenti lebih awal saat daftar

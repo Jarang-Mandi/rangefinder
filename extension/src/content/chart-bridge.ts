@@ -137,7 +137,41 @@ function safe<T>(fn: () => T): T | null {
   }
 }
 
-async function drawLines(upperPrice: number, lowerPrice: number) {
+/**
+ * Antrian penggambaran, satu per satu.
+ *
+ * KENAPA HARUS BERANTRE
+ * `createShape` mengembalikan Promise. Kalau permintaan kedua datang selagi
+ * permintaan pertama masih menunggu shape pertamanya dibuat, `clearLines`
+ * miliknya berjalan sebelum id shape itu sempat dicatat. Shape yang tidak
+ * tercatat tidak pernah dihapus, dan garisnya tertinggal di chart selamanya.
+ *
+ * Gejalanya persis seperti yang dilaporkan user: tiga garis, dua di antaranya
+ * berwarna sama, karena satu batas atas menjadi yatim.
+ */
+let antrian: Promise<void> = Promise.resolve();
+
+/** Permintaan terakhir. Yang lebih lama dilewati, karena sudah usang. */
+let permintaanTerakhir = 0;
+
+function drawLines(upperPrice: number, lowerPrice: number) {
+  permintaanTerakhir += 1;
+  const punyaku = permintaanTerakhir;
+  antrian = antrian
+    .then(() => {
+      // Permintaan yang sudah disusul permintaan lain dilewati. Menggambarnya
+      // hanya untuk langsung ditimpa berarti dua kali kerja dan satu kedipan.
+      if (punyaku !== permintaanTerakhir) return;
+      return gambarSekarang(upperPrice, lowerPrice);
+    })
+    .catch(() => {
+      // Chart bisa hilang di tengah jalan saat user berpindah halaman.
+      // Antriannya tidak boleh ikut mati karena itu.
+    });
+  return antrian;
+}
+
+async function gambarSekarang(upperPrice: number, lowerPrice: number) {
   if (!api) return;
   const chart = api.activeChart();
   clearLines();

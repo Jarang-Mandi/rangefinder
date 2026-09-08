@@ -394,7 +394,12 @@ export function App() {
     if (tabId === null) {
       try {
         const tabs = await chrome.tabs.query({ url: "https://gmgn.ai/*" });
-        const ketemu = tabs.find((t) => typeof t.id === "number");
+        // Tab yang sedang aktif didahulukan. Kalau user membuka beberapa
+        // halaman gmgn sekaligus, menggambar di tab yang tidak dilihat akan
+        // terlihat seperti garisnya tidak pernah muncul.
+        const ketemu =
+          tabs.find((t) => t.active && typeof t.id === "number") ??
+          tabs.find((t) => typeof t.id === "number");
         if (ketemu?.id !== undefined) {
           tabId = ketemu.id;
           gmgnTabRef.current = tabId;
