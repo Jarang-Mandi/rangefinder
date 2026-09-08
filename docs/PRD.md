@@ -1248,10 +1248,16 @@ garis persis di tempat kursor dilepas, dan hasil pembulatan ke grid tick tetap
 terbaca sebagai angka di kartu Range. Penggambaran ulang hanya berlaku untuk
 perubahan yang bukan dari chart: preset, custom, dan ganti pool.
 
-**Setoran diisi per sisi, bukan sebagai nominal dolar.** Rasio antara kedua sisi
-ditentukan range dan bukan oleh user, jadi mengisi satu sisi sudah menentukan
-sisi yang lain. Yang diketik user hanya dipakai menaksir nominal, dan angka yang
-muncul setelah rencana tersusun datang dari engine.
+**Setoran memakai dua kotak yang selalu terlihat**, mengikuti tata letak acuan
+MMT Finance: nama token, jumlah, nilainya dalam USD, dan saldo wallet, lalu satu
+tombol besar yang labelnya menyatakan keadaan, lalu baris estimasi APR. Rasio
+antara kedua sisi ditentukan range dan bukan oleh user, jadi mengisi satu kotak
+sudah menentukan isi kotak yang lain, dan engine yang menghitungnya.
+
+Saldo wallet ikut di `token_state`. `None` berarti wallet belum dibuka, bukan
+saldo nol: yang pertama menuntun ke membuka wallet, yang kedua ke membeli
+tokennya dulu. Saat user berpindah pasangan, saldo menyusul lewat kiriman kedua
+supaya perpindahan yang seharusnya seketika tidak menyentuh jaringan.
 
 **Riwayat notifikasi dihapus dari panel**, menyimpang dari 3.7. Toast di halaman
 gmgn tetap berjalan lewat koneksi content script sendiri, dan itulah jalur yang
@@ -1364,7 +1370,7 @@ Engine ke panel:
 | `scan_results` | `{ rows[], hooks[], jendelaPindaiMenit, jendelaVolumeMenit, volumeJendelaPendek, modalAcuan, totalSwap, dipindaiPada, error }`. Setiap baris membawa simbol, pasangan beserta penanda apakah alamat kutipannya dikenal, market cap, volume, modal yang dibutuhkan, hasil fee sepanjang jendela, proyeksi APR, rasio efisiensi, umur, daftar risiko, satu label aksi, dan alasannya. Jendela ikut di dalam pesan, tidak disimpulkan panel: angka hasil dan proyeksi keduanya bergantung padanya, dan jendelanya bisa menyempit sendiri kalau RPC menolak. `hooks[]` memuat penilaian adopsi 5.4 untuk setiap hook yang muncul di hasil, supaya baris yang ditolak bisa menjelaskan diri sendiri | 6 |
 | `signals` | `{ address, barTerpakai, harga, sideways, basis, saran, konsentrasiDibandingLebar, dihitungPada }`. `sideways` dan `basis` kosong berarti datanya belum cukup, BUKAN berarti kondisinya tidak menarik | 6 |
 | `action_plan` | `{ tokenId, action, nama, gates[], gasEstimate, dryRun, menutup, siap, expiresAt, fee0, fee1 }`. Simulasi ditampilkan sebelum tombol konfirmasi aktif, sesuai 3.5 | 5 |
-| `token_state` | `{ address, meta, quotes[], pools[], selectedQuote, selectedPoolId, error }`. Setiap `quote` membawa `{ quote, quoteSymbol, quoteDecimals, canonical, pools[] }`. Dikirim dua kali saat memuat: sekali cepat dari kunci pool yang tersimpan, sekali lagi setelah pemindaian selesai kalau ada yang berubah. Lihat 4.3c | 2 |
+| `token_state` | `{ address, meta, quotes[], pools[], selectedQuote, selectedPoolId, saldo, error }`. `saldo` memuat saldo wallet untuk kedua sisi pasangan terpilih beserta saldo token gas, dan bernilai kosong kalau wallet belum dibuka, yang berbeda dari saldo nol. Setiap pool membawa `stats` berisi volume, TVL, dan proyeksi APR kalau sudah terukur. Setiap `quote` membawa `{ quote, quoteSymbol, quoteDecimals, canonical, pools[] }`. Dikirim dua kali saat memuat: sekali cepat dari kunci pool yang tersimpan, sekali lagi setelah pemindaian selesai kalau ada yang berubah. Lihat 4.3c | 2 |
 | `range_view` | `{ poolId, tickSpacing, ethUsd, current, lower, upper, widthPct, inRange, warnings[] }`. Tiap batas memuat `tick`, `priceWeth`, `priceUsd`, `mcapUsd`, dan `driftBps`, yaitu selisih akibat pembulatan ke grid tick | 2 |
 | `price_tick` | `{ address, priceUsd, priceWeth, mcapUsd }` | 2 |
 | `range_quote` | `{ quoteId, feeApr, expectedHoursInRange, ilBreakevenHours, crowdedLiquidityUsd, ourSharePct, amount0, amount1, swapNeeded, priceImpact, gasEstimate, warnings[] }` | 3 |

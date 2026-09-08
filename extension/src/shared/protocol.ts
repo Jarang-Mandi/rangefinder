@@ -140,6 +140,12 @@ export interface QuoteGroup {
   pools: PoolInfo[];
 }
 
+export interface SaldoPasangan {
+  memecoin: number;
+  quote: number;
+  gas: number;
+}
+
 export interface TokenState {
   address: string;
   meta: TokenMeta | null;
@@ -156,6 +162,13 @@ export interface TokenState {
   selected_quote: string | null;
   selected_pool_id: string | null;
   error: string | null;
+  /**
+   * Saldo wallet untuk kedua sisi pasangan terpilih.
+   *
+   * Null berarti wallet belum dibuka, bukan saldo nol. Yang pertama
+   * menuntun ke membuka wallet, yang kedua ke membeli tokennya dulu.
+   */
+  saldo?: SaldoPasangan | null;
 }
 
 /** Satu batas range, dalam tiga satuan sekaligus. */

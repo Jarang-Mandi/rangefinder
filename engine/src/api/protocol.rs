@@ -253,7 +253,22 @@ pub struct TokenState {
     pub selected_quote: Option<String>,
     /// Pool peringkat teratas, dipilih otomatis supaya panel punya titik awal.
     pub selected_pool_id: Option<String>,
+    /// Saldo wallet untuk kedua sisi pasangan terpilih.
+    ///
+    /// `None` berarti wallet belum dibuka, bukan berarti saldonya nol. Nol
+    /// berarti user memang tidak punya token itu, dan keduanya menuntun ke
+    /// tindakan yang berbeda: yang satu membuka wallet, yang lain membeli dulu.
+    pub saldo: Option<SaldoPasangan>,
     pub error: Option<String>,
+}
+
+/// Saldo wallet untuk kedua sisi sebuah pasangan, sudah berdesimal.
+#[derive(Debug, Clone, Serialize)]
+pub struct SaldoPasangan {
+    pub memecoin: f64,
+    pub quote: f64,
+    /// Saldo token gas, dipakai memeriksa apakah biaya transaksi tertutup.
+    pub gas: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]

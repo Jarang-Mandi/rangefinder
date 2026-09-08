@@ -602,6 +602,7 @@ function RangeTab({
         />
         <ExecuteCard
           view={rangeView}
+          token={token}
           plan={openPlan}
           result={sendResult}
           busy={execBusy}
@@ -1802,22 +1803,28 @@ function porsiDalamRange(p: Posisi): number {
  * hanya menampilkan dan meneruskan tekanan tombol.
  */
 /**
- * Setoran dua sisi beserta proyeksi hasilnya.
+ * Setoran dua sisi, mengikuti tata letak acuan MMT Finance.
  *
- * KENAPA KEDUA SISI TIDAK BISA DIPILIH BEBAS
+ * Dua kotak yang selalu terlihat, masing masing dengan nama token, nilainya
+ * dalam USD, dan saldo wallet. Di bawahnya satu tombol besar yang labelnya
+ * menyatakan keadaan, lalu baris estimasi APR.
+ *
+ * KENAPA MENGISI SATU KOTAK MENGISI YANG LAIN
  * Rasio antara kedua sisi ditentukan range, bukan oleh user. Range yang
  * seluruhnya di bawah harga hanya menerima kutipan, yang seluruhnya di atas
  * hanya menerima memecoin, dan yang mengapit harga menerima keduanya menurut
- * perbandingan yang sudah tertentu. Karena itu mengisi satu sisi menentukan
- * sisi yang lain, dan engine yang menghitungnya.
+ * perbandingan yang sudah tertentu. Engine yang menghitungnya, dan angka yang
+ * muncul setelah rencana tersusun adalah angka yang benar.
  *
- * Yang diketik user hanya dipakai untuk menaksir nominal. Angka yang muncul
- * setelah rencana tersusun datang dari engine, dan itulah yang benar.
+ * KENAPA SALDO DITAMPILKAN
+ * Rencana yang tidak mungkin dijalankan lebih baik ketahuan sebelum gate
+ * berjalan. Saldo yang tidak terbaca ditulis sebagai garis, bukan nol, karena
+ * wallet yang belum dibuka bukan wallet yang kosong.
  */
 function SetoranCard({
   plan,
   view,
-  size,
+  token,
   setSize,
   busy,
   canExecute,
@@ -1825,102 +1832,178 @@ function SetoranCard({
 }: {
   plan: OpenPlanView | null;
   view: RangeView | null;
-  size: string;
+  token: TokenState | null;
   setSize: (v: string) => void;
   busy: boolean;
   canExecute: boolean;
   onQuote: (sizeUsd: number) => void;
 }) {
   const setor = plan?.setor ?? null;
+  const saldo = token?.saldo ?? null;
 
-  // Harga kedua sisi dalam USD. `eth_usd` adalah harga satu token kutipan,
-  // berlaku untuk kutipan apa pun, bukan khusus ETH.
+  const simbolMeme = setor?.simbol_memecoin ?? token?.meta?.symbol ?? "token";
+  const kelompok = token?.quotes?.find(
+    (q) => q.quote.toLowerCase() === (token?.selected_quote ?? "").toLowerCase(),
+  );
+  const simbolQuote = setor?.simbol_quote ?? kelompok?.quote_symbol ?? "kutipan";
+
+  // `eth_usd` adalah harga satu token kutipan, berlaku untuk kutipan apa pun.
   const hargaMeme = view?.current.price_usd ?? 0;
   const hargaQuote = view?.eth_usd ?? 0;
 
-  const [sisi, setSisi] = useState<"meme" | "quote">("quote");
-  const [jumlah, setJumlah] = useState("");
+  const [isiMeme, setIsiMeme] = useState("");
+  const [isiQuote, setIsiQuote] = useState("");
+  const [zap, setZap] = useState(true);
+  const [sisiAktif, setSisiAktif] = useState<"meme" | "quote">("quote");
 
-  const terapkan = () => {
-    const n = Number(jumlah);
-    if (!Number.isFinite(n) || n <= 0) return;
+  // Kotak diisi ulang dari rencana begitu ia datang, karena angka engine yang
+  // benar, bukan yang diketik. Sisi yang sedang disunting tidak ditimpa.
+  const jm = setor?.jumlah_memecoin;
+  const jq = setor?.jumlah_quote;
+  useEffect(() => {
+    if (jm === undefined || jq === undefined) return;
+    if (sisiAktif !== "meme") setIsiMeme(String(jm));
+    if (sisiAktif !== "quote") setIsiQuote(String(jq));
+  }, [jm, jq]);
+
+  const susun = (sisi: "meme" | "quote") => {
+    const teks = sisi === "meme" ? isiMeme : isiQuote;
     const harga = sisi === "meme" ? hargaMeme : hargaQuote;
-    if (harga <= 0) return;
+    const n = Number(teks);
+    if (!Number.isFinite(n) || n <= 0 || harga <= 0) return;
     const usd = n * harga;
     setSize(String(usd));
     onQuote(usd);
   };
 
-  const nominal = Number(size);
-  const bisa = Number.isFinite(Number(jumlah)) && Number(jumlah) > 0 && !busy && canExecute;
+  const cukup =
+    saldo === null ||
+    setor === null ||
+    (saldo.memecoin >= setor.jumlah_memecoin && saldo.quote >= setor.jumlah_quote);
+
+  const adaIsi = Number(isiMeme) > 0 || Number(isiQuote) > 0;
+  const label = !canExecute
+    ? "Engine belum siap"
+    : busy
+      ? "Menyusun"
+      : !adaIsi
+        ? "Isi jumlahnya"
+        : !cukup
+          ? "Saldo kurang"
+          : "Susun rencana";
 
   return (
     <div class="setoran">
-      <div class="setor-sisi">
-        <button
-          class={`preset${sisi === "meme" ? " aktif" : ""}`}
-          onClick={() => setSisi("meme")}
-        >
-          {setor?.simbol_memecoin ?? "token"}
-        </button>
-        <button
-          class={`preset${sisi === "quote" ? " aktif" : ""}`}
-          onClick={() => setSisi("quote")}
-        >
-          {setor?.simbol_quote ?? "kutipan"}
-        </button>
+      <div class="section-title">
+        <h3>Set deposit amounts</h3>
+        <label class="zap-toggle">
+          <input
+            type="checkbox"
+            checked={zap}
+            onChange={(e) => setZap((e.target as HTMLInputElement).checked)}
+          />
+          <span>Zap in</span>
+        </label>
       </div>
 
-      <div class="row" style="margin-top: var(--s2); gap: var(--s2)">
-        <input
-          type="number"
-          min="0"
-          step="any"
-          placeholder={`Jumlah ${sisi === "meme" ? setor?.simbol_memecoin ?? "token" : setor?.simbol_quote ?? "kutipan"}`}
-          value={jumlah}
-          onInput={(e) => setJumlah((e.target as HTMLInputElement).value)}
-        />
-        <button type="button" disabled={!bisa} onClick={terapkan}>
-          Susun rencana
-        </button>
+      <KotakSetor
+        simbol={simbolMeme}
+        nilai={isiMeme}
+        usd={Number(isiMeme) * hargaMeme}
+        saldo={saldo ? saldo.memecoin : null}
+        onInput={(v) => {
+          setSisiAktif("meme");
+          setIsiMeme(v);
+        }}
+        onSelesai={() => susun("meme")}
+      />
+
+      <KotakSetor
+        simbol={simbolQuote}
+        nilai={isiQuote}
+        usd={Number(isiQuote) * hargaQuote}
+        saldo={saldo ? saldo.quote : null}
+        onInput={(v) => {
+          setSisiAktif("quote");
+          setIsiQuote(v);
+        }}
+        onSelesai={() => susun("quote")}
+      />
+
+      <button
+        class="lebar utama"
+        disabled={!canExecute || busy || !adaIsi}
+        onClick={() => susun(sisiAktif)}
+      >
+        {label}
+      </button>
+
+      <div class="row" style="margin-top: var(--s2)">
+        <span class="label">Estimasi APR</span>
+        <span class="value num">
+          {plan?.apr_estimasi == null
+            ? "-"
+            : Math.round(plan.apr_estimasi).toLocaleString("id-ID") + "%"}
+        </span>
       </div>
 
-      {setor ? (
-        <div class="stack" style="margin-top: var(--s3)">
-          <div class="row">
-            <span class="label">{setor.simbol_memecoin}</span>
-            <span class="value num">{formatCompact(setor.jumlah_memecoin)}</span>
-          </div>
-          <div class="row">
-            <span class="label">{setor.simbol_quote}</span>
-            <span class="value num">{formatCompact(setor.jumlah_quote)}</span>
-          </div>
-          <div class="row">
-            <span class="label">Nilai setoran</span>
-            <span class="value num">
-              {formatCompact(setor.nilai_quote)} {setor.simbol_quote}
-            </span>
-          </div>
-          <div class="row">
-            <span class="label">Estimasi APR</span>
-            <span class="value num">
-              {plan?.apr_estimasi == null
-                ? "-"
-                : `${Math.round(plan.apr_estimasi).toLocaleString("id-ID")}%`}
-            </span>
-          </div>
-          {plan?.zap ? (
-            <p class="hint">Perlu zap dulu supaya modal tidak menganggur.</p>
-          ) : null}
-        </div>
-      ) : Number.isFinite(nominal) && nominal > 0 ? (
-        <p class="hint">Menyusun rencana untuk {formatUsd(nominal)}.</p>
+      {plan?.zap && !zap ? (
+        <p class="warn-line">
+          Tanpa zap, sebagian modal menganggur tanpa menghasilkan fee.
+        </p>
       ) : null}
+
+      {saldo === null ? <p class="hint">Buka wallet untuk melihat saldo.</p> : null}
+    </div>
+  );
+}
+
+/** Satu kotak jumlah: nama token, angka besar, nilai USD, dan saldo. */
+function KotakSetor({
+  simbol,
+  nilai,
+  usd,
+  saldo,
+  onInput,
+  onSelesai,
+}: {
+  simbol: string;
+  nilai: string;
+  usd: number;
+  saldo: number | null;
+  onInput: (v: string) => void;
+  onSelesai: () => void;
+}) {
+  return (
+    <div class="kotak-setor">
+      <div class="kotak-atas">
+        <span class="kotak-nama">{simbol}</span>
+        <span class="kotak-saldo num">
+          {saldo === null ? "saldo -" : "saldo " + formatCompact(saldo)}
+        </span>
+      </div>
+      <input
+        class="kotak-input num"
+        type="number"
+        min="0"
+        step="any"
+        placeholder="0"
+        value={nilai}
+        onInput={(e) => onInput((e.target as HTMLInputElement).value)}
+        onBlur={onSelesai}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") onSelesai();
+        }}
+      />
+      <span class="kotak-usd num">
+        {Number.isFinite(usd) && usd > 0 ? formatUsd(usd) : "$0"}
+      </span>
     </div>
   );
 }
 function ExecuteCard({
   view,
+  token,
   plan,
   result,
   busy,
@@ -1932,6 +2015,7 @@ function ExecuteCard({
   onOpen,
 }: {
   view: RangeView | null;
+  token: TokenState | null;
   plan: OpenPlanView | null;
   result: SendResultView | null;
   busy: boolean;
@@ -1942,7 +2026,9 @@ function ExecuteCard({
   onZap: () => void;
   onOpen: () => void;
 }) {
-  const [size, setSize] = useState("");
+  // Nominal terakhir yang dikirim, disimpan supaya kartu setoran bisa
+  // menyebutkannya kembali tanpa menghitung ulang dari kedua kotak.
+  const [, setSize] = useState("");
 
   // Engine sudah menyaring: daftar ini hanya berisi langkah yang memang
   // masih kurang. Panel tidak menyaring ulang, karena dua tempat yang
@@ -1982,7 +2068,7 @@ function ExecuteCard({
       <SetoranCard
         plan={plan}
         view={view}
-        size={size}
+        token={token}
         setSize={setSize}
         busy={busy}
         canExecute={canExecute}

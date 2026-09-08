@@ -728,3 +728,84 @@
   display: flex;
   gap: var(--s1);
 }
+
+/* Kotak setoran, mengikuti bentuk acuan: nama token dan saldo di atas, angka
+ * besar di tengah, nilai USD di bawah. */
+.kotak-setor {
+  margin-top: var(--s2);
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-control);
+  background: var(--surface);
+}
+
+.kotak-atas {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  font-size: 11px;
+}
+
+.kotak-nama {
+  font-weight: 700;
+  color: var(--text);
+}
+
+.kotak-saldo {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.kotak-input {
+  width: 100%;
+  margin-top: 2px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text);
+  font-size: 20px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.kotak-input:focus {
+  outline: none;
+}
+
+.kotak-usd {
+  display: block;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.zap-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.zap-toggle input {
+  width: auto;
+  margin: 0;
+}
+
+/* Tombol utama: satu aksi yang jelas di bawah kedua kotak, seperti acuan. */
+.lebar.utama {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0f1115;
+}
+
+.lebar.utama:disabled {
+  background: var(--surface-raised);
+  border-color: var(--border);
+  color: var(--text-muted);
+}
+
+.setoran h3 {
+  margin: 0;
+  font-size: 13px;
+}

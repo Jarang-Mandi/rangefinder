@@ -16,6 +16,7 @@ sol! {
         function totalSupply() external view returns (uint256);
         function symbol() external view returns (string);
         function name() external view returns (string);
+        function balanceOf(address account) external view returns (uint256);
     }
 }
 

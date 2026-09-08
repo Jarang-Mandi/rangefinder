@@ -186,6 +186,40 @@ pub fn raw_price_from_sqrt_x96(sqrt_price_x96: U256) -> f64 {
 ///
 /// Simbol boleh gagal. Banyak memecoin memakai `bytes32` alih alih `string`,
 /// dan itu bukan alasan untuk menolak tokennya.
+/// Baca saldo dua token sekaligus untuk satu pemilik.
+///
+/// Satu batch, karena dua permintaan berurutan ke RPC publik dua kali lebih
+/// lambat tanpa alasan. Saldo yang tidak terbaca dikembalikan sebagai `None`,
+/// bukan nol: nol berarti user memang tidak punya token itu, dan itu kesimpulan
+/// yang berbeda dari tidak bisa membaca.
+pub async fn saldo_dua<P: Provider>(
+    provider: &P,
+    registry: &Registry,
+    pemilik: Address,
+    a: Address,
+    b: Address,
+) -> (Option<U256>, Option<U256>) {
+    let Ok(multicall) = registry.contract("common", "multicall3") else {
+        return (None, None);
+    };
+
+    let calls = vec![
+        crate::chain::multicall::encode(a, &abi::IERC20::balanceOfCall { account: pemilik }),
+        crate::chain::multicall::encode(b, &abi::IERC20::balanceOfCall { account: pemilik }),
+    ];
+
+    let Ok(hasil) = crate::chain::multicall::batch_call(provider, multicall, calls).await else {
+        return (None, None);
+    };
+
+    let baca = |i: usize| {
+        crate::chain::multicall::decode::<abi::IERC20::balanceOfCall>(
+            hasil.get(i).and_then(|x| x.as_ref()),
+        )
+    };
+    (baca(0), baca(1))
+}
+
 pub async fn token_meta_batch<P: Provider>(
     provider: &P,
     registry: &Registry,

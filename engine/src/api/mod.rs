@@ -233,6 +233,7 @@ impl AppState {
             pools: Vec::new(),
             selected_quote: None,
             selected_pool_id: None,
+            saldo: None,
             error: None,
         };
 
@@ -312,6 +313,10 @@ impl AppState {
                 "token berpasangan dengan lebih dari satu kutipan"
             );
         }
+
+        out.saldo = self
+            .baca_saldo(&provider, &out.meta, &terpilih)
+            .await;
 
         // Simpan sebagai token aktif supaya laporan harga dari chart yang
         // datang berikutnya punya konteks untuk dikalibrasi.
@@ -410,6 +415,10 @@ impl AppState {
                 pools: active.pools.clone(),
                 selected_quote: Some(active.selected_quote.clone()),
                 selected_pool_id: Some(active.selected_pool_id.clone()),
+                // Saldo menyusul lewat kiriman kedua. Membacanya di sini
+                // berarti berpindah pasangan menyentuh jaringan, dan itu
+                // membuat perpindahan yang seharusnya seketika terasa berat.
+                saldo: None,
                 error: None,
             }
         };
@@ -418,6 +427,54 @@ impl AppState {
             .events
             .send(protocol::ServerMessage::TokenState(Box::new(keadaan)));
         self.broadcast_range_view().await;
+        self.kirim_saldo_menyusul().await;
+    }
+
+    /// Baca saldo pasangan yang sedang aktif, lalu kirim ulang keadaan token.
+    ///
+    /// Dijalankan di tugas terpisah supaya perpindahan pasangan tetap terasa
+    /// seketika. Kegagalannya tidak mengubah apa pun: panel tetap menampilkan
+    /// keadaan yang sudah diterima, hanya tanpa saldo.
+    async fn kirim_saldo_menyusul(&self) {
+        let s = self.clone();
+        tokio::spawn(async move {
+            let Ok(provider) = s.chain.provider().await else {
+                return;
+            };
+
+            let (meta, kelompok) = {
+                let guard = s.active.read().await;
+                let Some(active) = guard.as_ref() else { return };
+                let Some(k) = active
+                    .quotes
+                    .iter()
+                    .find(|g| g.quote.eq_ignore_ascii_case(&active.selected_quote))
+                    .cloned()
+                else {
+                    return;
+                };
+                (Some(active.meta.clone()), k)
+            };
+
+            let Some(saldo) = s.baca_saldo(&provider, &meta, &kelompok).await else {
+                return;
+            };
+
+            let guard = s.active.read().await;
+            let Some(active) = guard.as_ref() else { return };
+            let _ = s.events.send(protocol::ServerMessage::TokenState(Box::new(
+                protocol::TokenState {
+                    address: active.meta.address.clone(),
+                    meta: Some(active.meta.clone()),
+                    quotes: active.quotes.clone(),
+                    pools: active.pools.clone(),
+                    selected_quote: Some(active.selected_quote.clone()),
+                    selected_pool_id: Some(active.selected_pool_id.clone()),
+                    saldo: Some(saldo),
+                    error: None,
+                },
+            )));
+        });
     }
 
     /// Susun rencana membuka posisi, jalankan seluruh gate, TIDAK mengirim.
@@ -1976,6 +2033,48 @@ impl AppState {
     /// diubah menjadi market cap supaya sisa alurnya sama persis dengan range
     /// biasa. Tidak ada jalur eksekusi terpisah untuk range penuh, dan itu
     /// disengaja: jalur yang jarang dipakai adalah jalur yang jarang teruji.
+    /// Baca saldo kedua sisi pasangan untuk wallet yang sedang dibuka.
+    ///
+    /// Mengembalikan `None` kalau wallet belum dibuka. Itu berbeda dari saldo
+    /// nol: yang pertama berarti panel harus menyuruh membuka wallet, yang
+    /// kedua berarti user memang belum punya tokennya.
+    async fn baca_saldo<P: alloy::providers::Provider>(
+        &self,
+        provider: &P,
+        meta: &Option<crate::pools::TokenMeta>,
+        kelompok: &crate::pools::QuoteGroup,
+    ) -> Option<protocol::SaldoPasangan> {
+        use alloy::primitives::Address;
+
+        let pemilik = self.wallet.lock().await.address()?;
+        let meta = meta.as_ref()?;
+
+        let (Ok(a), Ok(b)) = (
+            meta.address.parse::<Address>(),
+            kelompok.quote.parse::<Address>(),
+        ) else {
+            return None;
+        };
+
+        let (sa, sb) = crate::pools::saldo_dua(provider, &self.registry, pemilik, a, b).await;
+
+        // Saldo gas dibaca terpisah karena ia bukan ERC20. Kegagalannya tidak
+        // menggagalkan yang lain: user yang punya token tapi tidak punya gas
+        // tetap perlu melihat tokennya.
+        let gas = provider
+            .get_balance(pemilik)
+            .await
+            .ok()
+            .map(|v| f64::from(v) / 1e18)
+            .unwrap_or(0.0);
+
+        Some(protocol::SaldoPasangan {
+            memecoin: sa.map(|v| f64::from(v) / 10f64.powi(meta.decimals as i32))?,
+            quote: sb.map(|v| f64::from(v) / 10f64.powi(kelompok.quote_decimals as i32))?,
+            gas,
+        })
+    }
+
     pub async fn on_set_full_range(&self) {
         let batas = {
             let guard = self.active.read().await;
