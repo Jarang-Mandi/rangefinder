@@ -126,6 +126,14 @@ async fn session(socket: WebSocket, state: AppState) {
                                 let s = state.clone();
                                 tokio::spawn(async move { s.on_scan().await });
                             }
+                            Ok(ClientMessage::ApproveHook { hook }) => {
+                                let s = state.clone();
+                                tokio::spawn(async move { s.on_approve_hook(hook).await });
+                            }
+                            Ok(ClientMessage::ForgetHook { hook }) => {
+                                let s = state.clone();
+                                tokio::spawn(async move { s.on_forget_hook(hook).await });
+                            }
                             Ok(ClientMessage::GetNotifications) => {
                                 let s = state.clone();
                                 tokio::spawn(async move { s.on_get_notifications().await });

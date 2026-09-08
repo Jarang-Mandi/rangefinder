@@ -311,6 +311,16 @@ cargo xtask zap <token> [nominal]   jalankan penyelesai zap terhadap pool sunggu
 cargo xtask positions <wallet>     muat posisi LP sebuah wallet dari rantai
 cargo xtask optimizer <token>      peringkatkan pool token itu menurut hasil per modal
 cargo xtask scan                   pindai pool paling ramai dan nilai kelayakannya
+```
+
+`cargo xtask scan` juga mencetak penilaian setiap hook yang muncul, sesuai
+kriteria adopsi PRD 5.4. Sejarah rantai dipindai bertahap dan disimpan di store
+yang sama dengan engine, sekitar sepuluh detik per pemanggilan, jadi jumlah pool
+dan umur hook akan mengendap setelah dijalankan belasan kali. Selama belum
+selesai, kedua angka itu adalah batas bawah, dan kriterianya tertulis
+`belum diukur` alih alih `tidak`.
+
+```text
 cargo test                seluruh uji unit engine
 cargo clippy --all-targets
 ```

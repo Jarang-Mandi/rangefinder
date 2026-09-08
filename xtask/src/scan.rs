@@ -15,6 +15,8 @@ use rangefinder_engine::chain::ChainClient;
 use rangefinder_engine::config::Config;
 use rangefinder_engine::pools::kandidat::{self, Label};
 use rangefinder_engine::pools::scan;
+use rangefinder_engine::risk::hook::{self, Kriteria};
+use rangefinder_engine::store::Store;
 
 /// Angka besar dalam bentuk yang bisa dibaca sekilas.
 ///
@@ -91,9 +93,9 @@ pub async fn run(repo_root: &Path) -> Result<bool> {
         return Ok(true);
     }
 
-    // Allowlist kosong: belum ada hook yang lolos kriteria adopsi PRD 5.4.
-    // Kosong berarti setiap pool berhook ditandai `Hindari`, dan itu memang
-    // sikap bawaan yang benar.
+    // Allowlist kosong di sini dengan sengaja, supaya perintah ini selalu
+    // menampilkan penilaian hook apa adanya, tanpa dipengaruhi persetujuan yang
+    // sudah tercatat di store. Engine sendiri membaca persetujuan itu.
     let jam = std::time::Instant::now();
     let daftar = kandidat::perkaya(&provider, &registry, &hasil, &[]).await?;
     let baris = &daftar.baris;
@@ -188,6 +190,72 @@ pub async fn run(repo_root: &Path) -> Result<bool> {
             },
             b.alasan
         );
+    }
+
+    // PENILAIAN HOOK, PRD 5.4
+    //
+    // Dicetak di sini supaya kriteria adopsinya benar benar diuji terhadap
+    // rantai, bukan hanya terhadap angka buatan di uji satuan.
+    let alamat_hook: std::collections::BTreeSet<String> =
+        baris.iter().filter_map(|b| b.hooks.clone()).collect();
+
+    if !alamat_hook.is_empty() {
+        println!();
+        let jam = std::time::Instant::now();
+        let adopsi = {
+            // Store yang sama dengan engine, supaya peta adopsi menumpuk antar
+            // pemanggilan alih alih dibayar ulang setiap kali. Sejarah penuh
+            // butuh puluhan potongan, dan satu jalan hanya membaca sebagian.
+            let store = Store::open(&rangefinder_engine::config::data_dir()?)?;
+            hook::hitung_adopsi(&provider, &registry, Some(&store), hasil.sampai_blok).await?
+        };
+        println!(
+            "  Penilaian hook, {} hook berbeda terlihat pada blok {} sampai {}{}, dihitung dalam {} ms",
+            adopsi.peta.len(),
+            adopsi.dari_blok,
+            adopsi.sampai_blok,
+            if adopsi.lengkap {
+                ""
+            } else {
+                ", sejarahnya belum selesai dipindai"
+            },
+            jam.elapsed().as_millis()
+        );
+        let tanda = |k: Kriteria| match k {
+            Kriteria::Lolos => "lolos",
+            Kriteria::Gagal => "tidak",
+            Kriteria::BelumTerukur => "belum diukur",
+        };
+        for h in &alamat_hook {
+            match hook::nilai(&provider, &registry, &adopsi, h, hasil.sampai_blok).await {
+                Ok(p) => {
+                    println!(
+                        "  {}  {} pool, umur {}",
+                        &h[..10.min(h.len())],
+                        p.jumlah_pool
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|| "?".into()),
+                        p.umur_hari
+                            .map(|d| format!("{d:.0} hari"))
+                            .unwrap_or_else(|| "?".into()),
+                    );
+                    println!(
+                        "    pool {}, umur {}, tidak bisa diupgrade {}, TVL {}, LP unik {}",
+                        tanda(p.kriteria_pool),
+                        tanda(p.kriteria_umur),
+                        tanda(p.kriteria_upgrade),
+                        tanda(p.kriteria_tvl),
+                        tanda(p.kriteria_lp),
+                    );
+                    println!(
+                        "    lolos otomatis {}, bisa disetujui user {}",
+                        p.lolos_otomatis,
+                        p.boleh_disetujui_manual(),
+                    );
+                }
+                Err(e) => println!("  {h}  gagal dinilai: {e}"),
+            }
+        }
     }
 
     let bisa_dibuka = baris.iter().filter(|b| b.label.boleh_dibuka()).count();

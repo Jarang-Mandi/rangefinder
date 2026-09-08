@@ -341,6 +341,20 @@ export class EngineClient {
     this.send({ type: "scan" });
   }
 
+  /**
+   * Setujui sebuah hook V4 secara sadar, PRD 5.4.
+   *
+   * Engine menilai ulang hooknya sendiri sebelum mencatat. Panel tidak pernah
+   * mengirim kesimpulan penilaian, hanya alamat hooknya.
+   */
+  approveHook(hook: string) {
+    this.send({ type: "approve_hook", hook });
+  }
+
+  forgetHook(hook: string) {
+    this.send({ type: "forget_hook", hook });
+  }
+
   /** Jalankan swap zap dari rencana terakhir. */
   swapZap() {
     this.send({ type: "swap_zap" });

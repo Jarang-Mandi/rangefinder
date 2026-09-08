@@ -19,6 +19,7 @@ pub mod pnl;
 pub mod pools;
 pub mod positions;
 pub mod range;
+pub mod risk;
 pub mod signals;
 pub mod store;
 pub mod telemetry;

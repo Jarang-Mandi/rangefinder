@@ -81,6 +81,16 @@ pub enum ClientMessage {
     /// Minta riwayat notifikasi terakhir.
     GetNotifications,
 
+    /// Setujui sebuah hook V4 secara sadar, PRD 5.4.
+    ///
+    /// Dipakai untuk hook yang belum lolos kriteria adopsi. Engine memeriksa
+    /// ulang penilaiannya sendiri sebelum mencatat: hook yang masih bisa
+    /// diupgrade ditolak di sini juga, bukan hanya di panel.
+    ApproveHook { hook: String },
+
+    /// Cabut persetujuan sebuah hook.
+    ForgetHook { hook: String },
+
     /// Pindai pool paling ramai di rantai dan nilai kelayakannya.
     ///
     /// Membaca setiap swap pada jendela terakhir, jadi ia mahal dan tidak
@@ -227,6 +237,18 @@ pub struct RegistrySummary {
 #[derive(Debug, Clone, Serialize)]
 pub struct ScanView {
     pub rows: Vec<crate::pools::kandidat::BarisScan>,
+    /// Penilaian setiap hook yang muncul di hasil, PRD 5.4.
+    ///
+    /// Ikut dikirim supaya baris yang ditolak karena hooknya bisa menjelaskan
+    /// diri sendiri, dan supaya user bisa menyetujuinya secara sadar tanpa
+    /// harus meminta pembacaan kedua.
+    pub hooks: Vec<crate::risk::hook::PenilaianHook>,
+    /// Benar kalau sejarah adopsi hook sudah dipindai sampai blok pemasangan.
+    ///
+    /// Selama salah, kriteria jumlah pool dan umur hanya batas bawah, dan panel
+    /// harus mengatakannya. Sejarah penuh rantai ini butuh belasan pemindaian,
+    /// dan tiap pemindaian melanjutkan yang sebelumnya.
+    pub adopsi_lengkap: bool,
     /// Jendela pemindaian swap, dalam menit.
     pub jendela_pindai_menit: f64,
     /// Jendela pengukuran volume, dalam menit.

@@ -454,3 +454,68 @@
   line-height: 1.45;
   color: var(--text-muted);
 }
+
+/* Penilaian hook V4, PRD 5.4.
+ *
+ * Setiap kriteria tampil sendiri, bukan hanya kesimpulannya. Warna membedakan
+ * tiga keadaan, bukan dua: "belum diukur" bukan kegagalan, dan mewarnainya
+ * seperti kegagalan akan mengajari user menyimpulkan hal yang salah. */
+
+.hook-panel {
+  margin-top: var(--s2);
+  padding-top: var(--s2);
+  border-top: 1px solid var(--border);
+}
+
+.hook-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+  font-size: 11px;
+}
+
+.hook-alamat {
+  font-family: var(--mono, ui-monospace, monospace);
+  color: var(--text-muted);
+}
+
+.hook-fakta {
+  margin-left: auto;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.hook-kriteria {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s1);
+  margin-top: var(--s2);
+}
+
+.hook-k {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: var(--r-bar);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
+.hook-k.lolos {
+  color: var(--upper);
+  border-color: var(--upper);
+}
+
+.hook-k.gagal {
+  color: var(--lower);
+  border-color: var(--lower);
+}
+
+/* Belum diukur tetap netral. Ia bukan kegagalan, hanya belum diketahui. */
+.hook-k.belum_terukur {
+  color: var(--text-muted);
+  border-color: var(--border-strong);
+}
+
+.hook-panel .toggle {
+  margin-top: var(--s2);
+}

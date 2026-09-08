@@ -34,10 +34,12 @@ import {
   type HasilBasis,
   type JenisAksi,
   type Kejadian,
+  type Kriteria,
   type OpenPlanView,
   type PoolInfo,
   type PositionsView,
   type Posisi,
+  type PenilaianHook,
   type SaranPenempatan,
   type ScanView,
   type SignalsView,
@@ -367,6 +369,7 @@ export function App() {
               setScanBusy(true);
               clientRef.current?.scan();
             }}
+            onSetujuiHook={(h: string) => clientRef.current?.approveHook(h)}
             onPilih={(b) => {
               // Klik baris membuka token itu di gmgn DAN memuat poolnya di tab
               // Range, sesuai PRD 3.4. Berpindah tab dilakukan di sini supaya
@@ -750,11 +753,13 @@ function ScanCard({
   busy,
   onScan,
   onPilih,
+  onSetujuiHook,
 }: {
   scan: ScanView | null;
   busy: boolean;
   onScan: () => void;
   onPilih: (b: BarisScan) => void;
+  onSetujuiHook: (hook: string) => void;
 }) {
   return (
     <section class="card">
@@ -780,7 +785,18 @@ function ScanCard({
         <>
           <div class="scan-list">
             {scan.rows.map((b) => (
-              <ScanRow key={b.pool_id} b={b} onPilih={onPilih} />
+              <ScanRow
+                key={b.pool_id}
+                b={b}
+                hook={
+                  scan.hooks.find(
+                    (h) => h.hook.toLowerCase() === b.hooks?.toLowerCase(),
+                  ) ?? null
+                }
+                adopsiLengkap={scan.adopsi_lengkap}
+                onPilih={onPilih}
+                onSetujuiHook={onSetujuiHook}
+              />
             ))}
           </div>
           <p class="hint">
@@ -800,10 +816,16 @@ function ScanCard({
 
 function ScanRow({
   b,
+  hook,
+  adopsiLengkap,
   onPilih,
+  onSetujuiHook,
 }: {
   b: BarisScan;
+  hook: PenilaianHook | null;
+  adopsiLengkap: boolean;
   onPilih: (b: BarisScan) => void;
+  onSetujuiHook: (hook: string) => void;
 }) {
   const bisa = b.label !== "hindari";
   return (
@@ -858,6 +880,96 @@ function ScanRow({
           saja, jadi periksa alamatnya sebelum menaruh dana.
         </p>
       ) : null}
+
+      {hook ? (
+        <HookPanel h={hook} lengkap={adopsiLengkap} onSetujui={onSetujuiHook} />
+      ) : null}
+    </div>
+  );
+}
+
+const TANDA_KRITERIA: Record<Kriteria, string> = {
+  lolos: "lolos",
+  gagal: "tidak",
+  belum_terukur: "belum diukur",
+};
+
+/**
+ * Penilaian hook beserta jalan keluarnya, PRD 5.4.
+ *
+ * KENAPA SETIAP KRITERIA DITAMPILKAN, BUKAN HANYA KESIMPULANNYA
+ * Dua dari lima syarat belum bisa diukur alat ini, sehingga tidak ada hook yang
+ * lolos otomatis. Kalau yang tampil hanya kesimpulannya, setiap hook terlihat
+ * sama buruknya, dan user tidak punya dasar untuk memutuskan. Yang membedakan
+ * hook yang dipakai ribuan pool selama setahun dari hook yang dibuat kemarin
+ * justru ada di rinciannya.
+ *
+ * `belum diukur` sengaja ditulis berbeda dari `tidak`. Yang pertama berarti kita
+ * belum tahu, yang kedua berarti kita sudah tahu dan jawabannya tidak.
+ */
+function HookPanel({
+  h,
+  lengkap,
+  onSetujui,
+}: {
+  h: PenilaianHook;
+  lengkap: boolean;
+  onSetujui: (hook: string) => void;
+}) {
+  const baris: [string, Kriteria][] = [
+    ["jumlah pool", h.kriteria_pool],
+    ["umur", h.kriteria_umur],
+    ["tidak bisa diupgrade", h.kriteria_upgrade],
+    ["TVL", h.kriteria_tvl],
+    ["LP unik", h.kriteria_lp],
+  ];
+
+  return (
+    <div class="hook-panel">
+      <div class="hook-head">
+        <span class="hook-alamat">hook {h.hook.slice(0, 10)}</span>
+        {h.jumlah_pool === null ? null : (
+          <span class="hook-fakta">
+            {h.jumlah_pool} pool
+            {h.umur_hari === null ? "" : `, ${h.umur_hari.toFixed(0)} hari`}
+          </span>
+        )}
+      </div>
+
+      <div class="hook-kriteria">
+        {baris.map(([nama, k]) => (
+          <span key={nama} class={`hook-k ${k}`}>
+            {nama}: {TANDA_KRITERIA[k]}
+          </span>
+        ))}
+      </div>
+
+      {lengkap ? null : (
+        <p class="scan-alasan">
+          Sejarah rantai belum selesai dipindai, jadi jumlah pool dan umur di
+          atas adalah batas bawah: angkanya hanya bisa naik, tidak pernah turun.
+          Pindai lagi beberapa kali dan keduanya akan mengendap.
+        </p>
+      )}
+
+      {h.terlarang ? (
+        <p class="warn-line">
+          Alamatnya proxy yang masih bisa diupgrade, atau pemeriksaannya gagal
+          dibaca. Ini penolakan mutlak dan tidak bisa disetujui, karena kode yang
+          diperiksa sekarang bukan kode yang akan berjalan nanti.
+        </p>
+      ) : (
+        <>
+          <p class="scan-alasan">
+            TVL dan jumlah LP unik belum bisa diukur alat ini, jadi hook ini tidak
+            bisa lolos otomatis. Anda tetap boleh memakainya sebagai pilihan sadar,
+            dan persetujuannya dicatat beserta angka di atas.
+          </p>
+          <button class="toggle" onClick={() => onSetujui(h.hook)}>
+            setujui hook ini
+          </button>
+        </>
+      )}
     </div>
   );
 }
@@ -880,12 +992,14 @@ function SignalsTab({
   scanBusy,
   onScan,
   onPilih,
+  onSetujuiHook,
 }: {
   view: SignalsView | null;
   scan: ScanView | null;
   scanBusy: boolean;
   onScan: () => void;
   onPilih: (b: BarisScan) => void;
+  onSetujuiHook: (hook: string) => void;
 }) {
   if (!view) {
     return (
@@ -895,6 +1009,7 @@ function SignalsTab({
           busy={scanBusy}
           onScan={onScan}
           onPilih={onPilih}
+          onSetujuiHook={onSetujuiHook}
         />
         <section class="card">
           <div class="section-title">
@@ -916,7 +1031,13 @@ function SignalsTab({
 
   return (
     <div class="stack">
-      <ScanCard scan={scan} busy={scanBusy} onScan={onScan} onPilih={onPilih} />
+      <ScanCard
+        scan={scan}
+        busy={scanBusy}
+        onScan={onScan}
+        onPilih={onPilih}
+        onSetujuiHook={onSetujuiHook}
+      />
       <section class="card">
         <div class="section-title">
           <h2>Token yang sedang dibuka</h2>

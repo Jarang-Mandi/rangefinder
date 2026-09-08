@@ -1287,6 +1287,8 @@ impl AppState {
         let waktu = chrono::Utc::now().to_rfc3339();
         let kosong = |error: Option<String>| protocol::ScanView {
             rows: Vec::new(),
+            hooks: Vec::new(),
+            adopsi_lengkap: false,
             jendela_pindai_menit: 0.0,
             jendela_volume_menit: 0.0,
             volume_jendela_pendek: false,
@@ -1312,12 +1314,26 @@ impl AppState {
         };
         let jendela_pindai_menit = menit(hasil.dari_blok, hasil.sampai_blok);
 
-        // Allowlist hook masih kosong sampai kriteria adopsi PRD 5.4 berjalan.
-        // Kosong berarti setiap pool berhook ditandai `Hindari`, dan itu sikap
-        // bawaan yang benar: hook yang belum diperiksa bisa menghalangi
-        // penarikan, dan itu kehilangan modal seluruhnya, bukan risiko harga.
+        // ALLOWLIST DATANG DARI PERSETUJUAN YANG TERCATAT
+        //
+        // Belum ada hook yang bisa lolos otomatis, karena dua dari lima syarat
+        // adopsi PRD 5.4 belum bisa diukur alat ini. Yang mengisi allowlist
+        // adalah persetujuan sadar user, yang tersimpan beserta penilaian saat
+        // itu. Hook yang belum disetujui tetap ditandai `Hindari`, dan itu
+        // sikap bawaan yang benar: hook bisa menghalangi penarikan, dan itu
+        // kehilangan modal seluruhnya, bukan risiko harga yang bisa ditanggung.
+        let disetujui: Vec<String> = hasil
+            .kandidat
+            .iter()
+            .map(|k| k.hooks.to_lowercase())
+            .filter(|h| h != crate::pools::ZERO_ADDRESS)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .filter(|h| crate::risk::persetujuan::disetujui(&self.store, h))
+            .collect();
+
         let daftar =
-            match kandidat::perkaya(&provider, &self.registry, &hasil, &[]).await {
+            match kandidat::perkaya(&provider, &self.registry, &hasil, &disetujui).await {
                 Ok(d) => d,
                 Err(e) => {
                     let mut v = kosong(Some(format!("penilaian kandidat gagal: {e}")));
@@ -1327,8 +1343,16 @@ impl AppState {
                 }
             };
 
+        // Penilaian hook disusun untuk hook yang benar benar muncul di hasil,
+        // bukan untuk semuanya. Satu pemindaian `Initialize` melayani seluruh
+        // hook sekaligus, jadi biayanya tidak bertambah per hook.
+        let (hooks, adopsi_lengkap) =
+            self.nilai_hook_pada(&daftar.baris, hasil.sampai_blok).await;
+
         protocol::ScanView {
             rows: daftar.baris,
+            hooks,
+            adopsi_lengkap,
             jendela_pindai_menit,
             jendela_volume_menit: daftar.jendela_volume_detik / 60.0,
             volume_jendela_pendek: daftar.volume_jendela_pendek,
@@ -1337,6 +1361,122 @@ impl AppState {
             dipindai_pada: hasil.dipindai_pada,
             error: None,
         }
+    }
+
+    /// Nilai setiap hook yang muncul di hasil pemindaian.
+    ///
+    /// Kegagalan menilai satu hook tidak menggagalkan yang lain, dan tidak
+    /// menggagalkan pemindaiannya. Hook yang gagal dinilai tetap ditolak,
+    /// karena yang belum terbukti aman bukan berarti aman.
+    async fn nilai_hook_pada(
+        &self,
+        baris: &[crate::pools::kandidat::BarisScan],
+        sampai_blok: u64,
+    ) -> (Vec<crate::risk::hook::PenilaianHook>, bool) {
+        let alamat: std::collections::BTreeSet<String> = baris
+            .iter()
+            .filter_map(|b| b.hooks.clone())
+            .collect();
+        if alamat.is_empty() {
+            // Tidak ada hook berarti tidak ada yang perlu dinilai, dan sejarah
+            // adopsi tidak perlu disentuh sama sekali. Ini jalur tercepat, dan
+            // ia memang yang paling sering terjadi pada pool tanpa hook.
+            return (Vec::new(), true);
+        }
+
+        let Ok(provider) = self.chain.provider().await else {
+            return (Vec::new(), false);
+        };
+
+        // Satu pemindaian adopsi melayani seluruh hook. Kegagalannya tidak
+        // menggagalkan penilaian: kriteria jumlah pool dan umur akan terbaca
+        // `belum diukur`, dan yang belum diukur tidak pernah lolos.
+        let adopsi = crate::risk::hook::hitung_adopsi(
+            &provider,
+            &self.registry,
+            Some(&self.store),
+            sampai_blok,
+        )
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "penghitungan adopsi hook gagal");
+            crate::risk::hook::Adopsi::default()
+        });
+
+        let mut out = Vec::with_capacity(alamat.len());
+        for h in alamat {
+            match crate::risk::hook::nilai(&provider, &self.registry, &adopsi, &h, sampai_blok)
+                .await
+            {
+                Ok(p) => out.push(p),
+                Err(e) => tracing::warn!(hook = %h, error = %e, "penilaian hook gagal"),
+            }
+        }
+        (out, adopsi.lengkap)
+    }
+
+    /// Catat persetujuan sadar user atas sebuah hook, PRD 5.4.
+    ///
+    /// Penilaiannya dibaca ulang di sini, tidak diterima dari panel. Penilaian
+    /// yang datang dari panel bisa saja sudah diubah, dan bagian yang paling
+    /// menarik untuk diubah justru kesimpulan bisa diupgrade atau tidaknya.
+    pub async fn on_approve_hook(&self, hook: String) {
+        let provider = match self.chain.provider().await {
+            Ok(p) => p,
+            Err(e) => return self.alert_kritis("hook_failed", format!("RPC tidak bisa dipakai: {e}")),
+        };
+        let blok = provider.get_block_number().await.unwrap_or(0);
+
+        // Adopsi dibaca ulang di sini, bukan diambil dari hasil pemindaian
+        // terakhir. Persetujuan menyimpan penilaian saat itu sebagai catatan
+        // yang bisa ditinjau, jadi angkanya harus yang paling baru, bukan yang
+        // kebetulan masih tersimpan dari pemindaian entah kapan.
+        let adopsi = crate::risk::hook::hitung_adopsi(
+            &provider,
+            &self.registry,
+            Some(&self.store),
+            blok,
+        )
+        .await
+        .unwrap_or_default();
+
+        let penilaian = match crate::risk::hook::nilai(
+            &provider,
+            &self.registry,
+            &adopsi,
+            &hook,
+            blok,
+        )
+        .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                return self.alert_kritis("hook_failed", format!("hook tidak bisa dinilai: {e}"))
+            }
+        };
+
+        match crate::risk::persetujuan::setujui(&self.store, &penilaian) {
+            Ok(_) => {
+                self.alert_info(
+                    "hook_approved",
+                    format!("Hook {hook} disetujui dan dicatat. Pindai ulang untuk melihat efeknya."),
+                );
+            }
+            Err(e) => self.alert_kritis("hook_rejected", e.to_string()),
+        }
+    }
+
+    /// Cabut persetujuan sebuah hook.
+    pub async fn on_forget_hook(&self, hook: String) {
+        let ada = crate::risk::persetujuan::cabut(&self.store, &hook);
+        self.alert_info(
+            "hook_forgotten",
+            if ada {
+                format!("Persetujuan hook {hook} dicabut. Pindai ulang untuk melihat efeknya.")
+            } else {
+                format!("Hook {hook} memang belum pernah disetujui.")
+            },
+        );
     }
 
     pub async fn on_get_positions(&self) {
@@ -1618,6 +1758,20 @@ impl AppState {
             kind: "open",
             outcome,
         })
+    }
+
+    /// Kabar biasa yang bukan kegagalan.
+    ///
+    /// Terpisah dari `alert_kritis` supaya tingkatnya benar. Persetujuan hook
+    /// yang berhasil dicatat bukan kegagalan, dan menampilkannya dengan warna
+    /// kegagalan akan mengajari user mengabaikan warna itu.
+    fn alert_info(&self, code: &str, message: String) {
+        tracing::info!(code, %message, "kabar untuk panel");
+        let _ = self.events.send(protocol::ServerMessage::Alert {
+            level: protocol::AlertLevel::Info,
+            code: code.to_string(),
+            message,
+        });
     }
 
     fn alert_kritis(&self, code: &str, message: String) {

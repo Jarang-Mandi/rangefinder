@@ -483,8 +483,37 @@ export interface BarisScan {
   alasan: string;
 }
 
+/** Satu kriteria adopsi hook. Tiga keadaan, bukan dua. */
+export type Kriteria = "lolos" | "gagal" | "belum_terukur";
+
+/**
+ * Penilaian sebuah hook V4 terhadap kriteria adopsi, PRD 5.4.
+ *
+ * `belum_terukur` berbeda dari `gagal`. Yang pertama berarti kita belum tahu,
+ * yang kedua berarti kita sudah tahu dan jawabannya tidak. Panel harus
+ * menampilkan keduanya secara berbeda, karena user yang membaca "gagal" pada
+ * sesuatu yang sebenarnya belum diukur akan menyimpulkan hal yang salah.
+ */
+export interface PenilaianHook {
+  hook: string;
+  jumlah_pool: number | null;
+  umur_hari: number | null;
+  bisa_diupgrade: boolean | null;
+  kriteria_pool: Kriteria;
+  kriteria_umur: Kriteria;
+  kriteria_upgrade: Kriteria;
+  kriteria_tvl: Kriteria;
+  kriteria_lp: Kriteria;
+  lolos_otomatis: boolean;
+  /** Benar kalau hook ini tidak boleh dipakai bahkan lewat persetujuan sadar. */
+  terlarang: boolean;
+  catatan: string[];
+}
+
 export interface ScanView {
   rows: BarisScan[];
+  hooks: PenilaianHook[];
+  adopsi_lengkap: boolean;
   jendela_pindai_menit: number;
   jendela_volume_menit: number;
   volume_jendela_pendek: boolean;
@@ -571,6 +600,8 @@ export type ClientMessage =
   | { type: "get_positions" }
   | { type: "get_notifications" }
   | { type: "scan" }
+  | { type: "approve_hook"; hook: string }
+  | { type: "forget_hook"; hook: string }
   | { type: "plan_action"; token_id: string; action: JenisAksi }
   | { type: "execute_action" }
   | { type: "swap_zap" }

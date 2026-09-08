@@ -695,6 +695,27 @@ Kelompok kedua dari simulasi on chain, mahal tapi wajib sebelum modal masuk:
 
    Hook yang belum lolos tetap bisa dipakai user secara manual lewat pilihan sadar per pool, yang menampilkan peringatan dan mencatat persetujuannya. Yang otomatis hanya penolakan bawaannya.
 4. **Uji likuiditas terkunci.** Verifikasi bahwa pool bukan pool palsu yang bisa dikuras kreator.
+
+**Keadaan pengukuran butir 3 per 8 September 2026.** Tiga dari lima syarat sudah
+terukur di `risk::hook`: jumlah pool dari event `Initialize`, umur dari blok
+`Initialize` paling awal, dan bisa tidaknya diupgrade dari slot proxy EIP-1967
+beserta EIP-1822. Dua sisanya belum: TVL menuntut distribusi likuiditas per
+pool, dan jumlah LP unik menuntut penelusuran setiap tokenId PositionManager
+sampai ke pemiliknya.
+
+Yang belum terukur TIDAK dibulatkan menjadi lolos. Akibatnya tidak ada hook
+yang bisa lolos otomatis untuk sekarang, dan itu memang sesuai permintaan
+bagian ini bahwa seluruh syarat harus terpenuhi. Jalan keluarnya adalah
+persetujuan sadar per hook yang sudah disebutkan di atas, dan itulah yang
+terpasang: `approve_hook` mencatat persetujuan beserta penilaian saat itu,
+supaya keputusannya bisa ditinjau ulang dengan angka yang user lihat waktu itu.
+
+Satu satunya syarat yang tidak bisa dilewati persetujuan adalah kemampuan
+upgrade, dan penolakannya ditegakkan di engine, bukan hanya di panel. Panel
+bisa keliru atau diakali, dan satu bug di sana tidak boleh cukup untuk menaruh
+modal di hook yang isinya bisa diganti sewaktu waktu. Gagal membaca slot proxy
+diperlakukan sama dengan bisa diupgrade, karena yang belum terbukti aman bukan
+berarti aman.
 ### 5.5 Klasifikasi aksi
 
 Satu token menghasilkan tepat satu label.
@@ -1197,6 +1218,8 @@ Panel ke engine:
 | `get_notifications` | tanpa isi. Minta riwayat notifikasi terakhir | 5 |
 | `plan_action` | `{ tokenId, action }` dengan `action` bernilai `klaim_fee` atau `tutup_posisi`. Menyusun dan menyimulasikan aksi, TIDAK mengirim apa pun | 5 |
 | `execute_action` | tanpa isi. Menyetujui aksi terakhir yang tersimpan di engine | 5 |
+| `approve_hook` | `{ hook }`. Catat persetujuan sadar user atas sebuah hook V4 yang belum lolos kriteria adopsi 5.4. Engine menilai ulang hooknya sendiri sebelum mencatat, karena penilaian yang datang dari panel bisa saja sudah diubah, dan bagian yang paling menarik untuk diubah justru kesimpulan bisa diupgrade atau tidaknya. Hook yang masih bisa diupgrade ditolak di sini juga | 6 |
+| `forget_hook` | `{ hook }`. Cabut persetujuan sebuah hook | 6 |
 | `scan` | tanpa isi. Pindai pool paling ramai di rantai dan nilai kelayakannya. Mahal, karena engine membaca setiap swap pada jendela terakhir, jadi ia hanya berjalan saat user memintanya. Jawabannya datang belakangan sebagai `scan_results`. Penyaring belum ikut dikirim panel: seluruh penyaringan masih berjalan di engine, lihat 6.13 | 6 |
 
 Engine ke panel:
@@ -1212,7 +1235,7 @@ Engine ke panel:
 | `positions` | `{ positions[], owner, keluarRange, error, dimuatPada }`. Setiap posisi membawa versi protokol, PoolKey, tick, likuiditas, status in range, dan fee yang belum diklaim | 5 |
 | `notify` | `{ level, code, message, subject, at, ditahan }`. Berbeda dari `alert`: pesan ini melewati pendinginan, masuk riwayat, dan membawa petunjuk durasi serta suara. `alert` dipakai untuk kegagalan seketika pada aksi yang sedang dijalankan user | 5 |
 | `notify_history` | daftar kejadian terakhir, terbaru lebih dulu, paling banyak 50 | 5 |
-| `scan_results` | `{ rows[], jendelaPindaiMenit, jendelaVolumeMenit, volumeJendelaPendek, modalAcuan, totalSwap, dipindaiPada, error }`. Setiap baris membawa simbol, pasangan beserta penanda apakah alamat kutipannya dikenal, market cap, volume, modal yang dibutuhkan, hasil fee sepanjang jendela, proyeksi APR, rasio efisiensi, umur, daftar risiko, satu label aksi, dan alasannya. Jendela ikut di dalam pesan, tidak disimpulkan panel: angka hasil dan proyeksi keduanya bergantung padanya, dan jendelanya bisa menyempit sendiri kalau RPC menolak | 6 |
+| `scan_results` | `{ rows[], hooks[], jendelaPindaiMenit, jendelaVolumeMenit, volumeJendelaPendek, modalAcuan, totalSwap, dipindaiPada, error }`. Setiap baris membawa simbol, pasangan beserta penanda apakah alamat kutipannya dikenal, market cap, volume, modal yang dibutuhkan, hasil fee sepanjang jendela, proyeksi APR, rasio efisiensi, umur, daftar risiko, satu label aksi, dan alasannya. Jendela ikut di dalam pesan, tidak disimpulkan panel: angka hasil dan proyeksi keduanya bergantung padanya, dan jendelanya bisa menyempit sendiri kalau RPC menolak. `hooks[]` memuat penilaian adopsi 5.4 untuk setiap hook yang muncul di hasil, supaya baris yang ditolak bisa menjelaskan diri sendiri | 6 |
 | `signals` | `{ address, barTerpakai, harga, sideways, basis, saran, konsentrasiDibandingLebar, dihitungPada }`. `sideways` dan `basis` kosong berarti datanya belum cukup, BUKAN berarti kondisinya tidak menarik | 6 |
 | `action_plan` | `{ tokenId, action, nama, gates[], gasEstimate, dryRun, menutup, siap, expiresAt, fee0, fee1 }`. Simulasi ditampilkan sebelum tombol konfirmasi aktif, sesuai 3.5 | 5 |
 | `token_state` | `{ address, meta, quotes[], pools[], selectedQuote, selectedPoolId, error }`. Setiap `quote` membawa `{ quote, quoteSymbol, quoteDecimals, canonical, pools[] }`. Dikirim dua kali saat memuat: sekali cepat dari kunci pool yang tersimpan, sekali lagi setelah pemindaian selesai kalau ada yang berubah. Lihat 4.3c | 2 |
