@@ -779,7 +779,7 @@ pub async fn muat_token<P: Provider>(
 /// Kegagalan tidak menggagalkan pemuatan token: `stats` tetap `None`, dan panel
 /// menampilkan garis alih alih angka. Angka nol akan terbaca sebagai pool yang
 /// sepi, kesimpulan yang sangat berbeda dari tidak bisa diukur.
-async fn ukur_stats<P: Provider>(
+pub async fn ukur_stats<P: Provider>(
     provider: &P,
     registry: &Registry,
     meta: &TokenMeta,

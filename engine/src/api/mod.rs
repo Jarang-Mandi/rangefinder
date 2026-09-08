@@ -430,11 +430,16 @@ impl AppState {
         self.kirim_saldo_menyusul().await;
     }
 
-    /// Baca saldo pasangan yang sedang aktif, lalu kirim ulang keadaan token.
+    /// Ukur statistik dan saldo pasangan yang sedang aktif, lalu kirim ulang.
     ///
-    /// Dijalankan di tugas terpisah supaya perpindahan pasangan tetap terasa
-    /// seketika. Kegagalannya tidak mengubah apa pun: panel tetap menampilkan
-    /// keadaan yang sudah diterima, hanya tanpa saldo.
+    /// KENAPA MENYUSUL, BUKAN LANGSUNG
+    /// Berpindah pasangan tidak boleh menyentuh jaringan, karena seluruh
+    /// kelompok sudah ada di memori dan perpindahannya harus terasa seketika.
+    /// Tapi APR, TVL, dan volume hanya diukur untuk kelompok teratas saat token
+    /// dimuat, sehingga kelompok lain tidak punya angka apa pun sampai diukur.
+    ///
+    /// Kegagalannya tidak mengubah apa pun: panel tetap menampilkan keadaan
+    /// yang sudah diterima, hanya tanpa angka.
     async fn kirim_saldo_menyusul(&self) {
         let s = self.clone();
         tokio::spawn(async move {
@@ -456,9 +461,35 @@ impl AppState {
                 (Some(active.meta.clone()), k)
             };
 
-            let Some(saldo) = s.baca_saldo(&provider, &meta, &kelompok).await else {
-                return;
-            };
+            let saldo = s.baca_saldo(&provider, &meta, &kelompok).await;
+
+            // Statistik diukur untuk kelompok yang sedang dipilih, bukan hanya
+            // yang teratas. Tanpa ini, setiap kali user berpindah pasangan,
+            // kolom APR, TVL, dan volume kosong tanpa penjelasan.
+            let mut kelompok = kelompok;
+            if let Some(m) = meta.as_ref() {
+                if kelompok.pools.iter().all(|p| p.stats.is_none()) {
+                    crate::pools::ukur_stats(&provider, &s.registry, m, &mut kelompok).await;
+                }
+            }
+
+            {
+                // Hasil pengukuran disimpan ke keadaan aktif supaya tidak
+                // diukur ulang setiap kali user bolak balik antar pasangan.
+                let mut guard = s.active.write().await;
+                if let Some(active) = guard.as_mut() {
+                    if active.selected_quote.eq_ignore_ascii_case(&kelompok.quote) {
+                        active.pools = kelompok.pools.clone();
+                    }
+                    if let Some(g) = active
+                        .quotes
+                        .iter_mut()
+                        .find(|g| g.quote.eq_ignore_ascii_case(&kelompok.quote))
+                    {
+                        *g = kelompok.clone();
+                    }
+                }
+            }
 
             let guard = s.active.read().await;
             let Some(active) = guard.as_ref() else { return };
@@ -470,7 +501,7 @@ impl AppState {
                     pools: active.pools.clone(),
                     selected_quote: Some(active.selected_quote.clone()),
                     selected_pool_id: Some(active.selected_pool_id.clone()),
-                    saldo: Some(saldo),
+                    saldo,
                     error: None,
                 },
             )));

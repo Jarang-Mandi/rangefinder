@@ -1248,6 +1248,25 @@ garis persis di tempat kursor dilepas, dan hasil pembulatan ke grid tick tetap
 terbaca sebagai angka di kartu Range. Penggambaran ulang hanya berlaku untuk
 perubahan yang bukan dari chart: preset, custom, dan ganti pool.
 
+**Pool tanpa tick terinisialisasi di jendela tetap punya modal.** Likuiditas
+yang sedang aktif membentang dari tick di luar jendela, jadi modalnya nyata dan
+tetap menerima fee. Percobaan sebelumnya berhenti lebih awal saat daftar
+panggilannya kosong, dan setiap pool seperti itu melaporkan TVL nol, yang
+terbaca sebagai pool kosong.
+
+**Statistik diukur untuk kelompok kutipan yang sedang dipilih**, bukan hanya
+yang teratas. Berpindah pasangan tetap tidak menyentuh jaringan, dan
+pengukurannya menyusul lewat kiriman kedua bersama saldo. Hasilnya disimpan ke
+keadaan aktif supaya tidak diukur ulang setiap kali user bolak balik.
+
+**Kiriman `range_view` diabaikan menurut waktu, bukan menurut penanda.** Satu
+geseran garis memicu puluhan peristiwa, dan setiap peristiwa menghasilkan satu
+kiriman. Penanda benar salah hanya menahan kiriman pertama, sehingga kiriman
+kedua dan seterusnya tetap menggambar ulang garis di posisi hasil pembulatan.
+Jendela waktu menahan seluruhnya, berapa pun jumlahnya, dan sengaja melebihi
+lama satu perjalanan ke engine supaya kiriman yang masih di jalan saat kursor
+dilepas ikut tertahan.
+
 **Peringatan kurs hanya berlaku untuk kutipan ETH.** Field `eth_usd` sebenarnya
 harga satu token KUTIPAN dalam USD, dan namanya menyesatkan. Pada pool
 berpasangan stablecoin angkanya kira kira satu, dan itu benar. Memeriksanya

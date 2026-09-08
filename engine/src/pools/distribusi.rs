@@ -454,16 +454,14 @@ pub async fn tvl_beberapa<P: Provider>(
                 }
             }
         }
-        if ticks.is_empty() {
-            continue;
-        }
         ticks.sort_unstable();
         let rentang_tick = ((SPAN_PERSEN / 100.0 + 1.0).ln() / 1.0001_f64.ln()) as i32;
         ticks.retain(|t| (*t - k.tick_sekarang).abs() <= rentang_tick);
-        if ticks.is_empty() {
-            continue;
-        }
 
+        // Pool yang tidak punya tick terinisialisasi di dalam jendela TIDAK
+        // dilewati. Likuiditas yang sedang aktif membentang dari tick di luar
+        // jendela, jadi modalnya tetap nyata dan tetap menerima fee. Melewatinya
+        // membuat TVL terbaca nol, dan nol berarti pool kosong.
         let awal2 = calls.len();
         for t in &ticks {
             calls.push(sumber.panggil_tick(bytes, *t));
@@ -471,13 +469,21 @@ pub async fn tvl_beberapa<P: Provider>(
         rencana2.push((awal2, ticks.len(), id, sumber, k, ticks));
     }
 
-    if calls.is_empty() {
-        return out;
-    }
-
-    let Ok(hasil2) = crate::chain::multicall::batch_call(provider, multicall, calls).await else {
-        tracing::warn!("likuiditas tick TVL gagal dibaca, TVL dilewati");
-        return out;
+    // Daftar kosong berarti tidak ada satu pun tick terinisialisasi di dalam
+    // jendela mana pun. Itu BUKAN alasan untuk berhenti: likuiditas yang sedang
+    // aktif membentang dari tick di luar jendela, dan modalnya tetap nyata.
+    // Percobaan sebelumnya keluar di sini, dan setiap pool seperti itu
+    // melaporkan TVL nol, yang terbaca sebagai pool kosong.
+    let hasil2 = if calls.is_empty() {
+        Vec::new()
+    } else {
+        match crate::chain::multicall::batch_call(provider, multicall, calls).await {
+            Ok(v) => v,
+            Err(_) => {
+                tracing::warn!("likuiditas tick TVL gagal dibaca, TVL dilewati");
+                return out;
+            }
+        }
     };
 
     for (awal, jumlah, id, sumber, k, ticks) in rencana2 {

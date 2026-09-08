@@ -55,6 +55,15 @@ import {
 
 const TOKEN_KEY = "rangefinder.pairingToken";
 
+/**
+ * Berapa lama kiriman `range_view` diabaikan setelah geseran terakhir.
+ *
+ * Harus lebih lama daripada satu perjalanan ke engine, karena kiriman yang
+ * berangkat sesaat sebelum kursor dilepas baru sampai sesudahnya, dan kiriman
+ * itulah yang dulu menggambar ulang garis di posisi hasil pembulatan.
+ */
+const JEDA_ABAIKAN_MS = 600;
+
 type TabId = "range" | "signals" | "positions" | "pnl" | "settings";
 
 const TABS: { id: TabId; label: string; phase: number }[] = [
@@ -113,7 +122,22 @@ export function App() {
     message: string;
   } | null>(null);
 
-  const dariChartRef = useRef(false);
+  /**
+   * Kapan garis terakhir digeser user, dalam milidetik.
+   *
+   * KENAPA JAM, BUKAN PENANDA BENAR SALAH
+   * Satu geseran memicu puluhan peristiwa, dan setiap peristiwa menghasilkan
+   * satu kiriman range_view dari engine. Penanda benar salah hanya menahan
+   * kiriman PERTAMA: kiriman kedua dan seterusnya sudah melihat penandanya
+   * kembali salah, lalu menggambar ulang garis di posisi hasil pembulatan.
+   * Itulah kenapa loncatannya kembali muncul setelah perbaikan sebelumnya.
+   *
+   * Jam menahan seluruh kiriman yang datang selama geseran dan sesaat
+   * sesudahnya, berapa pun jumlahnya. Chart sudah menaruh garis persis di
+   * tempat user melepasnya, dan hasil pembulatan tetap terbaca sebagai angka
+   * di kartu Range.
+   */
+  const geserTerakhirRef = useRef(0);
   /** Alamat token yang keadaannya terakhir diterima. Lihat `onTokenState`. */
   const alamatTerakhirRef = useRef("");
   const [depth, setDepth] = useState<Distribusi | null>(null);
@@ -312,7 +336,7 @@ export function App() {
           // terlihat seperti loncatan tanpa sebab. Angka hasil pembulatan
           // tetap muncul di kartu Range, dan di sanalah tempat yang benar
           // untuk menunjukkannya.
-          dariChartRef.current = true;
+          geserTerakhirRef.current = Date.now();
           break;
         }
       }
@@ -339,8 +363,9 @@ export function App() {
     // Perubahan yang datang dari chart tidak digambar ulang. Garisnya sudah
     // ada di tempat yang benar menurut user, dan memindahkannya ke hasil
     // pembulatan terlihat seperti loncatan.
-    if (dariChartRef.current) {
-      dariChartRef.current = false;
+    // Jendelanya sengaja melebihi lama satu perjalanan ke engine, supaya
+    // kiriman yang masih di jalan saat kursor dilepas ikut tertahan.
+    if (Date.now() - geserTerakhirRef.current < JEDA_ABAIKAN_MS) {
       drawnRef.current = `${rangeView.lower.tick}:${rangeView.upper.tick}:${rangeView.pool_id}`;
       return;
     }
