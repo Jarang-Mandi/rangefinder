@@ -312,6 +312,7 @@ cargo xtask positions <wallet>     muat posisi LP sebuah wallet dari rantai
 cargo xtask optimizer <token>      peringkatkan pool token itu menurut hasil per modal
 cargo xtask scan                   pindai pool paling ramai dan nilai kelayakannya
 cargo xtask depth <token>          gambar distribusi likuiditas pool teratasnya
+node scripts/probe-ws.mjs <token>  lihat token_state persis seperti panel menerimanya
 ```
 
 `cargo xtask scan` juga mencetak penilaian setiap hook yang muncul, sesuai

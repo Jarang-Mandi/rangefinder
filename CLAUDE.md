@@ -8,6 +8,87 @@ digeser diinjeksi ke chart TradingView milik gmgn.ai.
 > `docs/PRD.md` menjelaskan apa dan kenapa. Berkas ini menjelaskan bagaimana,
 > beserta hal hal yang gampang dirusak kalau tidak tahu.
 
+## Keadaan sekarang, 9 September 2026
+
+**Fase 0 sampai 6 selesai. Fase 7, yaitu self improvement, belum dimulai.**
+
+Setelah fase 6 ditutup, seluruh pekerjaan berikutnya adalah perbaikan yang
+datang dari user memakai panelnya sendiri. Itu tercatat di PRD 6.15, dan
+bagian itu wajib dibaca sebelum menyentuh panel: banyak keputusan di sana
+berlawanan dengan yang tampak masuk akal dari membaca kode saja.
+
+### Yang sudah bisa dipakai
+
+Memuat token dari halaman gmgn, memilih pool beserta APR, TVL, dan volume,
+menggeser garis range di chart, melihat distribusi likuiditas pool, menyusun
+rencana beserta seluruh gate, memberi izin token, menjalankan zap, membuka
+posisi, melihat posisi dan PnL, mengklaim fee, menutup posisi, memindai pool
+paling ramai di rantai, dan menilai hook terhadap kriteria adopsi.
+
+**Belum pernah ada satu pun transaksi sungguhan.** `execution.dry_run` menyala
+secara bawaan, dan mematikannya adalah keputusan sadar user. Jangan pernah
+mematikannya atas inisiatif sendiri.
+
+### Yang belum dikerjakan
+
+| Hal | Keterangan |
+| --- | --- |
+| Fase 7 | Self improvement, belum dimulai sama sekali |
+| Tambah likuiditas dan rebalance satu langkah | Sekarang harus tutup posisi lalu buka range baru, dua transaksi |
+| Uji transfer tax dan honeypot | PRD 5.4 butir 1 dan 2, belum ada. Label `Hindari` sekarang hanya dari hook |
+| TVL dan jumlah LP unik untuk allowlist hook | Dua dari lima kriteria adopsi belum bisa diukur, jadi tidak ada hook yang lolos otomatis |
+| Handle geser di atas histogram, tombol zoom | Ada di acuan MMT Finance, belum ditiru |
+| Toggle Zap mematikan zap di engine | Sekarang toggle hanya mengubah tampilan dan memberi peringatan |
+
+### Lima hal yang berulang kali menyesatkan
+
+Semuanya sudah pernah memakan waktu satu sesi penuh. Baca sebelum menduga ada
+bug baru.
+
+1. **Engine harus dijalankan ulang setelah kode engine berubah.** Kalau
+   `cargo run` menjawab `Access is denied` pada `rangefinder.exe`, prosesnya
+   masih hidup: `Get-Process rangefinder | Stop-Process -Force` dulu. Panel
+   yang berbicara dengan engine lama menampilkan kolom kosong tanpa satu pun
+   pesan kesalahan, dan itu terlihat persis seperti bug perhitungan.
+
+2. **RPC harus yang mengizinkan `eth_getLogs` rentang lebar.** Alchemy paket
+   gratis membatasi sepuluh blok, sedangkan penemuan pool menuntut jutaan.
+   RPC publik `https://rpc.mainnet.chain.robinhood.com` harus di urutan
+   pertama pada `[rpc] http` di `%LOCALAPPDATA%\Rangefinder\config.toml`.
+   `ChainClient` hanya berpindah endpoint saat pemeriksaan kesehatan gagal,
+   bukan saat satu permintaan gagal, jadi menaruhnya di urutan kedua tidak
+   menolong.
+
+3. **Kalau user bilang sebuah angka tidak muncul, buktikan di kabel dulu.**
+   Membaca kode tidak cukup, karena kegagalannya hampir selalu di jalur
+   pengiriman, bukan di rumusnya. Caranya ada di bagian berikutnya.
+
+4. **Fee dinamis tidak punya APR, dan itu benar.** Besarannya baru ditentukan
+   hook saat swap terjadi. Kolom APR yang kosong pada pool berfee dinamis
+   bukan bug.
+
+5. **Nol berbeda dari belum terukur, di mana pun.** Seluruh struct di proyek
+   ini memakai `Option` untuk membedakannya, dan panel menulis garis untuk
+   yang kosong. Mengubahnya menjadi nol akan membuat pool yang ramai terbaca
+   sebagai pool yang sepi.
+
+### Cara membuktikan angka sampai ke panel
+
+```
+# 1. Hentikan engine lama, bangun ulang, jalankan.
+Get-Process rangefinder -ErrorAction SilentlyContinue | Stop-Process -Force
+cargo run -p rangefinder-engine
+
+# 2. Di terminal lain, sambung seperti panel dan lihat isinya.
+node scripts/probe-ws.mjs <alamat_token>
+```
+
+Skrip itu membaca `pairing.token` dari direktori data, menyambung ke
+`ws://127.0.0.1:8787/ws` dengan subprotocol `["rangefinder", <token>]`,
+mengirim `subscribe_token`, lalu mencetak setiap `token_state` beserta apakah
+`stats` terisi. Node 22 sudah punya `WebSocket` bawaan, tidak perlu dependensi.
+Skripnya ada di repo, jadi tidak perlu ditulis ulang.
+
 ## Baca ini dulu
 
 - **Bahasa dokumen dan komentar: Indonesia. Istilah teknis tetap Inggris.**
@@ -220,8 +301,8 @@ bytecode yang tidak cocok dengan yang dipin.
 | 3 | Eksekusi V3 | **selesai**. Gate G0 sampai G7 terangkai dan terbukti jalan terhadap pool sungguhan lewat `cargo xtask dryrun`: versi protokol, pembatas nilai, builder calldata, golden vector, simulasi, asersi invarian, izin ERC20, pengiriman beserta penjaga chain id dan nonce, serta verifikasi pasca kirim. Jalur panel lengkap: `quote_range`, `approve_token`, `open_position`. Yang belum pernah terjadi: satu pengiriman sungguhan, karena `dry_run` menyala secara bawaan dan mematikannya adalah keputusan user |
 | 4 | Eksekusi V4 dan zap | **selesai**. ABI V4 dibuktikan ada di bytecode terpasang lewat `cargo xtask v4probe`, encoder aksi menghasilkan byte identik dengan transaksi V4 sungguhan sepanjang 868 byte, izin dua lapis lewat Permit2, gate G0 sampai G7 terangkai. Zap satu sisi memakai kutipan V4Quoter dan penyelesai bagi dua, dan encoder UniversalRouter fork membangun ulang transaksi swap sungguhan 1124 byte byte per byte termasuk field `minHopPriceX36`. `cargo xtask dryrun` dan `cargo xtask zap` hijau terhadap pool nyata |
 | 5 | Positions, PnL, notifikasi | **selesai**. Posisi V3 lewat ERC721Enumerable dan V4 lewat pemindaian Transfer, karena V4 tidak punya enumerasi. Fee dibaca dari pertumbuhan fee, bukan `tokensOwed`. PnL memisahkan fee, impermanent loss, gas, dan slippage, dinyatakan dalam token kutipan. Toast diinjeksi ke halaman gmgn dengan pendinginan dan riwayat, dan content script menyambung sendiri ke engine supaya kabar tetap sampai saat panel tertutup. Terbukti terhadap wallet sungguhan lewat `cargo xtask positions`. Klaim fee dan tutup posisi bisa dijalankan dari kartu, dengan simulasi ditampilkan sebelum tombol konfirmasi aktif. Yang belum: tambah likuiditas dan rebalance dalam satu langkah |
-| 6 | Signals dan doktrin penempatan | **selesai**. Detektor sideways bervolume tinggi dan detektor dump lalu basis, keduanya murni dan diuji tanpa rantai, ditambah doktrin penempatan yang selalu menyertakan alasannya sebagai keputusan beli dan jual. Bar datang dari chart gmgn lewat `chart_bars`. Optimizer fee tier terpasang dan terbukti terhadap volume sungguhan lewat `cargo xtask optimizer`. Pemindaian banyak token berjalan dari log rantai, bukan API gmgn, dan menghasilkan daftar berlabel lengkap dengan alasannya di tab Signals, terbukti lewat `cargo xtask scan`. Gate hook PRD 5.4 terpasang: tiga dari lima kriteria adopsi terukur on chain, dan hook yang bisa diupgrade ditolak mutlak. Dua kriteria sisanya, yaitu TVL dan jumlah LP unik, belum bisa diukur, sehingga belum ada hook yang lolos otomatis dan jalan masuknya adalah persetujuan sadar user yang dicatat beserta angka saat itu |
-| 7 | Self improvement | belum |
+| 6 | Signals dan doktrin penempatan | **selesai**. Detektor sideways dan detektor dump lalu basis, keduanya murni dan diuji tanpa rantai, ditambah doktrin penempatan yang selalu menyertakan alasannya. Optimizer fee tier terbukti lewat `cargo xtask optimizer`. Pemindaian banyak token berjalan dari log rantai, bukan API gmgn, dan menghasilkan daftar berlabel di tab Signals lewat `cargo xtask scan`. Gate hook PRD 5.4 terpasang: tiga dari lima kriteria adopsi terukur, hook yang bisa diupgrade ditolak mutlak, dan sisanya lewat persetujuan sadar user yang dicatat |
+| 6b | Perbaikan dari pemakaian | **selesai**. Distribusi likuiditas untuk V3 dan V4, statistik pool, setoran dua sisi beserta saldo wallet, perkiraan gas, Settings sebagai tab tersendiri, dan penyuntingan RPC. Seluruh keputusannya tercatat di PRD 6.15 || 7 | Self improvement | belum |
 
 ### Bukti fase 1 selesai
 
