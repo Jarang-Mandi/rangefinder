@@ -119,17 +119,8 @@ pub async fn run(repo_root: &Path) -> Result<bool> {
     println!();
 
     println!(
-        "  {:<10} {:<7} {:>9} {:>9} {:>9} {:>8} {:>8} {:>5} {:>6}  {}",
-        "simbol",
-        "pasangan",
-        "mcap",
-        "volume",
-        "modal",
-        "hasil",
-        "APR",
-        "ER",
-        "umur",
-        "aksi"
+        "  {:<10} {:<7} {:>9} {:>9} {:>9} {:>8} {:>8} {:>5} {:>6}  aksi",
+        "simbol", "pasangan", "mcap", "volume", "modal", "hasil", "APR", "ER", "umur"
     );
     println!("  {}", "-".repeat(104));
 

@@ -221,6 +221,22 @@ pub struct DaftarKandidat {
     pub volume_jendela_pendek: bool,
 }
 
+/// Satuan sebuah pasangan token, dipakai mengubah angka mentah menjadi kutipan.
+///
+/// Ketiganya selalu bepergian bersama, dan memisahkannya menjadi tiga parameter
+/// membuat urutan argumen mudah tertukar. Dua di antaranya bertipe sama dan
+/// nilainya berdekatan, sehingga tertukarnya tidak akan memunculkan error apa
+/// pun, hanya angka yang salah.
+#[derive(Debug, Clone, Copy)]
+pub struct Satuan {
+    /// Harga memecoin dalam kutipan, desimal kedua sisi sudah dihitung.
+    pub harga: f64,
+    /// Sepuluh pangkat desimal memecoin.
+    pub skala_meme: f64,
+    /// Sepuluh pangkat desimal kutipan.
+    pub skala_quote: f64,
+}
+
 /// Umur pool dalam jam.
 ///
 /// Umur adalah salah satu penyaring paling menentukan di playbook: pool yang
@@ -389,9 +405,7 @@ pub fn kedalaman_1_persen(
     tick: i32,
     likuiditas: u128,
     quote_adalah_token1: bool,
-    harga_quote_per_meme: f64,
-    skala_meme: f64,
-    skala_quote: f64,
+    satuan: Satuan,
 ) -> Option<f64> {
     kedalaman_rentang(
         tick,
@@ -399,9 +413,7 @@ pub fn kedalaman_1_persen(
         tick + TICK_PER_PERSEN,
         likuiditas,
         quote_adalah_token1,
-        harga_quote_per_meme,
-        skala_meme,
-        skala_quote,
+        satuan,
     )
 }
 
@@ -421,11 +433,9 @@ pub fn kedalaman_rentang(
     atas: i32,
     likuiditas: u128,
     quote_adalah_token1: bool,
-    harga_quote_per_meme: f64,
-    skala_meme: f64,
-    skala_quote: f64,
+    satuan: Satuan,
 ) -> Option<f64> {
-    if likuiditas == 0 || atas <= bawah || !harga_quote_per_meme.is_finite() {
+    if likuiditas == 0 || atas <= bawah || !satuan.harga.is_finite() {
         return None;
     }
     // Batas dijaga tetap mengapit harga sekarang. Rentang yang seluruhnya di
@@ -452,14 +462,14 @@ pub fn kedalaman_rentang(
     let amount0 = liquidity_math::amount0_for_liquidity(sekarang, sqrt_atas, likuiditas).ok()?;
     let amount1 = liquidity_math::amount1_for_liquidity(sqrt_bawah, sekarang, likuiditas).ok()?;
 
-    let (mentah_quote, mentah_meme, skala_sisi_meme) = if quote_adalah_token1 {
-        (amount1, amount0, skala_meme)
+    let (mentah_quote, mentah_meme) = if quote_adalah_token1 {
+        (amount1, amount0)
     } else {
-        (amount0, amount1, skala_meme)
+        (amount0, amount1)
     };
 
-    let sisi_quote = f64::from(mentah_quote) / skala_quote;
-    let sisi_meme = f64::from(mentah_meme) / skala_sisi_meme * harga_quote_per_meme;
+    let sisi_quote = f64::from(mentah_quote) / satuan.skala_quote;
+    let sisi_meme = f64::from(mentah_meme) / satuan.skala_meme * satuan.harga;
     let total = sisi_quote + sisi_meme;
     total.is_finite().then_some(total)
 }
@@ -600,6 +610,14 @@ pub async fn perkaya<P: Provider>(
     // satu permintaan tambahan.
     let keadaan = baca_keadaan(provider, registry, &hasil.kandidat).await?;
 
+    let ctx = Konteks {
+        registry,
+        meta: &peta_meta,
+        jendela_detik,
+        sampai_blok: hasil.sampai_blok,
+        allowlist_hook,
+    };
+
     let mut out = Vec::with_capacity(hasil.kandidat.len());
     for k in &hasil.kandidat {
         let Some(p) = keadaan.get(&k.pool_id.to_lowercase()) else {
@@ -616,16 +634,7 @@ pub async fn perkaya<P: Provider>(
             )
         });
 
-        out.push(susun_baris(
-            k,
-            p,
-            registry,
-            &peta_meta,
-            vol,
-            jendela_detik,
-            hasil.sampai_blok,
-            allowlist_hook,
-        ));
+        out.push(susun_baris(k, p, vol, &ctx));
     }
 
     // Diurutkan menurut proyeksi, bukan menurut keramaian. Yang dicari user
@@ -714,16 +723,31 @@ async fn baca_keadaan<P: Provider>(
 }
 
 /// Susun satu baris dari kandidat, keadaan pool, dan metadata token.
+/// Segala sesuatu yang berlaku sama untuk seluruh baris dalam satu pemindaian.
+///
+/// Dikelompokkan supaya tanda tangan `susun_baris` tidak menjadi deretan
+/// argumen yang mudah tertukar, dan supaya jelas mana yang milik satu baris
+/// dan mana yang milik pemindaiannya.
+struct Konteks<'a> {
+    registry: &'a Registry,
+    meta: &'a HashMap<String, super::TokenMeta>,
+    jendela_detik: f64,
+    sampai_blok: u64,
+    allowlist_hook: &'a [String],
+}
+
 fn susun_baris(
     k: &Kandidat,
     p: &PoolInfo,
-    registry: &Registry,
-    meta: &HashMap<String, super::TokenMeta>,
     volume_panjang: Option<(u128, u128)>,
-    jendela_detik: f64,
-    sampai_blok: u64,
-    allowlist_hook: &[String],
+    ctx: &Konteks,
 ) -> BarisScan {
+    let registry = ctx.registry;
+    let meta = ctx.meta;
+    let jendela_detik = ctx.jendela_detik;
+    let sampai_blok = ctx.sampai_blok;
+    let allowlist_hook = ctx.allowlist_hook;
+
     let likuiditas: u128 = p.liquidity.parse().unwrap_or(0);
     let memecoin = super::scan::sisi_memecoin(k, registry);
 
@@ -804,14 +828,16 @@ fn susun_baris(
                 atas,
                 likuiditas,
                 quote_adalah_token1,
-                harga,
-                skala_meme,
-                skala_quote,
+                Satuan {
+                    harga,
+                    skala_meme,
+                    skala_quote,
+                },
             );
 
             (
                 Some(harga),
-                (mm.total_supply > 0.0).then(|| harga * mm.total_supply),
+                (mm.total_supply > 0.0).then_some(harga * mm.total_supply),
                 Some(vol_mentah / skala_quote),
                 kedalaman,
             )
@@ -870,6 +896,14 @@ fn susun_baris(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Harga satu banding satu dengan skala yang sama, supaya uji kedalaman
+    /// menguji geometrinya saja, bukan konversi desimalnya.
+    const SATUAN_UJI: Satuan = Satuan {
+        harga: 1.0,
+        skala_meme: 1.0,
+        skala_quote: 1.0,
+    };
 
     fn kandidat_uji() -> Kandidat {
         Kandidat {
@@ -1056,9 +1090,9 @@ mod tests {
         // Range yang lebih lebar butuh modal lebih besar untuk likuiditas yang
         // sama. Mengukur modal pada pita yang lebih sempit daripada range yang
         // sesungguhnya dibutuhkan membuat proyeksi hasilnya terlihat besar.
-        let sempit = kedalaman_rentang(0, -100, 100, 1_000_000_000, true, 1.0, 1.0, 1.0).unwrap();
+        let sempit = kedalaman_rentang(0, -100, 100, 1_000_000_000, true, SATUAN_UJI).unwrap();
         let lebar =
-            kedalaman_rentang(0, -1_000, 1_000, 1_000_000_000, true, 1.0, 1.0, 1.0).unwrap();
+            kedalaman_rentang(0, -1_000, 1_000, 1_000_000_000, true, SATUAN_UJI).unwrap();
         assert!(lebar > sempit, "lebar {lebar} harus di atas sempit {sempit}");
     }
 
@@ -1070,12 +1104,12 @@ mod tests {
         // dengan modal 0,0000 dan hasil 142 persen karena ini.
         //
         // Harga di batas ATAS rentang: kaki token0 kosong, kaki token1 penuh.
-        let di_atas = kedalaman_rentang(0, -1_000, 0, 1_000_000_000, true, 1.0, 1.0, 1.0)
+        let di_atas = kedalaman_rentang(0, -1_000, 0, 1_000_000_000, true, SATUAN_UJI)
             .expect("harus ada nilainya");
         assert!(di_atas > 0.0, "modal {di_atas} tidak boleh nol");
 
         // Harga di batas BAWAH rentang: kebalikannya.
-        let di_bawah = kedalaman_rentang(0, 0, 1_000, 1_000_000_000, true, 1.0, 1.0, 1.0)
+        let di_bawah = kedalaman_rentang(0, 0, 1_000, 1_000_000_000, true, SATUAN_UJI)
             .expect("harus ada nilainya");
         assert!(di_bawah > 0.0, "modal {di_bawah} tidak boleh nol");
     }
@@ -1085,14 +1119,14 @@ mod tests {
         // Pada harga satu banding satu dengan skala yang sama, modal total
         // harus sama apakah kutipannya token0 atau token1. Kalau tidak, ada
         // kaki yang dihitung dua kali atau tidak sama sekali.
-        let a = kedalaman_rentang(0, -500, 500, 1_000_000_000, true, 1.0, 1.0, 1.0).unwrap();
-        let b = kedalaman_rentang(0, -500, 500, 1_000_000_000, false, 1.0, 1.0, 1.0).unwrap();
+        let a = kedalaman_rentang(0, -500, 500, 1_000_000_000, true, SATUAN_UJI).unwrap();
+        let b = kedalaman_rentang(0, -500, 500, 1_000_000_000, false, SATUAN_UJI).unwrap();
         assert!((a - b).abs() / a < 1e-6, "token1 {a}, token0 {b}");
     }
 
     #[test]
     fn kedalaman_rentang_menolak_rentang_terbalik() {
-        assert!(kedalaman_rentang(0, 100, -100, 1_000, true, 1.0, 1.0, 1.0).is_none());
+        assert!(kedalaman_rentang(0, 100, -100, 1_000, true, SATUAN_UJI).is_none());
     }
 
     #[test]
@@ -1127,13 +1161,13 @@ mod tests {
 
     #[test]
     fn kedalaman_nol_kalau_tidak_ada_likuiditas() {
-        assert!(kedalaman_1_persen(0, 0, true, 1.0, 1.0, 1.0).is_none());
+        assert!(kedalaman_1_persen(0, 0, true, SATUAN_UJI).is_none());
     }
 
     #[test]
     fn kedalaman_naik_seiring_likuiditas() {
-        let kecil = kedalaman_1_persen(0, 1_000_000, true, 1.0, 1.0, 1.0).unwrap();
-        let besar = kedalaman_1_persen(0, 2_000_000, true, 1.0, 1.0, 1.0).unwrap();
+        let kecil = kedalaman_1_persen(0, 1_000_000, true, SATUAN_UJI).unwrap();
+        let besar = kedalaman_1_persen(0, 2_000_000, true, SATUAN_UJI).unwrap();
         assert!(besar > kecil);
     }
 }

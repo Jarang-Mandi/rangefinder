@@ -168,15 +168,6 @@ pub enum Kriteria {
     BelumTerukur,
 }
 
-impl Kriteria {
-    fn dari(terpenuhi: bool) -> Self {
-        if terpenuhi {
-            Kriteria::Lolos
-        } else {
-            Kriteria::Gagal
-        }
-    }
-}
 
 /// Penilaian lengkap sebuah hook.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -348,10 +348,10 @@ mod tests {
     fn jendela_menyempit_punya_dasar() {
         // Jendela awal harus di atas minimumnya, kalau tidak penyempitannya
         // tidak pernah berjalan dan hasilnya selalu dari jendela terpendek.
-        assert!(JENDELA_SCAN_AWAL > JENDELA_SCAN_MINIMUM);
+        const { assert!(JENDELA_SCAN_AWAL > JENDELA_SCAN_MINIMUM) };
         // Minimum tidak boleh terlalu pendek: dua ratus blok kira kira dua
         // puluh detik, dan pool ramai pun bisa kebetulan sepi selama itu.
-        assert!(JENDELA_SCAN_MINIMUM >= 100);
+        const { assert!(JENDELA_SCAN_MINIMUM >= 100) };
     }
 
     #[test]
