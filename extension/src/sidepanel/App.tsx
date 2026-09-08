@@ -793,6 +793,10 @@ function TokenCard({
   onSelectPool: (poolId: string) => void;
   onSelectQuote: (quote: string) => void;
 }) {
+  const jendelaMenit =
+    token.pools.find((p) => p.stats?.jendela_menit != null)?.stats?.jendela_menit ??
+    null;
+
   // Pool aktif ditentukan engine, bukan panel, supaya tidak ada dua sumber
   // kebenaran. Selama tampilan range belum datang, pilihan awal dari
   // token_state yang dipakai.
@@ -830,6 +834,15 @@ function TokenCard({
           <h2>Pool</h2>
           <span class="chip">{token.pools.length} layak</span>
         </div>
+
+        {/* Jendela disebut supaya angka nol terbaca sebagai tidak ada
+            perdagangan, bukan sebagai data yang belum sampai. Keduanya
+            terlihat sama persis di layar tanpa keterangan ini. */}
+        {jendelaMenit !== null ? (
+          <p class="hint" style="margin: var(--s2) 0 0">
+            APR dan volume atas {jendelaMenit.toFixed(0)} menit terakhir.
+          </p>
+        ) : null}
 
         <QuotePicker
           quotes={token.quotes}
@@ -1989,14 +2002,15 @@ function SetoranCard({
     <div class="setoran">
       <div class="section-title">
         <h3>Set deposit amounts</h3>
-        <label class="zap-toggle">
-          <input
-            type="checkbox"
-            checked={zap}
-            onChange={(e) => setZap((e.target as HTMLInputElement).checked)}
-          />
-          <span>Zap in</span>
-        </label>
+        <button
+          type="button"
+          class={`sakelar${zap ? " nyala" : ""}`}
+          onClick={() => setZap(!zap)}
+          aria-pressed={zap}
+        >
+          <span class="sakelar-tuas" />
+          <span class="sakelar-teks">Zap in</span>
+        </button>
       </div>
 
       {/* Zap menyala berarti satu aset saja: engine menukar sebagiannya
@@ -2460,7 +2474,7 @@ function PoolRow({
         </span>
         <span>
           <i>vol</i>
-          {s ? formatCompact(s.volume) : "-"}
+          {s?.volume == null ? "-" : formatCompact(s.volume)}
         </span>
       </span>
     </button>
@@ -2808,7 +2822,6 @@ function WalletCard({
 }) {
   const w = status.wallet;
   const [passphrase, setPassphrase] = useState("");
-  const [importing, setImporting] = useState(false);
   const [privateKey, setPrivateKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
@@ -2886,13 +2899,13 @@ function WalletCard({
         </button>
       ) : null}
 
+      {/* SATU FORM SAJA
+          Kunci privat bersifat pilihan: diisi berarti mengimpor, dikosongkan
+          berarti engine membuat kunci acak. Ceklis terpisah hanya menambah
+          satu keputusan tanpa mengubah apa pun yang tidak sudah terjawab oleh
+          isi kotaknya sendiri. */}
       {!w.exists ? (
         <div class="stack" style="margin-top: var(--s3)">
-          <p class="muted" style="margin: 0">
-            Pakai wallet terpisah khusus operasi ini. Pembatas nominal bawaannya
-            tidak terbatas, jadi pengamannya adalah isi wallet itu sendiri.
-          </p>
-
           <input
             type="password"
             value={passphrase}
@@ -2900,57 +2913,33 @@ function WalletCard({
             onInput={(e) => setPassphrase((e.target as HTMLInputElement).value)}
           />
 
-          <label class="toggle">
-            <input
-              type="checkbox"
-              checked={importing}
-              onChange={(e) => {
-                setImporting((e.target as HTMLInputElement).checked);
-                setPrivateKey("");
-              }}
-            />
-            Impor kunci privat yang sudah ada
-          </label>
-
-          {importing ? (
-            <>
-              <input
-                type="password"
-                value={privateKey}
-                placeholder="0x diikuti 64 karakter heksadesimal"
-                spellcheck={false}
-                onInput={(e) => setPrivateKey((e.target as HTMLInputElement).value)}
-              />
-              <p class="muted" style="margin: 0">
-                Kunci dikirim ke engine di mesin ini saja, lalu langsung
-                dienkripsi ke keystore. Ia tidak pernah ditulis sebagai teks
-                biasa dan tidak pernah keluar dari mesin.
-              </p>
-            </>
-          ) : (
-            <p class="muted" style="margin: 0">
-              Engine akan membuat kunci acak. Setelah itu kirim ETH dan token ke
-              alamat yang muncul.
-            </p>
-          )}
+          <input
+            type="password"
+            value={privateKey}
+            placeholder="Kunci privat, kosongkan untuk kunci acak"
+            spellcheck={false}
+            onInput={(e) => setPrivateKey((e.target as HTMLInputElement).value)}
+          />
 
           <button
             class="primary"
-            disabled={busy || passphrase.length < 8 || (importing && !isPrivateKey(privateKey))}
+            disabled={
+              busy ||
+              passphrase.length < 8 ||
+              (privateKey.trim().length > 0 && !isPrivateKey(privateKey))
+            }
             onClick={() =>
               void act("/v1/wallet/create", {
                 passphrase,
-                ...(importing ? { private_key: privateKey.trim() } : {}),
+                ...(privateKey.trim() ? { private_key: privateKey.trim() } : {}),
               })
             }
           >
-            {importing ? "Impor wallet" : "Buat wallet"}
+            {privateKey.trim() ? "Impor wallet" : "Buat wallet"}
           </button>
 
-          {importing && privateKey.trim() && !isPrivateKey(privateKey) ? (
-            <p class="error">
-              Kunci privat harus 0x diikuti 64 karakter heksadesimal.
-            </p>
+          {privateKey.trim() && !isPrivateKey(privateKey) ? (
+            <p class="error">0x diikuti 64 karakter heksadesimal.</p>
           ) : null}
         </div>
       ) : null}

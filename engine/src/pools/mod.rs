@@ -150,9 +150,14 @@ pub struct PoolInfo {
 #[derive(Debug, Clone, Serialize)]
 pub struct PoolStats {
     /// Volume pada jendela yang diukur, dalam kutipan.
-    pub volume: f64,
+    ///
+    /// `None` berarti belum bisa diukur, bukan nol. Pengukuran volume membaca
+    /// event `Swap` PoolManager V4 dan menyaringnya menurut poolId, dan pool V3
+    /// tidak punya keduanya. Nol berarti benar benar tidak ada perdagangan,
+    /// dan itu kesimpulan yang sangat berbeda.
+    pub volume: Option<f64>,
     /// Lamanya jendela itu, dalam menit. Volume tanpa jendela tidak berarti.
-    pub jendela_menit: f64,
+    pub jendela_menit: Option<f64>,
     /// Seluruh modal yang tertanam di pool, dalam kutipan.
     ///
     /// Dijumlahkan dari distribusi likuiditas, bukan ditaksir dari likuiditas
@@ -786,16 +791,49 @@ async fn ukur_stats<P: Provider>(
         return;
     }
 
-    let ids: Vec<String> = kelompok.pools.iter().map(|p| p.id.clone()).collect();
-    let terukur = match volume::ukur_volume(provider, registry, &ids).await {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(error = %e, "volume pool gagal diukur, statistik dilewati");
-            return;
-        }
-    };
+    // Volume diukur per protokol, karena sumbernya berbeda: V4 memancarkan
+    // Swap dari PoolManager dengan poolId sebagai topic, V3 dari kontrak pool
+    // masing masing tanpa pengenal apa pun selain alamat log.
+    let (v4, v3): (Vec<&PoolInfo>, Vec<&PoolInfo>) = kelompok
+        .pools
+        .iter()
+        .partition(|p| p.version == PoolVersion::V4);
 
-    let jendela_detik = terukur.jendela_detik(registry.chain.block_time_ms);
+    let mut per_pool: std::collections::HashMap<String, u128> = Default::default();
+    let mut per_pool1: std::collections::HashMap<String, u128> = Default::default();
+    let mut jendela_detik = 0.0_f64;
+
+    if !v4.is_empty() {
+        let ids: Vec<String> = v4.iter().map(|p| p.id.clone()).collect();
+        match volume::ukur_volume(provider, registry, &ids).await {
+            Ok(v) => {
+                jendela_detik = v.jendela_detik(registry.chain.block_time_ms);
+                per_pool.extend(v.per_pool);
+                per_pool1.extend(v.per_pool1);
+            }
+            Err(e) => tracing::warn!(error = %e, "volume V4 gagal diukur"),
+        }
+    }
+
+    if !v3.is_empty() {
+        let alamat: Vec<String> = v3.iter().map(|p| p.id.clone()).collect();
+        match volume::ukur_volume_v3(provider, registry, &alamat).await {
+            Ok(v) => {
+                // Jendela keduanya sama panjang kecuali salah satunya
+                // menyempit. Yang terpendek yang dipakai, karena volume dari
+                // dua jendela berbeda tidak bisa dibandingkan.
+                let j = v.jendela_detik(registry.chain.block_time_ms);
+                jendela_detik = if jendela_detik == 0.0 {
+                    j
+                } else {
+                    jendela_detik.min(j)
+                };
+                per_pool.extend(v.per_pool);
+                per_pool1.extend(v.per_pool1);
+            }
+            Err(e) => tracing::warn!(error = %e, "volume V3 gagal diukur"),
+        }
+    }
     let skala_meme = 10f64.powi(meta.decimals as i32);
     let skala_quote = 10f64.powi(kelompok.quote_decimals as i32);
     // TVL sebenarnya, dijumlahkan dari distribusi seluruh pool sekaligus.
@@ -843,23 +881,33 @@ async fn ukur_stats<P: Provider>(
         let kunci = pool.id.to_lowercase();
         let quote_adalah_token1 = pool.token0.eq_ignore_ascii_case(&meta.address);
 
-        let mentah = if quote_adalah_token1 {
-            terukur.per_pool1.get(&kunci).copied().unwrap_or(0)
-        } else {
-            terukur.per_pool.get(&kunci).copied().unwrap_or(0)
-        };
-        let volume = mentah as f64 / skala_quote;
+        // Jendela nol berarti pengukurannya tidak pernah berjalan, biasanya
+        // karena poolnya V3. Melaporkan volume nol di situ akan terbaca sebagai
+        // pool yang sepi, padahal ia justru bisa sangat ramai.
+        // Jendela nol berarti pengukurannya tidak pernah berjalan. Melaporkan
+        // volume nol di situ akan terbaca sebagai pool yang sepi, padahal ia
+        // justru bisa sangat ramai.
+        let terukur_volume = jendela_detik > 0.0 && per_pool.contains_key(&kunci);
+        let volume = terukur_volume.then(|| {
+            let mentah = if quote_adalah_token1 {
+                per_pool1.get(&kunci).copied().unwrap_or(0)
+            } else {
+                per_pool.get(&kunci).copied().unwrap_or(0)
+            };
+            mentah as f64 / skala_quote
+        });
 
         let tvl = tvl_pool.get(&kunci).copied();
-
+    
         let apr = (!pool.dynamic_fee)
             .then_some(())
             .and(tvl)
-            .and_then(|d| kandidat::proyeksi_apr(volume, pool.fee, d, jendela_detik));
+            .zip(volume)
+            .and_then(|(d, v)| kandidat::proyeksi_apr(v, pool.fee, d, jendela_detik));
 
         pool.stats = Some(PoolStats {
             volume,
-            jendela_menit: jendela_detik / 60.0,
+            jendela_menit: terukur_volume.then(|| jendela_detik / 60.0),
             tvl: tvl.unwrap_or(0.0),
             apr,
         });

@@ -77,10 +77,10 @@ export type PoolVersion = "v3" | "v4";
  * dari harga tidak menerima fee apa pun.
  */
 export interface PoolStats {
-  volume: number;
-  jendela_menit: number;
+  /** Null berarti belum bisa diukur, bukan nol. Pool V3 belum terukur. */
+  volume: number | null;
+  jendela_menit: number | null;
   tvl: number;
-  tvl_lebar_persen: number;
   apr: number | null;
 }
 

@@ -784,14 +784,17 @@ impl AppState {
         // APR memakai modal yang benar benar disetor, bukan modal acuan.
         // Penyebutnya memuat modal kita sendiri, jadi angkanya tidak pernah
         // melewati batas yang mungkin dicapai.
+        // Volume yang belum terukur berarti APR belum bisa dihitung, bukan nol.
         let apr = pool.stats.as_ref().and_then(|st| {
-            if pool.dynamic_fee || nilai_quote <= 0.0 || st.jendela_menit <= 0.0 {
+            let volume = st.volume?;
+            let jendela_menit = st.jendela_menit?;
+            if pool.dynamic_fee || nilai_quote <= 0.0 || jendela_menit <= 0.0 {
                 return None;
             }
             let fee = pool.fee as f64 / 1_000_000.0;
             let bagian = nilai_quote / (st.tvl + nilai_quote);
-            let per_jendela = st.volume * fee * bagian / nilai_quote;
-            let periode = 365.0 * 24.0 * 60.0 / st.jendela_menit;
+            let per_jendela = volume * fee * bagian / nilai_quote;
+            let periode = 365.0 * 24.0 * 60.0 / jendela_menit;
             Some(per_jendela * periode * 100.0)
         });
 

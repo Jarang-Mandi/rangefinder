@@ -87,6 +87,89 @@ impl VolumeTerukur {
     }
 }
 
+/// Ukur volume beberapa pool V3 sekaligus.
+///
+/// KENAPA TERPISAH DARI V4
+/// Pada V3 setiap pool adalah kontraknya sendiri, dan event `Swap` yang ia
+/// pancarkan tidak membawa pengenal pool sama sekali. Yang mengenalinya adalah
+/// alamat log. Penyaringnya pun berbeda: `address` menerima daftar, jadi
+/// seluruh pool tetap bisa ditanyakan dalam satu permintaan.
+///
+/// Sebelum ada ini, setiap token yang pasangan teratasnya V3 melaporkan volume
+/// nol, dan nol itu terbaca sebagai pool yang sepi padahal justru ramai.
+pub async fn ukur_volume_v3<P: Provider>(
+    provider: &P,
+    registry: &Registry,
+    pool_alamat: &[String],
+) -> Result<VolumeTerukur> {
+    let mut per_pool: HashMap<String, u128> = HashMap::new();
+    let mut per_pool1: HashMap<String, u128> = HashMap::new();
+    for a in pool_alamat {
+        per_pool.insert(a.to_lowercase(), 0);
+        per_pool1.insert(a.to_lowercase(), 0);
+    }
+
+    let alamat: Vec<Address> = pool_alamat
+        .iter()
+        .filter_map(|s| s.parse::<Address>().ok())
+        .collect();
+
+    let latest = provider
+        .get_block_number()
+        .await
+        .context("gagal membaca blok terakhir")?;
+
+    if alamat.is_empty() {
+        return Ok(VolumeTerukur {
+            per_pool,
+            per_pool1,
+            dari_blok: latest,
+            sampai_blok: latest,
+            jumlah_swap: 0,
+            dipersempit: false,
+        });
+    }
+
+    let terbaca = crate::chain::logs::baca_mundur(
+        provider,
+        latest,
+        registry.chain.deploy_block,
+        JENDELA_VOLUME_BLOK,
+        JENDELA_VOLUME_MINIMUM,
+        |dari, sampai| {
+            Filter::new()
+                .address(alamat.clone())
+                .event_signature(abi::IUniswapV3Events::Swap::SIGNATURE_HASH)
+                .from_block(dari)
+                .to_block(sampai)
+        },
+    )
+    .await
+    .context("pengukuran volume V3 gagal")?;
+
+    let dari = terbaca.dari_blok;
+    let jumlah_swap = terbaca.logs.len();
+
+    for log in &terbaca.logs {
+        let Ok(d) = abi::IUniswapV3Events::Swap::decode_log(&log.inner) else {
+            continue;
+        };
+        // Yang mengenali pool adalah alamat log, bukan topic.
+        let kunci = log.address().to_string().to_lowercase();
+        *per_pool.entry(kunci.clone()).or_insert(0) += d.amount0.unsigned_abs().to::<u128>();
+        *per_pool1.entry(kunci).or_insert(0) += d.amount1.unsigned_abs().to::<u128>();
+    }
+
+    Ok(VolumeTerukur {
+        per_pool,
+        per_pool1,
+        dari_blok: dari,
+        sampai_blok: latest,
+        jumlah_swap,
+        dipersempit: terbaca.dipersempit,
+    })
+}
+
 /// Ukur volume beberapa pool V4 sekaligus.
 ///
 /// Pool V3 dilewati: eventnya berbeda dan berada di kontrak pool masing masing,

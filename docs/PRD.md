@@ -1248,6 +1248,34 @@ garis persis di tempat kursor dilepas, dan hasil pembulatan ke grid tick tetap
 terbaca sebagai angka di kartu Range. Penggambaran ulang hanya berlaku untuk
 perubahan yang bukan dari chart: preset, custom, dan ganti pool.
 
+**Nama event menentukan topicnya, dan salah nama tidak memunculkan error.**
+Event `Swap` V3 sempat dideklarasikan sebagai `SwapV3` supaya tidak bentrok
+dengan padanan V4. Topic dihitung dari nama beserta tipe argumennya, sehingga
+penyaringnya tidak pernah cocok dengan apa pun di rantai, dan akibatnya nol log
+yang terbaca sebagai pool yang sepi. Bentrok nama diselesaikan dengan menaruhnya
+di dalam interface tersendiri.
+
+**Volume diukur per protokol.** V4 memancarkan `Swap` dari PoolManager dengan
+poolId sebagai topic, V3 dari kontrak pool masing masing tanpa pengenal apa pun
+selain alamat log. Keduanya tetap satu permintaan untuk semua pool, karena baik
+`topic1` maupun `address` menerima daftar nilai.
+
+**TVL dijumlahkan pada jendela yang sama dengan histogram.** Percobaan pertama
+memakai delapan kata bitmap, yang pada tick spacing 200 mencakup empat ratus
+ribu tick. Likuiditas yang dijumlahkan sejauh itu berhenti menggambarkan apa
+pun: tick penutupnya berada di luar jendela sehingga tidak pernah berkurang, dan
+satu pool V3 dilaporkan berisi 50 juta WETH, jauh melebihi seluruh market cap
+tokennya.
+
+**Sisi memecoin dinilai pada harga sekarang, bukan harga tengah pita.** TVL
+berarti nilai pasar sekarang, bukan nilai pada harga hipotetis di masa depan.
+Menilainya pada harga tengah pita ikut menyumbang ledakan di atas.
+
+**Volume yang belum bisa diukur dilaporkan kosong, bukan nol.** Nol berarti tidak
+ada perdagangan, dan itu kesimpulan yang sangat berbeda dari belum terukur.
+Keduanya terlihat sama persis di layar tanpa pembedaan ini, dan user membaca nol
+sebagai data yang tidak muncul.
+
 **Endpoint RPC harus mengizinkan pemindaian log yang lebar.** Alchemy paket
 gratis membatasi `eth_getLogs` pada sepuluh blok, sedangkan penemuan pool V4
 menuntut pemindaian jutaan blok. Batas LEBAR rentang berbeda dari batas JUMLAH

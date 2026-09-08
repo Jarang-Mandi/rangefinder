@@ -140,3 +140,34 @@ sol! {
     );
 }
 
+sol! {
+    /// Event `Swap` dari kontrak pool V3.
+    ///
+    /// Bentuknya berbeda dari padanan V4: tidak ada `id`, karena pool yang
+    /// bersangkutan adalah kontrak yang memancarkannya. Yang mengenali pool
+    /// adalah alamat log, bukan salah satu topic.
+    ///
+    /// `amount0` dan `amount1` di sini `int256`, bukan `int128`. Memakai ABI
+    /// V4 untuk log V3 akan gagal diurai tanpa pesan yang menjelaskan apa pun.
+    ///
+    /// NAMANYA HARUS TETAP `Swap`
+    /// Topic sebuah event dihitung dari NAMA beserta tipe argumennya. Menamainya
+    /// `SwapV3` supaya tidak bentrok dengan padanan V4 menghasilkan topic yang
+    /// tidak cocok dengan apa pun di rantai, dan akibatnya bukan error melainkan
+    /// nol log yang terbaca sebagai pool yang sepi. Bentroknya diselesaikan
+    /// dengan menaruhnya di dalam interface tersendiri, bukan dengan mengganti
+    /// namanya.
+    interface IUniswapV3Events {
+        #[derive(Debug)]
+        event Swap(
+            address indexed sender,
+            address indexed recipient,
+            int256 amount0,
+            int256 amount1,
+            uint160 sqrtPriceX96,
+            uint128 liquidity,
+            int24 tick
+        );
+    }
+}
+

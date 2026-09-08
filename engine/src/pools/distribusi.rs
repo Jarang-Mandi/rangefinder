@@ -356,13 +356,19 @@ pub async fn susun<P: Provider>(
     })
 }
 
-/// Berapa lebar tick yang dicakup saat menjumlahkan TVL sebuah pool.
+/// Berapa kata bitmap paling banyak dibaca saat menjumlahkan TVL.
 ///
-/// Jauh lebih lebar daripada histogram, karena yang dicari di sini bukan bentuk
-/// pool di sekitar harga melainkan seluruh modal yang ada di dalamnya. Delapan
-/// kata bitmap pada spacing 200 mencakup kira kira dari seperseribu sampai
-/// seribu kali harga sekarang, yang praktis menutup seluruh pool memecoin.
-pub const KATA_TVL: i32 = 8;
+/// DULU JAUH LEBIH LEBAR, DAN ITU KELIRU
+/// Percobaan pertama membaca delapan kata penuh, yang pada tick spacing 200
+/// mencakup empat ratus ribu tick. Likuiditas yang dijumlahkan sejauh itu
+/// berhenti menggambarkan apa pun: tick penutupnya berada di luar jendela,
+/// sehingga likuiditasnya tidak pernah berkurang dan pita terluar memuat token
+/// dalam jumlah yang mustahil. Satu pool V3 dilaporkan berisi 50 juta WETH,
+/// jauh melebihi seluruh market cap tokennya.
+///
+/// Sekarang jendelanya sama dengan histogram, dan artinya menjadi jelas: modal
+/// yang berada cukup dekat dengan harga untuk benar benar menerima fee.
+pub const MAKS_KATA_TVL: i32 = 4;
 
 /// Jumlahkan modal yang tertanam di beberapa pool sekaligus.
 ///
@@ -402,9 +408,14 @@ pub async fn tvl_beberapa<P: Provider>(
         if k.tick_spacing <= 0 {
             continue;
         }
+        // Jendela yang sama dengan histogram, dibatasi jumlah kata supaya
+        // biayanya tetap terkendali pada pool bertick spacing kecil.
+        let rentang = ((SPAN_PERSEN / 100.0 + 1.0).ln() / 1.0001_f64.ln()) as i32;
         let tengah = posisi(kompres(k.tick_sekarang, k.tick_spacing)).0 as i32;
-        let dari = tengah - KATA_TVL / 2;
-        let sampai = tengah + KATA_TVL / 2;
+        let bawah = posisi(kompres(k.tick_sekarang - rentang, k.tick_spacing)).0 as i32;
+        let atas = posisi(kompres(k.tick_sekarang + rentang, k.tick_spacing)).0 as i32;
+        let dari = bawah.max(tengah - MAKS_KATA_TVL / 2);
+        let sampai = atas.min(tengah + MAKS_KATA_TVL / 2);
         let awal = calls.len();
         for w in dari..=sampai {
             calls.push(sumber.panggil_bitmap(bytes, w as i16));
@@ -447,6 +458,11 @@ pub async fn tvl_beberapa<P: Provider>(
             continue;
         }
         ticks.sort_unstable();
+        let rentang_tick = ((SPAN_PERSEN / 100.0 + 1.0).ln() / 1.0001_f64.ln()) as i32;
+        ticks.retain(|t| (*t - k.tick_sekarang).abs() <= rentang_tick);
+        if ticks.is_empty() {
+            continue;
+        }
 
         let awal2 = calls.len();
         for t in &ticks {
@@ -473,14 +489,19 @@ pub async fn tvl_beberapa<P: Provider>(
             net.push((*t, v));
         }
 
-        let bawah = *ticks.first().unwrap_or(&k.tick_sekarang);
-        let atas = *ticks.last().unwrap_or(&k.tick_sekarang);
+        // Pita penutup dipotong di batas jendela, bukan di tick terjauh yang
+        // kebetulan terinisialisasi. Alasannya sama dengan di histogram: pita
+        // yang sangat lebar menghasilkan angka besar karena lebarnya, bukan
+        // karena isinya.
+        let rentang = ((SPAN_PERSEN / 100.0 + 1.0).ln() / 1.0001_f64.ln()) as i32;
+        let batas_bawah = k.tick_sekarang - rentang;
+        let batas_atas = k.tick_sekarang + rentang;
         let pita = rangkai(
             &net,
             k.tick_sekarang,
             k.likuiditas,
-            bawah,
-            atas,
+            batas_bawah,
+            batas_atas,
             k.quote_adalah_token1,
             k.skala_meme,
             k.skala_quote,
@@ -624,6 +645,7 @@ fn dorong(
             tick_bawah,
             tick_atas,
             l,
+            tick_sekarang,
             quote_adalah_token1,
             skala_meme,
             skala_quote,
@@ -634,13 +656,23 @@ fn dorong(
 
 /// Modal yang tertanam di sebuah pita, dalam token kutipan.
 ///
-/// Kedua sisi dihitung dan sisi memecoin dinilai pada harga tengah pita. Satu
-/// sisi saja akan membaca nol pada pita yang seluruhnya berada di satu sisi
-/// harga, dan itu justru mayoritas pita pada histogram.
+/// Kedua sisi dihitung. Satu sisi saja akan membaca nol pada pita yang
+/// seluruhnya berada di satu sisi harga, dan itu justru mayoritas pita.
+///
+/// SISI MEMECOIN DINILAI PADA HARGA SEKARANG
+/// Percobaan pertama menilainya pada harga tengah pita, dan itu meledak pada
+/// pita yang lebar: satu pool V3 dilaporkan berisi 100 juta WETH, karena pita
+/// selebar puluhan ribu tick memuat memecoin dalam jumlah raksasa yang dinilai
+/// pada harga puluhan kali lipat harga sekarang.
+///
+/// TVL berarti nilai pasar sekarang, bukan nilai pada harga hipotetis di masa
+/// depan. Menilai seluruh isi pool pada harga sekarang juga membuat pita yang
+/// jauh dari harga terlihat sebagaimana adanya: banyak token, nilai kecil.
 fn nilai_pita(
     tick_bawah: i32,
     tick_atas: i32,
     l: u128,
+    tick_sekarang: i32,
     quote_adalah_token1: bool,
     skala_meme: f64,
     skala_quote: f64,
@@ -658,8 +690,7 @@ fn nilai_pita(
     let amount0 = liquidity_math::amount0_for_liquidity(a, b, l).unwrap_or(U256::ZERO);
     let amount1 = liquidity_math::amount1_for_liquidity(a, b, l).unwrap_or(U256::ZERO);
 
-    let tengah = (tick_bawah + tick_atas) / 2;
-    let harga = harga_di_tick(tengah, quote_adalah_token1, skala_meme, skala_quote);
+    let harga = harga_di_tick(tick_sekarang, quote_adalah_token1, skala_meme, skala_quote);
 
     let (quote, meme) = if quote_adalah_token1 {
         (amount1, amount0)

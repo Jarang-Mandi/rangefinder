@@ -778,19 +778,6 @@
   color: var(--text-muted);
 }
 
-.zap-toggle {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 11px;
-  color: var(--text-muted);
-  cursor: pointer;
-}
-
-.zap-toggle input {
-  width: auto;
-  margin: 0;
-}
 
 /* Tombol utama: satu aksi yang jelas di bawah kedua kotak, seperti acuan. */
 .lebar.utama {
@@ -832,4 +819,54 @@
 
 .kabar.warning {
   color: var(--warn);
+}
+
+/* Sakelar, bukan kotak ceklis. Keadaannya terbaca dari posisi tuas dan warna
+ * latar, bukan dari tanda centang yang mudah terlewat pada teks sekecil ini. */
+.sakelar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.sakelar-tuas {
+  position: relative;
+  display: block;
+  width: 26px;
+  height: 15px;
+  flex: none;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+}
+
+.sakelar-tuas::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: left 120ms ease, background 120ms ease;
+}
+
+.sakelar.nyala {
+  color: var(--text);
+}
+
+.sakelar.nyala .sakelar-tuas {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.sakelar.nyala .sakelar-tuas::after {
+  left: 13px;
+  background: #0f1115;
 }
