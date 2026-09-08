@@ -106,6 +106,9 @@ async fn session(socket: WebSocket, state: AppState) {
                             Ok(ClientMessage::SetRange { lower_mcap, upper_mcap }) => {
                                 state.on_set_range(lower_mcap, upper_mcap).await;
                             }
+                            Ok(ClientMessage::SetFullRange) => {
+                                state.on_set_full_range().await;
+                            }
                             // Tiga pesan berikut menyentuh dana. Masing masing
                             // dijalankan di tugas terpisah supaya loop ini tetap
                             // membalas denyut selama transaksi menunggu receipt,

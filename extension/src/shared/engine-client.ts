@@ -398,6 +398,16 @@ export class EngineClient {
     this.send({ type: "set_range", lower_mcap: lowerMcap, upper_mcap: upperMcap });
   }
 
+  /**
+   * Pasang range selebar yang diizinkan protokol.
+   *
+   * Batasnya dihitung engine, karena ia bergantung pada tick spacing pool.
+   * Mengirim angka raksasa lewat `setRange` tidak bekerja: harganya tidak lagi
+   * bisa diubah menjadi tick dan engine menolaknya tanpa ada yang berubah.
+   */
+  setFullRange() {
+    this.send({ type: "set_full_range" });
+  }
   private startHeartbeat() {
     this.clearHeartbeat();
     this.heartbeat = self.setInterval(() => this.send({ type: "ping" }), HEARTBEAT_MS);

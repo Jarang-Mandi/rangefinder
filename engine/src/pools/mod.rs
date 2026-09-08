@@ -153,14 +153,13 @@ pub struct PoolStats {
     pub volume: f64,
     /// Lamanya jendela itu, dalam menit. Volume tanpa jendela tidak berarti.
     pub jendela_menit: f64,
-    /// Modal yang tertanam pada pita sekitar harga, dalam kutipan.
+    /// Seluruh modal yang tertanam di pool, dalam kutipan.
     ///
-    /// Diberi label TVL di panel, dengan lebar pitanya disebutkan. Ini bukan
-    /// seluruh nilai pool: likuiditas yang jauh dari harga tidak ikut, dan
-    /// memang tidak seharusnya ikut, karena ia tidak menerima fee apa pun.
+    /// Dijumlahkan dari distribusi likuiditas, bukan ditaksir dari likuiditas
+    /// di satu tick. Taksiran seperti itu pernah melaporkan 0,82 untuk pool
+    /// yang isinya kira kira 360, karena likuiditas berubah di setiap tick yang
+    /// terinisialisasi dan satu titik tidak mewakili seluruhnya.
     pub tvl: f64,
-    /// Lebar pita yang dipakai mengukur `tvl`, dalam persen ke tiap arah.
-    pub tvl_lebar_persen: f64,
     /// Proyeksi fee setahun terhadap modal acuan, dalam persen.
     ///
     /// `None` untuk fee dinamis, yang besarannya baru diketahui saat swap
@@ -730,14 +729,6 @@ pub async fn muat_token<P: Provider>(
     Ok(TokenSnapshot { meta, quotes })
 }
 
-/// Lebar pita yang dipakai menghitung TVL sebuah pool, ke tiap arah.
-///
-/// Likuiditas yang jauh dari harga tidak menerima fee apa pun, jadi
-/// memasukkannya ke dalam angka yang dipakai memilih pool akan menyesatkan.
-/// Sepuluh persen cukup lebar untuk memuat range yang masuk akal, dan cukup
-/// sempit untuk tetap menggambarkan modal yang benar benar bekerja.
-pub const TVL_LEBAR_PERSEN: f64 = 10.0;
-
 /// Isi `stats` untuk seluruh pool dalam satu kelompok kutipan.
 ///
 /// Kegagalan tidak menggagalkan pemuatan token: `stats` tetap `None`, dan panel
@@ -767,8 +758,35 @@ async fn ukur_stats<P: Provider>(
     let jendela_detik = terukur.jendela_detik(registry.chain.block_time_ms);
     let skala_meme = 10f64.powi(meta.decimals as i32);
     let skala_quote = 10f64.powi(kelompok.quote_decimals as i32);
-    let lebar_tick = (TVL_LEBAR_PERSEN / 100.0 + 1.0).ln() / 1.0001_f64.ln();
-    let lebar_tick = lebar_tick as i32;
+    // TVL sebenarnya, dijumlahkan dari distribusi seluruh pool sekaligus.
+    // Taksiran memakai likuiditas di satu tick saja pernah melaporkan 0,82
+    // untuk pool yang isinya kira kira 360, karena likuiditas berubah di setiap
+    // tick yang terinisialisasi dan satu titik tidak mewakili seluruhnya.
+    let daftar: Vec<(String, distribusi::KeadaanPool)> = kelompok
+        .pools
+        .iter()
+        .map(|p| {
+            (
+                p.id.clone(),
+                distribusi::KeadaanPool {
+                    tick_spacing: p.tick_spacing,
+                    tick_sekarang: p.tick,
+                    likuiditas: p.liquidity.parse().unwrap_or(0),
+                    quote_adalah_token1: p.token0.eq_ignore_ascii_case(&meta.address),
+                    skala_meme,
+                    skala_quote,
+                },
+            )
+        })
+        .collect();
+
+    let tvl_pool = match (
+        registry.contract("uniswap_v4", "state_view"),
+        registry.contract("common", "multicall3"),
+    ) {
+        (Ok(sv), Ok(mc)) => distribusi::tvl_beberapa(provider, sv, mc, &daftar).await,
+        _ => Default::default(),
+    };
 
     for pool in &mut kelompok.pools {
         let kunci = pool.id.to_lowercase();
@@ -781,25 +799,7 @@ async fn ukur_stats<P: Provider>(
         };
         let volume = mentah as f64 / skala_quote;
 
-        let harga = if quote_adalah_token1 {
-            pool.raw_price * skala_meme / skala_quote
-        } else {
-            (1.0 / pool.raw_price) * skala_meme / skala_quote
-        };
-
-        let likuiditas: u128 = pool.liquidity.parse().unwrap_or(0);
-        let tvl = kandidat::kedalaman_rentang(
-            pool.tick,
-            pool.tick - lebar_tick,
-            pool.tick + lebar_tick,
-            likuiditas,
-            quote_adalah_token1,
-            kandidat::Satuan {
-                harga,
-                skala_meme,
-                skala_quote,
-            },
-        );
+        let tvl = tvl_pool.get(&kunci).copied();
 
         let apr = (!pool.dynamic_fee)
             .then_some(())
@@ -810,7 +810,6 @@ async fn ukur_stats<P: Provider>(
             volume,
             jendela_menit: jendela_detik / 60.0,
             tvl: tvl.unwrap_or(0.0),
-            tvl_lebar_persen: TVL_LEBAR_PERSEN,
             apr,
         });
     }

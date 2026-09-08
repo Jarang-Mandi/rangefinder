@@ -317,8 +317,8 @@ pub fn tentukan_label(
         return (
             Label::LpSideways,
             format!(
-                "Perpindahan bersih hanya {pindah:.2} persen sepanjang \
-                 jendela, di bawah {BATAS_ARAH_PERSEN:.1} persen. Harga belum \
+                "Perpindahan bersih hanya {pindah:.2}% sepanjang \
+                 jendela, di bawah {BATAS_ARAH_PERSEN:.1}%. Harga belum \
                  ke mana mana, jadi range dua sisi yang masuk akal tidak akan \
                  tersentuh."
             ),
@@ -340,7 +340,7 @@ pub fn tentukan_label(
         return (
             Label::Pantau,
             format!(
-                "Perpindahan {pindah:.0} persen dalam satu jendela. Range yang \
+                "Perpindahan {pindah:.0}% dalam satu jendela. Range yang \
                  dipasang sekarang akan langsung tertinggal, dan gerakan \
                  sebesar ini biasanya berbalik sebelum fee sempat terkumpul."
             ),
@@ -351,7 +351,7 @@ pub fn tentukan_label(
         (
             Label::LpBeliTurun,
             format!(
-                "Rasio efisiensi {er:.2} dengan perpindahan {pindah:.1} persen. \
+                "Rasio efisiensi {er:.2} dengan perpindahan {pindah:.1}%. \
                  Harga bergerak searah ke bawah, jadi range ditaruh di bawah \
                  harga supaya memecoin terkumpul saat turun."
             ),
@@ -360,7 +360,7 @@ pub fn tentukan_label(
         (
             Label::LpJualNaik,
             format!(
-                "Rasio efisiensi {er:.2} dengan perpindahan +{pindah:.1} persen. \
+                "Rasio efisiensi {er:.2} dengan perpindahan +{pindah:.1}%. \
                  Harga bergerak searah ke atas, jadi range ditaruh di atas harga \
                  supaya memecoin terjual saat naik."
             ),

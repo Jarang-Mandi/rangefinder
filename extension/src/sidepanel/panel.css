@@ -723,3 +723,8 @@
 .setoran .hint {
   margin-bottom: 0;
 }
+
+.setor-sisi {
+  display: flex;
+  gap: var(--s1);
+}

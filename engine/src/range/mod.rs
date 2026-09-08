@@ -53,8 +53,12 @@ pub struct CurrentPrice {
 pub struct RangeView {
     pub pool_id: String,
     pub tick_spacing: i32,
-    /// Kurs yang tersirat dari chart. Ditampilkan supaya user bisa menilai
-    /// apakah kalibrasinya masuk akal.
+    /// Harga satu token KUTIPAN dalam USD, hasil kalibrasi dari chart.
+    ///
+    /// Namanya menyebut ETH karena pasangan pertama yang ditangani memang WETH,
+    /// tapi isinya berlaku untuk kutipan apa pun: pada pool berpasangan USDG,
+    /// angka ini kira kira satu. Panel memakainya untuk menjumlahkan nilai
+    /// kedua sisi setoran, jadi artinya harus jelas.
     pub eth_usd: f64,
     pub current: CurrentPrice,
     pub lower: RangeBound,

@@ -53,15 +53,6 @@ import {
 
 const TOKEN_KEY = "rangefinder.pairingToken";
 
-/**
- * Berapa lama garis dianggap masih digeser setelah gerakan terakhir.
- *
- * Terlalu pendek, garis tersentak di tengah geseran. Terlalu panjang, hasil
- * pembulatan ke grid tick baru terlihat lama setelah tetikus dilepas. Dua ratus
- * milidetik kira kira jeda antar gerakan tetikus yang masih terasa menyatu.
- */
-const JEDA_SETTLE_MS = 200;
-
 type TabId = "range" | "signals" | "positions" | "pnl";
 
 const TABS: { id: TabId; label: string; phase: number }[] = [
@@ -93,21 +84,21 @@ export function App() {
   const [scan, setScan] = useState<ScanView | null>(null);
 
   /**
-   * Kapan garis terakhir digeser user, dalam milidetik.
+   * Benar kalau perubahan range terakhir datang dari geseran di chart.
    *
    * KENAPA INI PERLU
-   * Menggeser garis memicu `drawing_event` pada setiap gerakan tetikus. Tiap
-   * gerakan dikirim ke engine, engine membulatkannya ke grid tick, lalu
-   * mengirim balik hasilnya, dan panel menggambar ulang garis di posisi hasil
-   * pembulatan itu. Akibatnya garis tersentak ke belakang di bawah kursor yang
-   * masih bergerak, dan geserannya terasa meloncat loncat.
+   * Menggeser garis memicu peristiwa pada setiap gerakan tetikus. Tiap gerakan
+   * dikirim ke engine, dibulatkan ke grid tick, lalu dikirim balik, dan panel
+   * menggambar ulang garis di posisi hasil pembulatan itu. Garisnya tersentak
+   * di bawah kursor yang masih bergerak, dan tersentak sekali lagi saat
+   * kursornya dilepas.
    *
-   * Selama user masih menggeser, biarkan chart yang memegang posisi garis.
-   * Panel baru menggambar ulang setelah geserannya berhenti, sekali saja,
-   * supaya pembulatan ke grid tick tetap terlihat tapi hanya di akhir.
+   * Chart sudah menaruh garis persis di tempat user melepasnya. Menggambarnya
+   * ulang tidak menambah apa pun, dan hasil pembulatan tetap terbaca sebagai
+   * angka di kartu Range. Jadi penggambaran ulang hanya berlaku untuk
+   * perubahan yang BUKAN dari chart: preset, custom, dan ganti pool.
    */
-  const geserTerakhirRef = useRef(0);
-  const [settleTick, setSettleTick] = useState(0);
+  const dariChartRef = useRef(false);
   const [depth, setDepth] = useState<Distribusi | null>(null);
   const [scanBusy, setScanBusy] = useState(false);
 
@@ -283,14 +274,13 @@ export function App() {
           const upper = side === "upper" ? price : v.upper.mcap_usd;
           clientRef.current?.setRange(lower, upper);
 
-          // Selama masih digeser, chart yang memegang posisi garis. Setelah
-          // diam sebentar, panel menggambar ulang sekali supaya hasil
-          // pembulatan ke grid tick terlihat.
-          geserTerakhirRef.current = Date.now();
-          window.clearTimeout(settleTimerRef.current);
-          settleTimerRef.current = window.setTimeout(() => {
-            setSettleTick((n) => n + 1);
-          }, JEDA_SETTLE_MS);
+          // Garis yang digeser user TIDAK digambar ulang, bahkan setelah
+          // geserannya berhenti. Chart sudah menaruhnya persis di tempat
+          // kursor dilepas, dan menggesernya ke posisi hasil pembulatan tick
+          // terlihat seperti loncatan tanpa sebab. Angka hasil pembulatan
+          // tetap muncul di kartu Range, dan di sanalah tempat yang benar
+          // untuk menunjukkannya.
+          dariChartRef.current = true;
           break;
         }
       }
@@ -301,7 +291,6 @@ export function App() {
 
   // Ref supaya listener di atas selalu melihat tampilan terbaru tanpa harus
   // dipasang ulang setiap kali range berubah.
-  const settleTimerRef = useRef<number>(0);
   const latestViewRef = useRef<RangeView | null>(null);
   latestViewRef.current = rangeView;
 
@@ -316,9 +305,14 @@ export function App() {
     const tabId = gmgnTabRef.current;
     if (!rangeView || tabId === null) return;
 
-    // Geseran yang masih berlangsung dilewati. Menggambar ulang sekarang akan
-    // menarik garis dari bawah kursor yang masih bergerak.
-    if (Date.now() - geserTerakhirRef.current < JEDA_SETTLE_MS) return;
+    // Perubahan yang datang dari chart tidak digambar ulang. Garisnya sudah
+    // ada di tempat yang benar menurut user, dan memindahkannya ke hasil
+    // pembulatan terlihat seperti loncatan.
+    if (dariChartRef.current) {
+      dariChartRef.current = false;
+      drawnRef.current = `${rangeView.lower.tick}:${rangeView.upper.tick}:${rangeView.pool_id}`;
+      return;
+    }
 
     const sidik = `${rangeView.lower.tick}:${rangeView.upper.tick}:${rangeView.pool_id}`;
     if (sidik === drawnRef.current) return;
@@ -334,7 +328,7 @@ export function App() {
       .catch(() => {
         // Tab gmgn sudah tertutup atau berpindah. Bukan kondisi error.
       });
-  }, [rangeView, settleTick]);
+  }, [rangeView]);
 
   const savePairing = useCallback(async (value: string) => {
     await chrome.storage.local.set({ [TOKEN_KEY]: value });
@@ -381,6 +375,7 @@ export function App() {
             rangeView={rangeView}
             depth={depth}
             onSetRange={(lo, hi) => clientRef.current?.setRange(lo, hi)}
+            onSetFullRange={() => clientRef.current?.setFullRange()}
             onMuatDepth={() => clientRef.current?.getDepth()}
             onSelectPool={(id) => clientRef.current?.selectPool(id)}
             onSelectQuote={(q) => clientRef.current?.selectQuote(q)}
@@ -540,6 +535,7 @@ function RangeTab({
   rangeView,
   depth,
   onSetRange,
+  onSetFullRange,
   onMuatDepth,
   onSelectPool,
   onSelectQuote,
@@ -562,6 +558,7 @@ function RangeTab({
   rangeView: RangeView | null;
   depth: Distribusi | null;
   onSetRange: (lowerMcap: number, upperMcap: number) => void;
+  onSetFullRange: () => void;
   onMuatDepth: () => void;
   onSelectPool: (poolId: string) => void;
   onSelectQuote: (quote: string) => void;
@@ -598,11 +595,13 @@ function RangeTab({
           rangeView={rangeView}
           depth={depth}
           onSetRange={onSetRange}
+          onSetFullRange={onSetFullRange}
           onMuatDepth={onMuatDepth}
           onSelectPool={onSelectPool}
           onSelectQuote={onSelectQuote}
         />
         <ExecuteCard
+          view={rangeView}
           plan={openPlan}
           result={sendResult}
           busy={execBusy}
@@ -686,6 +685,7 @@ function TokenCard({
   rangeView,
   depth,
   onSetRange,
+  onSetFullRange,
   onMuatDepth,
   onSelectPool,
   onSelectQuote,
@@ -694,6 +694,7 @@ function TokenCard({
   rangeView: RangeView | null;
   depth: Distribusi | null;
   onSetRange: (lowerMcap: number, upperMcap: number) => void;
+  onSetFullRange: () => void;
   onMuatDepth: () => void;
   onSelectPool: (poolId: string) => void;
   onSelectQuote: (quote: string) => void;
@@ -762,6 +763,7 @@ function TokenCard({
             view={rangeView}
             depth={depth}
             onSetRange={onSetRange}
+            onSetFullRange={onSetFullRange}
             onMuat={onMuatDepth}
           />
         </>
@@ -1800,55 +1802,125 @@ function porsiDalamRange(p: Posisi): number {
  * hanya menampilkan dan meneruskan tekanan tombol.
  */
 /**
- * Jumlah tiap sisi yang akan disetor, beserta proyeksi hasilnya.
+ * Setoran dua sisi beserta proyeksi hasilnya.
  *
- * Rasio antara kedua sisi ditentukan range, bukan dipilih user: range yang
- * seluruhnya di bawah harga hanya berisi kutipan, yang seluruhnya di atas hanya
- * berisi memecoin, dan yang mengapit harga berisi keduanya. Karena itu di sini
- * angkanya ditampilkan, bukan diminta.
+ * KENAPA KEDUA SISI TIDAK BISA DIPILIH BEBAS
+ * Rasio antara kedua sisi ditentukan range, bukan oleh user. Range yang
+ * seluruhnya di bawah harga hanya menerima kutipan, yang seluruhnya di atas
+ * hanya menerima memecoin, dan yang mengapit harga menerima keduanya menurut
+ * perbandingan yang sudah tertentu. Karena itu mengisi satu sisi menentukan
+ * sisi yang lain, dan engine yang menghitungnya.
  *
- * APR memakai modal yang benar benar disetor, jadi ia mengecil seiring posisi
- * membesar. Itu memang kenyataannya: modal kita sendiri mengencerkan poolnya.
+ * Yang diketik user hanya dipakai untuk menaksir nominal. Angka yang muncul
+ * setelah rencana tersusun datang dari engine, dan itulah yang benar.
  */
-function SetoranCard({ plan }: { plan: OpenPlanView }) {
-  const s = plan.setor;
-  if (!s) return null;
+function SetoranCard({
+  plan,
+  view,
+  size,
+  setSize,
+  busy,
+  canExecute,
+  onQuote,
+}: {
+  plan: OpenPlanView | null;
+  view: RangeView | null;
+  size: string;
+  setSize: (v: string) => void;
+  busy: boolean;
+  canExecute: boolean;
+  onQuote: (sizeUsd: number) => void;
+}) {
+  const setor = plan?.setor ?? null;
+
+  // Harga kedua sisi dalam USD. `eth_usd` adalah harga satu token kutipan,
+  // berlaku untuk kutipan apa pun, bukan khusus ETH.
+  const hargaMeme = view?.current.price_usd ?? 0;
+  const hargaQuote = view?.eth_usd ?? 0;
+
+  const [sisi, setSisi] = useState<"meme" | "quote">("quote");
+  const [jumlah, setJumlah] = useState("");
+
+  const terapkan = () => {
+    const n = Number(jumlah);
+    if (!Number.isFinite(n) || n <= 0) return;
+    const harga = sisi === "meme" ? hargaMeme : hargaQuote;
+    if (harga <= 0) return;
+    const usd = n * harga;
+    setSize(String(usd));
+    onQuote(usd);
+  };
+
+  const nominal = Number(size);
+  const bisa = Number.isFinite(Number(jumlah)) && Number(jumlah) > 0 && !busy && canExecute;
 
   return (
     <div class="setoran">
-      <div class="row">
-        <span class="label">{s.simbol_memecoin}</span>
-        <span class="value num">{formatCompact(s.jumlah_memecoin)}</span>
+      <div class="setor-sisi">
+        <button
+          class={`preset${sisi === "meme" ? " aktif" : ""}`}
+          onClick={() => setSisi("meme")}
+        >
+          {setor?.simbol_memecoin ?? "token"}
+        </button>
+        <button
+          class={`preset${sisi === "quote" ? " aktif" : ""}`}
+          onClick={() => setSisi("quote")}
+        >
+          {setor?.simbol_quote ?? "kutipan"}
+        </button>
       </div>
-      <div class="row">
-        <span class="label">{s.simbol_quote}</span>
-        <span class="value num">{formatCompact(s.jumlah_quote)}</span>
+
+      <div class="row" style="margin-top: var(--s2); gap: var(--s2)">
+        <input
+          type="number"
+          min="0"
+          step="any"
+          placeholder={`Jumlah ${sisi === "meme" ? setor?.simbol_memecoin ?? "token" : setor?.simbol_quote ?? "kutipan"}`}
+          value={jumlah}
+          onInput={(e) => setJumlah((e.target as HTMLInputElement).value)}
+        />
+        <button type="button" disabled={!bisa} onClick={terapkan}>
+          Susun rencana
+        </button>
       </div>
-      <div class="row">
-        <span class="label">Nilai setoran</span>
-        <span class="value num">
-          {formatCompact(s.nilai_quote)} {s.simbol_quote}
-        </span>
-      </div>
-      <div class="row">
-        <span class="label">Estimasi APR</span>
-        <span class="value num">
-          {plan.apr_estimasi == null
-            ? "-"
-            : `${Math.round(plan.apr_estimasi).toLocaleString("id-ID")}%`}
-        </span>
-      </div>
-      {plan.zap ? (
-        <p class="hint">
-          Zap dulu: {formatCompact(Number(plan.zap.menganggur_tanpa_zap))} akan
-          menganggur tanpa itu.
-        </p>
+
+      {setor ? (
+        <div class="stack" style="margin-top: var(--s3)">
+          <div class="row">
+            <span class="label">{setor.simbol_memecoin}</span>
+            <span class="value num">{formatCompact(setor.jumlah_memecoin)}</span>
+          </div>
+          <div class="row">
+            <span class="label">{setor.simbol_quote}</span>
+            <span class="value num">{formatCompact(setor.jumlah_quote)}</span>
+          </div>
+          <div class="row">
+            <span class="label">Nilai setoran</span>
+            <span class="value num">
+              {formatCompact(setor.nilai_quote)} {setor.simbol_quote}
+            </span>
+          </div>
+          <div class="row">
+            <span class="label">Estimasi APR</span>
+            <span class="value num">
+              {plan?.apr_estimasi == null
+                ? "-"
+                : `${Math.round(plan.apr_estimasi).toLocaleString("id-ID")}%`}
+            </span>
+          </div>
+          {plan?.zap ? (
+            <p class="hint">Perlu zap dulu supaya modal tidak menganggur.</p>
+          ) : null}
+        </div>
+      ) : Number.isFinite(nominal) && nominal > 0 ? (
+        <p class="hint">Menyusun rencana untuk {formatUsd(nominal)}.</p>
       ) : null}
     </div>
   );
 }
-
 function ExecuteCard({
+  view,
   plan,
   result,
   busy,
@@ -1859,6 +1931,7 @@ function ExecuteCard({
   onZap,
   onOpen,
 }: {
+  view: RangeView | null;
   plan: OpenPlanView | null;
   result: SendResultView | null;
   busy: boolean;
@@ -1870,9 +1943,6 @@ function ExecuteCard({
   onOpen: () => void;
 }) {
   const [size, setSize] = useState("");
-
-  const nominal = Number(size);
-  const nominalValid = Number.isFinite(nominal) && nominal > 0;
 
   // Engine sudah menyaring: daftar ini hanya berisi langkah yang memang
   // masih kurang. Panel tidak menyaring ulang, karena dua tempat yang
@@ -1909,25 +1979,15 @@ function ExecuteCard({
         </div>
       ) : null}
 
-      <div class="row" style="margin-top: var(--s2); gap: var(--s2)">
-        <input
-          type="number"
-          min="0"
-          step="any"
-          placeholder="Nominal USD"
-          value={size}
-          onInput={(e) => setSize((e.target as HTMLInputElement).value)}
-        />
-        <button
-          type="button"
-          disabled={!nominalValid || busy || !canExecute}
-          onClick={() => onQuote(nominal)}
-        >
-          Susun rencana
-        </button>
-
-          {plan ? <SetoranCard plan={plan} /> : null}
-      </div>
+      <SetoranCard
+        plan={plan}
+        view={view}
+        size={size}
+        setSize={setSize}
+        busy={busy}
+        canExecute={canExecute}
+        onQuote={onQuote}
+      />
 
       {plan ? (
         <>
@@ -2199,14 +2259,6 @@ function PoolRow({
 const PRESET_LEBAR = [0.2, 1, 5, 10, 20];
 
 /**
- * Pengali batas untuk range penuh.
- *
- * Cukup besar untuk melewati tick terjauh yang sah, sehingga engine yang
- * menjepitnya ke grid, bukan panel yang menebak angkanya.
- */
-const PENGALI_PENUH = 1e40;
-
-/**
  * Atur range di atas gambar likuiditas yang sudah ada di pool.
  *
  * Porsi fee kita adalah modal kita dibagi likuiditas lain yang aktif di pita
@@ -2223,11 +2275,13 @@ function DepthCard({
   view,
   depth,
   onSetRange,
+  onSetFullRange,
   onMuat,
 }: {
   view: RangeView;
   depth: Distribusi | null;
   onSetRange: (lowerMcap: number, upperMcap: number) => void;
+  onSetFullRange: () => void;
   onMuat: () => void;
 }) {
   const mcapSekarang = view.current.mcap_usd;
@@ -2243,7 +2297,7 @@ function DepthCard({
 
   const pilihPenuh = () => {
     setCustom(false);
-    onSetRange(mcapSekarang / PENGALI_PENUH, mcapSekarang * PENGALI_PENUH);
+    onSetFullRange();
   };
 
   const bukaCustom = () => {
@@ -2272,6 +2326,11 @@ function DepthCard({
       <div class="section-title">
         <h2>Atur range</h2>
         <span class="chip">{view.width_pct.toFixed(1)}% lebar</span>
+        {depth?.error ? (
+          <button class="toggle" onClick={onMuat}>
+            coba lagi
+          </button>
+        ) : null}
       </div>
 
       <div class="preset-row">
@@ -2335,9 +2394,7 @@ function DepthCard({
 
       <p class="hint">Batang biru: modal yang akan berbagi fee dengan Anda.</p>
 
-      <button class="lebar" onClick={onMuat}>
-        muat ulang bentuk pool
-      </button>
+
     </section>
   );
 }
@@ -2436,7 +2493,7 @@ function RangeCard({ view }: { view: RangeView }) {
 
       <div class="row" style="margin-top: var(--s3)">
         <span class="label">Lebar</span>
-        <span class="value num">{view.width_pct.toFixed(1)} persen</span>
+        <span class="value num">{view.width_pct.toFixed(1)}%</span>
       </div>
       <div class="row">
         <span class="label">Tick spacing</span>
@@ -2781,9 +2838,13 @@ function RpcEditor({
   endpoints,
   onSimpan,
 }: {
-  endpoints: string[];
+  endpoints: string[] | undefined;
   onSimpan: (http: string[]) => void;
 }) {
+  // Engine versi lama tidak mengirim daftar ini. Tanpa penjagaan, seluruh
+  // kartu Settings gagal dirender dan yang terlihat user adalah bagian yang
+  // kosong, bukan pesan yang menjelaskan apa pun.
+  const daftar = Array.isArray(endpoints) ? endpoints : [];
   const [buka, setBuka] = useState(false);
   const [teks, setTeks] = useState("");
 
@@ -2804,7 +2865,14 @@ function RpcEditor({
         </button>
       </div>
 
-      {endpoints.map((e, i) => (
+      {daftar.length === 0 ? (
+        <p class="rpc-baris">
+          Engine belum melaporkan endpointnya. Jalankan ulang engine versi
+          terbaru.
+        </p>
+      ) : null}
+
+      {daftar.map((e, i) => (
         <p key={e} class="rpc-baris">
           {i === 0 ? "dipakai" : "cadangan"} · {e}
         </p>

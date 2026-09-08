@@ -1234,6 +1234,25 @@ ke tiap arah. Likuiditas yang jauh dari harga tidak menerima fee apa pun, dan
 memasukkannya akan membuat pool tebal terlihat lebih baik daripada yang
 sebenarnya.
 
+**TVL sebuah pool dijumlahkan dari distribusinya, bukan ditaksir.** Taksiran
+memakai likuiditas di satu tick saja pernah melaporkan 0,82 untuk pool yang
+isinya kira kira 360, karena likuiditas berubah di setiap tick yang
+terinisialisasi dan satu titik tidak mewakili seluruhnya. Seluruh pool dalam
+satu kelompok kutipan dibaca bersama, sehingga biayanya tetap dua perjalanan ke
+rantai berapa pun jumlah poolnya.
+
+**Garis yang digeser user tidak pernah digambar ulang.** Percobaan pertama
+menunda penggambaran sampai geserannya berhenti, dan hasilnya garis tetap
+meloncat, hanya sekali di akhir alih alih terus menerus. Chart sudah menaruh
+garis persis di tempat kursor dilepas, dan hasil pembulatan ke grid tick tetap
+terbaca sebagai angka di kartu Range. Penggambaran ulang hanya berlaku untuk
+perubahan yang bukan dari chart: preset, custom, dan ganti pool.
+
+**Setoran diisi per sisi, bukan sebagai nominal dolar.** Rasio antara kedua sisi
+ditentukan range dan bukan oleh user, jadi mengisi satu sisi sudah menentukan
+sisi yang lain. Yang diketik user hanya dipakai menaksir nominal, dan angka yang
+muncul setelah rencana tersusun datang dari engine.
+
 **Riwayat notifikasi dihapus dari panel**, menyimpang dari 3.7. Toast di halaman
 gmgn tetap berjalan lewat koneksi content script sendiri, dan itulah jalur yang
 benar benar dipakai. Daftar riwayat di panel jarang dibuka dan hanya menambah
@@ -1310,6 +1329,7 @@ Panel ke engine:
 | `select_pool` | `{ poolId }`, user memilih pool lain dari daftar | 2 |
 | `select_quote` | `{ quote }`, user berpindah ke pasangan token lawan yang lain. Tidak menyentuh jaringan, seluruh kelompok sudah ada di memori sejak token dimuat | 2 |
 | `set_range` | `{ lowerMcap, upperMcap }`, user menggeser garis. Batas dalam market cap USD karena itu satuan chart | 2 |
+| `set_full_range` | tanpa isi. Pasang range selebar yang diizinkan protokol. Pesan tersendiri, bukan `set_range` dengan angka raksasa: market cap dikali sepuluh pangkat empat puluh menghasilkan harga yang tidak lagi bisa diubah menjadi tick, dan engine menolaknya tanpa ada yang berubah di layar. Batas sebenarnya hanya diketahui engine, karena ia bergantung pada tick spacing pool | 6 |
 | `quote_range` | `{ sizeUsd }`. Susun rencana pada pool dan range yang sedang aktif, jalankan seluruh gate, TIDAK mengirim apa pun. Pool dan tick tidak ikut dikirim panel: keduanya sudah ada di engine, dan menerimanya dari panel berarti menerima parameter transaksi dari luar | 3 |
 | `approve_token` | `{ token }`. Kerjakan langkah izin PERTAMA yang masih kurang untuk token itu. Pada V3 satu langkah sudah cukup, pada V4 ada dua karena izinnya lewat Permit2, jadi pesannya dikirim dua kali. Jumlah dan spender datang dari engine, bukan dari panel | 3 |
 | `swap_zap` | tanpa isi. Menjalankan swap zap dari rencana terakhir lewat UniversalRouter. Transaksi terpisah dari membuka posisi, lihat 6.7 | 4 |

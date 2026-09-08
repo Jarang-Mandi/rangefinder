@@ -1970,6 +1970,46 @@ impl AppState {
         });
     }
 
+    /// Pasang range selebar yang diizinkan protokol.
+    ///
+    /// Batasnya dihitung dari tick terjauh yang masih kelipatan spacing, lalu
+    /// diubah menjadi market cap supaya sisa alurnya sama persis dengan range
+    /// biasa. Tidak ada jalur eksekusi terpisah untuk range penuh, dan itu
+    /// disengaja: jalur yang jarang dipakai adalah jalur yang jarang teruji.
+    pub async fn on_set_full_range(&self) {
+        let batas = {
+            let guard = self.active.read().await;
+            let Some(active) = guard.as_ref() else { return };
+            let Some(pool) = active.selected_pool() else { return };
+            let Some(mcap) = active.chart_mcap_usd else { return };
+
+            let spacing = pool.tick_spacing.max(1);
+            let bawah = crate::math::ceil_to_spacing(crate::math::MIN_TICK, spacing);
+            let atas = crate::math::floor_to_spacing(crate::math::MAX_TICK, spacing);
+
+            // Tick diubah menjadi kelipatan harga, lalu dikalikan market cap
+            // sekarang. Gerakan satu persen pada harga adalah gerakan satu
+            // persen pada market cap, jadi perbandingannya langsung berlaku.
+            let kali_bawah = 1.0001_f64.powi(bawah - pool.tick);
+            let kali_atas = 1.0001_f64.powi(atas - pool.tick);
+
+            // Sisi tampilan bertukar kalau memecoin menempati token1, dengan
+            // alasan yang sama seperti di batas range biasa.
+            let memecoin_token0 = active
+                .meta
+                .address
+                .eq_ignore_ascii_case(&pool.token0);
+            let (b, a) = if memecoin_token0 {
+                (kali_bawah, kali_atas)
+            } else {
+                (kali_atas, kali_bawah)
+            };
+            (mcap * b.min(a), mcap * b.max(a))
+        };
+
+        self.on_set_range(batas.0, batas.1).await;
+    }
+
     pub async fn on_set_range(&self, lower_mcap: f64, upper_mcap: f64) {
         if !(lower_mcap.is_finite() && upper_mcap.is_finite()) {
             return;

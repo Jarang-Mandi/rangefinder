@@ -186,7 +186,13 @@ export interface CurrentPrice {
 export interface RangeView {
   pool_id: string;
   tick_spacing: number;
-  /** Kurs yang tersirat dari chart, bukan dari sumber luar. */
+  /**
+   * Harga satu token KUTIPAN dalam USD, hasil kalibrasi dari chart.
+   *
+   * Namanya menyebut ETH karena pasangan pertama yang ditangani memang WETH,
+   * tapi isinya berlaku untuk kutipan apa pun. Pada pool berpasangan USDG,
+   * angka ini kira kira satu.
+   */
   eth_usd: number;
   current: CurrentPrice;
   lower: RangeBound;
@@ -662,6 +668,7 @@ export type ClientMessage =
   | { type: "select_pool"; pool_id: string }
   | { type: "select_quote"; quote: string }
   | { type: "set_range"; lower_mcap: number; upper_mcap: number }
+  | { type: "set_full_range" }
   | { type: "quote_range"; size_usd: number }
   | { type: "approve_token"; token: string }
   | { type: "get_positions" }

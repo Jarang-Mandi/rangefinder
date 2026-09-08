@@ -48,6 +48,15 @@ pub enum ClientMessage {
     /// User menggeser garis. Batasnya dalam market cap USD, satuan chart.
     SetRange { lower_mcap: f64, upper_mcap: f64 },
 
+    /// Pasang range selebar yang diizinkan protokol.
+    ///
+    /// Pesan tersendiri, bukan `set_range` dengan angka raksasa. Market cap
+    /// dikali sepuluh pangkat empat puluh menghasilkan harga yang tidak lagi
+    /// bisa diubah menjadi tick, dan engine menolaknya tanpa ada yang berubah
+    /// di layar. Batas sebenarnya hanya diketahui engine, karena ia bergantung
+    /// pada tick spacing pool.
+    SetFullRange,
+
     /// Susun rencana membuka posisi sebesar sekian dolar pada range sekarang.
     ///
     /// Tidak mengirim apa pun. Seluruh gate dijalankan dan hasilnya

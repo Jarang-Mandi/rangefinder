@@ -36,6 +36,8 @@
 //!   tidak ada yang menaruh dana di sana, kesimpulan yang sangat berbeda dari
 //!   tidak bisa membaca, dan keduanya menuntun ke keputusan yang berlawanan.
 
+use std::collections::HashMap;
+
 use alloy::primitives::{Address, FixedBytes, I256, U256};
 use alloy::providers::Provider;
 use anyhow::{Context, Result};
@@ -290,6 +292,151 @@ pub async fn susun<P: Provider>(
         quote_adalah_token1,
         error: None,
     })
+}
+
+/// Berapa lebar tick yang dicakup saat menjumlahkan TVL sebuah pool.
+///
+/// Jauh lebih lebar daripada histogram, karena yang dicari di sini bukan bentuk
+/// pool di sekitar harga melainkan seluruh modal yang ada di dalamnya. Delapan
+/// kata bitmap pada spacing 200 mencakup kira kira dari seperseribu sampai
+/// seribu kali harga sekarang, yang praktis menutup seluruh pool memecoin.
+pub const KATA_TVL: i32 = 8;
+
+/// Jumlahkan modal yang tertanam di beberapa pool sekaligus.
+///
+/// KENAPA SEKALIGUS
+/// Satu pool butuh dua perjalanan ke rantai: bitmap dulu, lalu likuiditas tiap
+/// tick yang terinisialisasi. Dikerjakan satu per satu, enam pool berarti dua
+/// belas perjalanan. Dikerjakan bersama, tetap dua, berapa pun jumlah poolnya.
+///
+/// Nilainya dikembalikan dalam token kutipan, dengan alasan yang sama seperti
+/// di seluruh modul ini: angka likuiditas mentah tidak punya satuan.
+///
+/// Pool yang gagal dibaca TIDAK muncul di hasil, bukan muncul dengan nilai nol.
+/// Nol berarti poolnya kosong, kesimpulan yang sangat berbeda.
+pub async fn tvl_beberapa<P: Provider>(
+    provider: &P,
+    state_view: Address,
+    multicall: Address,
+    pools: &[(String, KeadaanPool)],
+) -> HashMap<String, f64> {
+    let mut out: HashMap<String, f64> = HashMap::new();
+    if pools.is_empty() {
+        return out;
+    }
+
+    // TAHAP SATU: bitmap seluruh pool dalam satu batch.
+    let mut calls = Vec::new();
+    let mut rencana: Vec<(usize, String, KeadaanPool, i32, i32)> = Vec::new();
+    for (id, k) in pools {
+        let Ok(bytes) = id.parse::<FixedBytes<32>>() else {
+            continue;
+        };
+        if k.tick_spacing <= 0 {
+            continue;
+        }
+        let tengah = posisi(kompres(k.tick_sekarang, k.tick_spacing)).0 as i32;
+        let dari = tengah - KATA_TVL / 2;
+        let sampai = tengah + KATA_TVL / 2;
+        let awal = calls.len();
+        for w in dari..=sampai {
+            calls.push(crate::chain::multicall::encode(
+                state_view,
+                &abi::IStateView::getTickBitmapCall {
+                    tick: w as i16,
+                    poolId: bytes,
+                },
+            ));
+        }
+        rencana.push((awal, id.clone(), *k, dari, sampai));
+    }
+
+    let Ok(hasil) = crate::chain::multicall::batch_call(provider, multicall, calls).await else {
+        tracing::warn!("bitmap TVL gagal dibaca, TVL dilewati");
+        return out;
+    };
+
+    // TAHAP DUA: likuiditas tiap tick yang terinisialisasi, juga satu batch.
+    let mut calls = Vec::new();
+    let mut rencana2: Vec<(usize, usize, String, KeadaanPool, Vec<i32>)> = Vec::new();
+    for (awal, id, k, dari, sampai) in rencana {
+        let Ok(bytes) = id.parse::<FixedBytes<32>>() else {
+            continue;
+        };
+        let mut ticks = Vec::new();
+        for (n, w) in (dari..=sampai).enumerate() {
+            let Some(kata) = crate::chain::multicall::decode::<abi::IStateView::getTickBitmapCall>(
+                hasil.get(awal + n).and_then(|x| x.as_ref()),
+            ) else {
+                continue;
+            };
+            if kata.is_zero() {
+                continue;
+            }
+            for bit in 0..256usize {
+                if kata.bit(bit) {
+                    ticks.push((w * 256 + bit as i32) * k.tick_spacing);
+                }
+            }
+        }
+        if ticks.is_empty() {
+            continue;
+        }
+        ticks.sort_unstable();
+
+        let awal2 = calls.len();
+        for t in &ticks {
+            calls.push(crate::chain::multicall::encode(
+                state_view,
+                &abi::IStateView::getTickLiquidityCall {
+                    poolId: bytes,
+                    tick: alloy::primitives::aliases::I24::try_from(*t).unwrap_or_default(),
+                },
+            ));
+        }
+        rencana2.push((awal2, ticks.len(), id, k, ticks));
+    }
+
+    if calls.is_empty() {
+        return out;
+    }
+
+    let Ok(hasil2) = crate::chain::multicall::batch_call(provider, multicall, calls).await else {
+        tracing::warn!("likuiditas tick TVL gagal dibaca, TVL dilewati");
+        return out;
+    };
+
+    for (awal, jumlah, id, k, ticks) in rencana2 {
+        let mut net: Vec<(i32, i128)> = Vec::with_capacity(jumlah);
+        for (n, t) in ticks.iter().enumerate() {
+            let Some(v) = crate::chain::multicall::decode::<abi::IStateView::getTickLiquidityCall>(
+                hasil2.get(awal + n).and_then(|x| x.as_ref()),
+            ) else {
+                continue;
+            };
+            net.push((*t, v.liquidityNet.to_string().parse::<i128>().unwrap_or(0)));
+        }
+
+        let bawah = *ticks.first().unwrap_or(&k.tick_sekarang);
+        let atas = *ticks.last().unwrap_or(&k.tick_sekarang);
+        let pita = rangkai(
+            &net,
+            k.tick_sekarang,
+            k.likuiditas,
+            bawah,
+            atas,
+            k.quote_adalah_token1,
+            k.skala_meme,
+            k.skala_quote,
+        );
+
+        let total: f64 = pita.iter().map(|p| p.nilai_quote).sum();
+        if total.is_finite() {
+            out.insert(id.to_lowercase(), total);
+        }
+    }
+
+    out
 }
 
 /// Rangkai pita dari daftar `liquidityNet`, berjalan keluar dari tick sekarang.
