@@ -19,6 +19,7 @@ import {
   asSignals,
   asOpenPlan,
   asPositions,
+  asDepth,
   asRangeView,
   asScan,
   asSendResult,
@@ -33,6 +34,7 @@ import {
   type OpenPlanView,
   type PositionsView,
   type RangeView,
+  type Distribusi,
   type ScanView,
   type SignalsView,
   type SendResultView,
@@ -59,6 +61,7 @@ interface Handlers {
   onActionPlan?: (plan: ActionPlanView) => void;
   onSignals?: (view: SignalsView) => void;
   onScan?: (view: ScanView) => void;
+  onDepth?: (view: Distribusi) => void;
   onNotify?: (k: Kejadian) => void;
   onNotifyHistory?: (riwayat: Kejadian[]) => void;
 }
@@ -195,6 +198,11 @@ export class EngineClient {
       const pindaian = asScan(msg);
       if (pindaian) {
         this.handlers.onScan?.(pindaian);
+        return;
+      }
+      const kedalaman = asDepth(msg);
+      if (kedalaman) {
+        this.handlers.onDepth?.(kedalaman);
         return;
       }
       const kabar = asNotify(msg);
@@ -339,6 +347,16 @@ export class EngineClient {
    */
   scan() {
     this.send({ type: "scan" });
+  }
+
+  /**
+   * Minta distribusi likuiditas pool yang sedang aktif.
+   *
+   * Diminta sekali per pool, bukan setiap geseran garis. Bentuk pool tidak
+   * berubah secepat harganya, dan pembacaannya butuh dua perjalanan ke rantai.
+   */
+  getDepth() {
+    this.send({ type: "get_depth" });
   }
 
   /**

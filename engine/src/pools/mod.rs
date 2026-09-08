@@ -15,6 +15,7 @@
 
 pub mod abi;
 pub mod cache;
+pub mod distribusi;
 pub mod kandidat;
 pub mod scan;
 pub mod volume;

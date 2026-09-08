@@ -28,6 +28,7 @@ use rangefinder_engine::chain::registry::Registry;
 use rangefinder_engine::chain::ChainClient;
 use rangefinder_engine::config::Config;
 use rangefinder_engine::exec::v4::abi::{IPermit2, IPositionManagerV4, IV4Quoter, ModifyLiquidity};
+use rangefinder_engine::pools::abi::IStateView;
 
 pub async fn run(repo_root: &Path) -> Result<bool> {
     println!("  Pembuktian ABI V4");
@@ -265,6 +266,36 @@ pub async fn run(repo_root: &Path) -> Result<bool> {
         "  topic ModifyLiquidity 0x{}",
         hex::encode(ModifyLiquidity::SIGNATURE_HASH)
     );
+
+    // STATEVIEW, DATA PER TICK
+    //
+    // Distribusi likuiditas dibangun dari `getTickBitmap` dan
+    // `getTickLiquidity`. Keduanya ada di repo Uniswap, tapi itu asumsi sampai
+    // terlihat di bytecode yang benar benar terpasang di rantai ini.
+    let state_view = registry.contract("uniswap_v4", "state_view")?;
+    let kode_sv = provider
+        .get_code_at(state_view)
+        .await
+        .with_context(|| format!("gagal membaca bytecode {state_view}"))?;
+
+    println!();
+    println!("  Selector di bytecode StateView {state_view}");
+    for (nama, sel) in [
+        ("getSlot0", IStateView::getSlot0Call::SELECTOR),
+        ("getLiquidity", IStateView::getLiquidityCall::SELECTOR),
+        ("getTickLiquidity", IStateView::getTickLiquidityCall::SELECTOR),
+        ("getTickBitmap", IStateView::getTickBitmapCall::SELECTOR),
+    ] {
+        let ada = kode_sv.windows(4).any(|w| w == sel);
+        println!(
+            "  {:<7} {nama} 0x{}",
+            if ada { "ada" } else { "HILANG" },
+            hex::encode(sel)
+        );
+        if !ada {
+            semua_ada = false;
+        }
+    }
 
     Ok(semua_ada)
 }

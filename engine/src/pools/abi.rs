@@ -56,6 +56,24 @@ sol! {
             uint24 lpFee
         );
         function getLiquidity(bytes32 poolId) external view returns (uint128);
+
+        /// Likuiditas yang ditambahkan dan dikurangi tepat di satu tick.
+        ///
+        /// `liquidityNet` adalah kunci menyusun distribusi: berjalan dari tick
+        /// sekarang ke luar sambil menjumlahkannya menghasilkan likuiditas aktif
+        /// di setiap pita. Tanpa itu, yang bisa dilihat hanya likuiditas di satu
+        /// titik, dan satu titik tidak memberi tahu apa apa soal bentuk pool.
+        function getTickLiquidity(bytes32 poolId, int24 tick) external view returns (
+            uint128 liquidityGross,
+            int128 liquidityNet
+        );
+
+        /// Satu kata bitmap, 256 tick terkompresi per kata.
+        ///
+        /// Dipakai mencari tick mana saja yang terinisialisasi. Tanpa bitmap,
+        /// menemukannya berarti mencoba setiap tick satu per satu, dan rentang
+        /// tick V4 mencakup ratusan ribu kemungkinan.
+        function getTickBitmap(bytes32 poolId, int16 tick) external view returns (uint256);
     }
 }
 

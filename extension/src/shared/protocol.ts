@@ -428,6 +428,35 @@ export interface Posisi {
   kosong: boolean;
 }
 
+/**
+ * Satu pita distribusi likuiditas.
+ *
+ * `harga_bawah` selalu lebih kecil daripada `harga_atas`, apa pun sisi mana
+ * memecoinnya berada. Engine yang mengurutkannya, karena pada pool yang
+ * memecoinnya token1 tick yang lebih besar justru berarti harga yang lebih
+ * rendah, dan panel tidak boleh mengulang perhitungan itu sendiri.
+ */
+export interface Pita {
+  tick_bawah: number;
+  tick_atas: number;
+  harga_bawah: number;
+  harga_atas: number;
+  liquidity: string;
+  /** Modal yang tertanam di pita ini, dalam token kutipan. Tinggi batang. */
+  nilai_quote: number;
+  aktif: boolean;
+}
+
+export interface Distribusi {
+  pool_id: string;
+  tick_sekarang: number;
+  harga_sekarang: number;
+  tick_spacing: number;
+  pita: Pita[];
+  quote_adalah_token1: boolean;
+  error: string | null;
+}
+
 /** Label aksi yang tegas untuk satu baris hasil pemindaian, PRD 3.4. */
 export type LabelScan =
   | "lp_sideways"
@@ -580,6 +609,7 @@ export type ServerMessage =
   | ({ type: "send_result" } & Partial<SendResultView>)
   | ({ type: "positions" } & Partial<PositionsView>)
   | ({ type: "scan_results" } & Partial<ScanView>)
+  | ({ type: "depth" } & Partial<Distribusi>)
   | ({ type: "action_plan" } & Partial<ActionPlanView>)
   | ({ type: "signals" } & Partial<SignalsView>)
   | ({ type: "notify" } & Partial<Kejadian>)
@@ -600,6 +630,7 @@ export type ClientMessage =
   | { type: "get_positions" }
   | { type: "get_notifications" }
   | { type: "scan" }
+  | { type: "get_depth" }
   | { type: "approve_hook"; hook: string }
   | { type: "forget_hook"; hook: string }
   | { type: "plan_action"; token_id: string; action: JenisAksi }
@@ -629,6 +660,10 @@ export function asPositions(msg: unknown): PositionsView | null {
 
 export function asScan(msg: unknown): ScanView | null {
   return untag<ScanView>(msg, "scan_results");
+}
+
+export function asDepth(msg: unknown): Distribusi | null {
+  return untag<Distribusi>(msg, "depth");
 }
 
 export function asNotify(msg: unknown): Kejadian | null {

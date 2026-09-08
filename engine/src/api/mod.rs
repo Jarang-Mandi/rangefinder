@@ -1274,6 +1274,87 @@ impl AppState {
     /// daftar kosong. Daftar kosong berarti rantainya sepi, dan user yang
     /// membaca daftar kosong akan menyimpulkan tidak ada peluang, bukan bahwa
     /// alatnya sedang tidak bisa membaca.
+    /// Baca distribusi likuiditas pool yang sedang aktif dan kirim ke panel.
+    ///
+    /// Kegagalan dikirim sebagai `error` di dalam hasil, bukan sebagai
+    /// distribusi kosong. Histogram kosong berarti tidak ada yang menaruh dana
+    /// di sekitar harga ini, dan itu justru sinyal yang sangat kuat. Ia tidak
+    /// boleh tertukar dengan gagal membaca.
+    pub async fn on_get_depth(&self) {
+        let Some(view) = self.susun_depth().await else {
+            return;
+        };
+        let _ = self
+            .events
+            .send(protocol::ServerMessage::Depth(Box::new(view)));
+    }
+
+    async fn susun_depth(&self) -> Option<crate::pools::distribusi::Distribusi> {
+        use crate::pools::distribusi;
+
+        let (pool, alamat_token, desimal_meme, desimal_quote) = {
+            let guard = self.active.read().await;
+            let active = guard.as_ref()?;
+            let pool = active.selected_pool()?.clone();
+            let meta = active.meta.clone();
+            (
+                pool,
+                meta.address.clone(),
+                meta.decimals,
+                active.quote_decimals,
+            )
+        };
+
+        let kosong = |error: String| distribusi::Distribusi {
+            pool_id: pool.id.clone(),
+            tick_sekarang: pool.tick,
+            harga_sekarang: 0.0,
+            tick_spacing: pool.tick_spacing,
+            pita: Vec::new(),
+            quote_adalah_token1: true,
+            error: Some(error),
+        };
+
+        let provider = match self.chain.provider().await {
+            Ok(p) => p,
+            Err(e) => return Some(kosong(format!("RPC tidak bisa dipakai: {e}"))),
+        };
+
+        let state_view = match self.registry.contract("uniswap_v4", "state_view") {
+            Ok(a) => a,
+            Err(e) => return Some(kosong(e.to_string())),
+        };
+        let multicall = match self.registry.contract("common", "multicall3") {
+            Ok(a) => a,
+            Err(e) => return Some(kosong(e.to_string())),
+        };
+
+        // Memecoin di sisi token0 berarti kutipannya token1. Arah ini
+        // menentukan arah seluruh sumbu harga, jadi ia diambil dari alamat
+        // yang sedang dilihat, bukan ditebak dari urutan.
+        let quote_adalah_token1 = pool.token0.eq_ignore_ascii_case(&alamat_token);
+
+        match distribusi::susun(
+            &provider,
+            state_view,
+            multicall,
+            &pool.id,
+            distribusi::KeadaanPool {
+                tick_spacing: pool.tick_spacing,
+                tick_sekarang: pool.tick,
+                likuiditas: pool.liquidity.parse().unwrap_or(0),
+                quote_adalah_token1,
+                skala_meme: 10f64.powi(desimal_meme as i32),
+                skala_quote: 10f64.powi(desimal_quote as i32),
+            },
+        )
+        .await
+        {
+            Ok(d) => Some(d),
+            Err(e) => Some(kosong(format!("distribusi gagal dibaca: {e}"))),
+        }
+    }
+
     pub async fn on_scan(&self) {
         let view = self.susun_scan().await;
         let _ = self

@@ -1147,6 +1147,63 @@ ada di registry tidak diberi angka uang sama sekali, dan panel menandainya
 dengan tanda tanya di depan simbol. Masalah yang sama pernah muncul pada FIG,
 yang punya pool terhadap 32 token berbeda dan sebagian besar tiruan.
 
+### 6.14 Distribusi likuiditas
+
+Ditambahkan setelah user menunjukkan antarmuka MMT Finance sebagai acuan.
+Bagian yang diambil bukan tampilannya, melainkan pertanyaan yang dijawabnya.
+
+**Kenapa ini yang paling bernilai dari acuan itu.** Porsi fee yang kita terima
+bukan ditentukan oleh besarnya modal kita, melainkan oleh perbandingan modal
+kita terhadap likuiditas lain YANG AKTIF di pita tempat harga bergerak. Dua
+range selebar sama bisa berbeda hasilnya berkali lipat hanya karena yang satu
+ditaruh di pita yang sudah padat dan yang lain di pita yang masih lengang.
+Tanpa gambar ini, satu satunya cara mengetahuinya adalah menaruh dana lalu
+melihat hasilnya, dan itu cara belajar yang paling mahal.
+
+**Sumbernya `liquidityNet`, bukan angka jadi.** Likuiditas tidak disimpan per
+pita. Yang tersimpan adalah berapa banyak likuiditas yang mulai atau berhenti
+aktif tepat di setiap tick yang terinisialisasi. Likuiditas sebuah pita didapat
+dengan berjalan dari tick sekarang ke luar sambil menjumlahkannya. Tick mana
+saja yang terinisialisasi diketahui dari bitmap, satu kata untuk 256 tick
+terkompresi. `getTickBitmap` dan `getTickLiquidity` sudah dibuktikan ada di
+bytecode StateView yang terpasang lewat `cargo xtask v4probe`, bukan disalin
+dari repo Uniswap lalu diandaikan sama.
+
+**Tinggi batang dinyatakan dalam token kutipan, bukan dalam satuan `L`.** Angka
+`L` tidak punya satuan dan tidak bisa dibandingkan antar pool, sedangkan modal
+yang tertanam di sebuah pita bisa. Kedua kaki posisi ikut dihitung, dengan
+alasan yang sama seperti di 6.13.
+
+**Pita penutup dipotong di batas tampilan, bukan di tepi kata bitmap.** Satu
+kata bisa mencakup ratusan persen gerakan harga, dan pita sepanjang itu akan
+menghasilkan batang tertinggi di seluruh histogram semata mata karena lebarnya.
+Percobaan pertama memang begitu, dan batang terpanjangnya tidak berarti apa apa.
+
+**Harga sekarang selalu tercakup tepat satu pita.** Pool yang seluruh tick
+terinisialisasinya berada di satu sisi harga pernah menghasilkan empat pita yang
+tidak satu pun memuat harga sekarang. Likuiditas di sisa rentang bukan nol, ia
+justru yang sedang aktif, dan pita penutup di kedua ujung yang menutupinya.
+
+**Batas pita dinamai menurut harga, bukan menurut tick.** Pada pool yang
+memecoinnya token1, tick yang lebih besar berarti harga yang lebih rendah.
+Menamainya menurut tick membuat histogram tergambar terbalik tanpa satu pun
+error muncul, kekeliruan yang sama seperti yang pernah terjadi pada batas range.
+
+**Panel menggambarnya mendatar, bukan tegak seperti acuannya.** Side panel
+lebarnya 320 sampai 480 piksel. Sumbu harga yang tegak memberi setiap pita satu
+baris penuh sehingga label harganya terbaca, sedangkan sumbu mendatar akan
+menyisakan beberapa piksel per pita dan labelnya hilang.
+
+**Distribusi tidak ikut `range_view`.** Ia butuh dua perjalanan ke rantai,
+sekitar setengah detik, sedangkan `range_view` dikirim ulang setiap kali user
+menggeser garis. Bentuk pool tidak berubah secepat harganya, jadi satu
+pembacaan per pool menemani banyak geseran.
+
+**Preset lebar range mengikuti acuan**, yaitu kurang lebih 0,2 sampai 20 persen
+ke tiap arah. Gerakan satu persen pada harga adalah gerakan satu persen pada
+market cap, jadi preset dinyatakan sebagai kelipatan terhadap market cap
+sekarang dan tidak ada konversi satuan yang bisa meleset.
+
 ## 7. Technical Specifications
 
 ### 7.1 Arsitektur
@@ -1220,6 +1277,7 @@ Panel ke engine:
 | `execute_action` | tanpa isi. Menyetujui aksi terakhir yang tersimpan di engine | 5 |
 | `approve_hook` | `{ hook }`. Catat persetujuan sadar user atas sebuah hook V4 yang belum lolos kriteria adopsi 5.4. Engine menilai ulang hooknya sendiri sebelum mencatat, karena penilaian yang datang dari panel bisa saja sudah diubah, dan bagian yang paling menarik untuk diubah justru kesimpulan bisa diupgrade atau tidaknya. Hook yang masih bisa diupgrade ditolak di sini juga | 6 |
 | `forget_hook` | `{ hook }`. Cabut persetujuan sebuah hook | 6 |
+| `get_depth` | tanpa isi. Minta distribusi likuiditas pool yang sedang aktif. Terpisah dari `range_view` dengan sengaja: distribusi butuh dua perjalanan ke rantai sedangkan `range_view` dikirim ulang setiap geseran garis, dan menggabungkannya membuat garis terasa berat persis saat digeser | 6 |
 | `scan` | tanpa isi. Pindai pool paling ramai di rantai dan nilai kelayakannya. Mahal, karena engine membaca setiap swap pada jendela terakhir, jadi ia hanya berjalan saat user memintanya. Jawabannya datang belakangan sebagai `scan_results`. Penyaring belum ikut dikirim panel: seluruh penyaringan masih berjalan di engine, lihat 6.13 | 6 |
 
 Engine ke panel:
@@ -1235,6 +1293,7 @@ Engine ke panel:
 | `positions` | `{ positions[], owner, keluarRange, error, dimuatPada }`. Setiap posisi membawa versi protokol, PoolKey, tick, likuiditas, status in range, dan fee yang belum diklaim | 5 |
 | `notify` | `{ level, code, message, subject, at, ditahan }`. Berbeda dari `alert`: pesan ini melewati pendinginan, masuk riwayat, dan membawa petunjuk durasi serta suara. `alert` dipakai untuk kegagalan seketika pada aksi yang sedang dijalankan user | 5 |
 | `notify_history` | daftar kejadian terakhir, terbaru lebih dulu, paling banyak 50 | 5 |
+| `depth` | `{ poolId, tickSekarang, hargaSekarang, tickSpacing, pita[], quoteAdalahToken1, error }`. Setiap pita membawa batas tick, batas harga, likuiditas, modal yang tertanam dalam token kutipan, dan penanda apakah harga sekarang ada di dalamnya. Batas harga selalu terurut naik apa pun sisi mana memecoinnya berada, karena panel tidak boleh mengulang perhitungan arah itu sendiri. Lihat 6.14 | 6 |
 | `scan_results` | `{ rows[], hooks[], jendelaPindaiMenit, jendelaVolumeMenit, volumeJendelaPendek, modalAcuan, totalSwap, dipindaiPada, error }`. Setiap baris membawa simbol, pasangan beserta penanda apakah alamat kutipannya dikenal, market cap, volume, modal yang dibutuhkan, hasil fee sepanjang jendela, proyeksi APR, rasio efisiensi, umur, daftar risiko, satu label aksi, dan alasannya. Jendela ikut di dalam pesan, tidak disimpulkan panel: angka hasil dan proyeksi keduanya bergantung padanya, dan jendelanya bisa menyempit sendiri kalau RPC menolak. `hooks[]` memuat penilaian adopsi 5.4 untuk setiap hook yang muncul di hasil, supaya baris yang ditolak bisa menjelaskan diri sendiri | 6 |
 | `signals` | `{ address, barTerpakai, harga, sideways, basis, saran, konsentrasiDibandingLebar, dihitungPada }`. `sideways` dan `basis` kosong berarti datanya belum cukup, BUKAN berarti kondisinya tidak menarik | 6 |
 | `action_plan` | `{ tokenId, action, nama, gates[], gasEstimate, dryRun, menutup, siap, expiresAt, fee0, fee1 }`. Simulasi ditampilkan sebelum tombol konfirmasi aktif, sesuai 3.5 | 5 |

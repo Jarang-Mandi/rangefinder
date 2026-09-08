@@ -122,6 +122,10 @@ async fn session(socket: WebSocket, state: AppState) {
                                 let s = state.clone();
                                 tokio::spawn(async move { s.on_get_positions().await });
                             }
+                            Ok(ClientMessage::GetDepth) => {
+                                let s = state.clone();
+                                tokio::spawn(async move { s.on_get_depth().await });
+                            }
                             Ok(ClientMessage::Scan) => {
                                 let s = state.clone();
                                 tokio::spawn(async move { s.on_scan().await });

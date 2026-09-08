@@ -18,6 +18,7 @@
 //!   penting tentang UniversalRouter yang merupakan fork.
 
 mod dryrun;
+mod depth;
 mod optimizer;
 mod pairs;
 mod positions;
@@ -70,6 +71,16 @@ fn main() -> Result<()> {
         "scan" => {
             let rt = tokio::runtime::Runtime::new()?;
             let ok = rt.block_on(scan::run(&root))?;
+            finish(ok)
+        }
+        "depth" => {
+            let token = args.get(1).cloned().unwrap_or_default();
+            if token.is_empty() {
+                eprintln!("cara pakai: cargo xtask depth <alamat_token>");
+                std::process::exit(2);
+            }
+            let rt = tokio::runtime::Runtime::new()?;
+            let ok = rt.block_on(depth::run(&root, &token))?;
             finish(ok)
         }
         "optimizer" => {

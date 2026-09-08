@@ -30,6 +30,7 @@ import {
   type EngineStatus,
   type ActionPlanView,
   type BarisScan,
+  type Distribusi,
   type LabelScan,
   type HasilBasis,
   type JenisAksi,
@@ -82,6 +83,7 @@ export function App() {
   const [actionBusy, setActionBusy] = useState(false);
   const [signals, setSignals] = useState<SignalsView | null>(null);
   const [scan, setScan] = useState<ScanView | null>(null);
+  const [depth, setDepth] = useState<Distribusi | null>(null);
   const [scanBusy, setScanBusy] = useState(false);
   /** Riwayat notifikasi, terbaru lebih dulu. */
   const [riwayat, setRiwayat] = useState<Kejadian[]>([]);
@@ -115,18 +117,31 @@ export function App() {
         setTokenState(t);
         setTokenLoading(false);
         setRangeView(null);
+        setDepth(null);
         // Rencana lama milik token lama. Membiarkannya berarti menawarkan
         // tombol buka posisi untuk pool yang sudah tidak dilihat lagi.
         setOpenPlan(null);
         setSendResult(null);
         drawnRef.current = "";
       },
-      onRangeView: setRangeView,
+      onRangeView: (v) => {
+        setRangeView((lama) => {
+          // Distribusi diminta sekali per pool, bukan setiap geseran garis.
+          // Bentuk pool tidak berubah secepat harganya, dan pembacaannya butuh
+          // dua perjalanan ke rantai.
+          if (!lama || lama.pool_id !== v.pool_id) {
+            setDepth(null);
+            clientRef.current?.getDepth();
+          }
+          return v;
+        });
+      },
       onSignals: setSignals,
       onScan: (v) => {
         setScan(v);
         setScanBusy(false);
       },
+      onDepth: setDepth,
       onActionPlan: (p) => {
         setActionPlan(p);
         setActionBusy(false);
@@ -337,6 +352,9 @@ export function App() {
             loadingToken={tokenLoading}
             onLoadToken={loadToken}
             rangeView={rangeView}
+            depth={depth}
+            onSetRange={(lo, hi) => clientRef.current?.setRange(lo, hi)}
+            onMuatDepth={() => clientRef.current?.getDepth()}
             onSelectPool={(id) => clientRef.current?.selectPool(id)}
             onSelectQuote={(q) => clientRef.current?.selectQuote(q)}
             openPlan={openPlan}
@@ -494,6 +512,9 @@ function RangeTab({
   loadingToken,
   onLoadToken,
   rangeView,
+  depth,
+  onSetRange,
+  onMuatDepth,
   onSelectPool,
   onSelectQuote,
   openPlan,
@@ -513,6 +534,9 @@ function RangeTab({
   loadingToken: boolean;
   onLoadToken: (address: string, navigate: boolean) => void;
   rangeView: RangeView | null;
+  depth: Distribusi | null;
+  onSetRange: (lowerMcap: number, upperMcap: number) => void;
+  onMuatDepth: () => void;
   onSelectPool: (poolId: string) => void;
   onSelectQuote: (quote: string) => void;
   openPlan: OpenPlanView | null;
@@ -546,6 +570,9 @@ function RangeTab({
         <TokenCard
           token={token}
           rangeView={rangeView}
+          depth={depth}
+          onSetRange={onSetRange}
+          onMuatDepth={onMuatDepth}
           onSelectPool={onSelectPool}
           onSelectQuote={onSelectQuote}
         />
@@ -627,11 +654,17 @@ function AddressInput({
 function TokenCard({
   token,
   rangeView,
+  depth,
+  onSetRange,
+  onMuatDepth,
   onSelectPool,
   onSelectQuote,
 }: {
   token: TokenState;
   rangeView: RangeView | null;
+  depth: Distribusi | null;
+  onSetRange: (lowerMcap: number, upperMcap: number) => void;
+  onMuatDepth: () => void;
   onSelectPool: (poolId: string) => void;
   onSelectQuote: (quote: string) => void;
 }) {
@@ -697,7 +730,15 @@ function TokenCard({
       </section>
 
       {rangeView ? (
-        <RangeCard view={rangeView} />
+        <>
+          <RangeCard view={rangeView} />
+          <DepthCard
+            view={rangeView}
+            depth={depth}
+            onSetRange={onSetRange}
+            onMuat={onMuatDepth}
+          />
+        </>
       ) : active ? (
         <section class="card">
           <h2>Range</h2>
@@ -2129,6 +2170,158 @@ function PoolRow({
       </span>
     </button>
   );
+}
+
+/** Preset lebar range, dalam persen ke tiap arah. */
+const PRESET_LEBAR = [0.2, 1, 5, 10, 20];
+
+/**
+ * Distribusi likuiditas beserta cara menempatkan range di atasnya.
+ *
+ * KENAPA HISTOGRAM INI ADA
+ * Porsi fee kita bukan ditentukan oleh besarnya modal kita, melainkan oleh
+ * perbandingan modal kita terhadap likuiditas lain yang aktif di pita tempat
+ * harga bergerak. Dua range selebar sama bisa berbeda hasilnya berkali lipat
+ * hanya karena yang satu ditaruh di pita padat dan yang lain di pita lengang.
+ * Tanpa gambar ini, satu satunya cara mengetahuinya adalah menaruh dana dulu.
+ *
+ * KENAPA BATANGNYA MENDATAR, BUKAN TEGAK SEPERTI REFERENSINYA
+ * Panel ini lebarnya 320 sampai 480 piksel. Sumbu harga yang tegak memberi
+ * setiap pita satu baris penuh, sehingga label harganya terbaca. Sumbu harga
+ * yang mendatar akan menyisakan beberapa piksel per pita dan labelnya hilang.
+ *
+ * SEMUA PERBANDINGAN RELATIF TERHADAP HARGA SEKARANG
+ * Distribusi datang dalam satuan token kutipan, sedangkan batas range dalam
+ * market cap USD. Keduanya tidak perlu dipertemukan: gerakan satu persen pada
+ * harga adalah gerakan satu persen pada market cap, jadi keduanya dibandingkan
+ * sebagai kelipatan terhadap harga sekarang, dan tidak ada konversi satuan
+ * yang bisa meleset.
+ */
+function DepthCard({
+  view,
+  depth,
+  onSetRange,
+  onMuat,
+}: {
+  view: RangeView;
+  depth: Distribusi | null;
+  onSetRange: (lowerMcap: number, upperMcap: number) => void;
+  onMuat: () => void;
+}) {
+  const mcapSekarang = view.current.mcap_usd;
+
+  const pilihLebar = (persen: number) => {
+    const f = persen / 100;
+    onSetRange(mcapSekarang * (1 - f), mcapSekarang * (1 + f));
+  };
+
+  // Batas range sebagai kelipatan terhadap harga sekarang. Inilah satuan
+  // bersama antara histogram dan garis range.
+  const kelipatanBawah = view.lower.mcap_usd / mcapSekarang;
+  const kelipatanAtas = view.upper.mcap_usd / mcapSekarang;
+
+  return (
+    <section class="card">
+      <div class="section-title">
+        <h2>Likuiditas di sekitar harga</h2>
+        {depth ? null : (
+          <button class="toggle" onClick={onMuat}>
+            muat
+          </button>
+        )}
+      </div>
+
+      <div class="preset-row">
+        {PRESET_LEBAR.map((x) => (
+          <button key={x} class="preset" onClick={() => pilihLebar(x)}>
+            ±{x}%
+          </button>
+        ))}
+      </div>
+
+      {!depth ? (
+        <p class="muted" style="margin: var(--s3) 0 0">
+          Membaca bentuk pool dari rantai.
+        </p>
+      ) : depth.error ? (
+        <p class="error" style="margin: var(--s3) 0 0">{depth.error}</p>
+      ) : depth.pita.length === 0 ? (
+        <p class="muted" style="margin: var(--s3) 0 0">
+          Tidak ada likuiditas lain di sekitar harga ini. Kalau Anda masuk, Anda
+          hampir seluruh poolnya, dan porsi fee Anda mendekati penuh selama
+          harga tetap di dalam range.
+        </p>
+      ) : (
+        <Histogram
+          depth={depth}
+          kelipatanBawah={kelipatanBawah}
+          kelipatanAtas={kelipatanAtas}
+        />
+      )}
+
+      <p class="hint">
+        Panjang batang adalah modal yang sudah tertanam di pita itu. Porsi fee
+        Anda adalah modal Anda dibagi batang di pita tempat harga bergerak, jadi
+        pita yang pendek justru yang paling menguntungkan selama harga betul
+        betul lewat sana.
+      </p>
+    </section>
+  );
+}
+
+function Histogram({
+  depth,
+  kelipatanBawah,
+  kelipatanAtas,
+}: {
+  depth: Distribusi;
+  kelipatanBawah: number;
+  kelipatanAtas: number;
+}) {
+  const puncak = depth.pita.reduce((m, p) => Math.max(m, p.nilai_quote), 0);
+
+  // Diurutkan menurut HARGA, bukan menurut tick, lalu digambar dari yang
+  // tertinggi ke terendah supaya searah dengan chart. Mengurutkan menurut tick
+  // akan menggambar terbalik pada pool yang memecoinnya token1.
+  const baris = [...depth.pita].sort((a, b) => b.harga_bawah - a.harga_bawah);
+
+  const dalamRange = (p: { harga_bawah: number; harga_atas: number }) => {
+    const bawah = p.harga_bawah / depth.harga_sekarang;
+    const atas = p.harga_atas / depth.harga_sekarang;
+    return atas > kelipatanBawah && bawah < kelipatanAtas;
+  };
+
+  return (
+    <div class="depth">
+      {baris.map((p) => (
+        <div
+          key={`${p.tick_bawah}:${p.tick_atas}`}
+          class={`depth-row${dalamRange(p) ? " terpilih" : ""}${p.aktif ? " aktif" : ""}`}
+        >
+          <span class="depth-harga num">{formatHargaKecil(p.harga_atas)}</span>
+          <span class="depth-bar-wrap">
+            <span
+              class="depth-bar"
+              style={`width: ${puncak > 0 ? (p.nilai_quote / puncak) * 100 : 0}%`}
+            />
+          </span>
+          <span class="depth-nilai num">{formatCompact(p.nilai_quote)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Harga memecoin biasanya jauh di bawah satu, dan pembulatan biasa akan
+ * menampilkan seluruh baris sebagai 0.00. Angka penting yang dipertahankan
+ * membuat pita pita yang berdekatan tetap bisa dibedakan.
+ */
+function formatHargaKecil(v: number): string {
+  if (!Number.isFinite(v)) return "-";
+  if (v === 0) return "0";
+  if (Math.abs(v) >= 1) return v.toFixed(4);
+  return v.toPrecision(4);
 }
 
 /**

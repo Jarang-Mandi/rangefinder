@@ -166,6 +166,9 @@ tersandung:
 | Hook yang bisa diupgrade ditolak mutlak | `risk::hook`, `risk::persetujuan` | Kode yang diperiksa hari ini bukan kode yang akan berjalan besok. Penolakannya ditegakkan di engine, bukan hanya di panel |
 | Gagal membaca slot proxy sama dengan bisa diupgrade | `risk::hook::susun` | Yang belum terbukti aman bukan berarti aman |
 | Hitungan adopsi sebagian adalah batas bawah | `risk::hook::susun` | Sudah melewati ambang berarti pasti lolos. Belum melewati berarti belum tahu, bukan tidak. Menyimpulkan `tidak` akan menolak hook yang layak tanpa pernah terlihat |
+| Batas pita dinamai menurut harga, bukan tick | `pools::distribusi` | Pada pool yang memecoinnya token1, tick lebih besar berarti harga lebih rendah. Histogram yang terbalik tetap terlihat masuk akal |
+| Harga sekarang selalu tercakup satu pita | `pools::distribusi::rangkai` | Pool yang ticknya hanya di satu sisi pernah menghasilkan histogram tanpa pita aktif sama sekali |
+| Pita penutup dipotong di batas tampilan | `pools::distribusi` | Satu kata bitmap bisa mencakup ratusan persen. Batang terpanjang karena lebar, bukan karena padat, menyesatkan justru di bagian yang paling dibaca |
 | Konversi satuan hanya di engine | `range` dan `math` | Panel tidak menghitung apa pun. Angka di layar harus sama persis dengan yang tercatat on chain |
 | Kurs ETH diturunkan dari chart | `math::calibrate_eth_usd` | Sumber luar selalu sedikit meleset dari gmgn, dan garis ikut bergeser |
 | Sisi tampilan bertukar saat memecoin token1 | `range::build_view` | Tick yang lebih besar berarti harga memecoin lebih rendah. Batas atas dan bawah harus ditukar sebelum ditampilkan |

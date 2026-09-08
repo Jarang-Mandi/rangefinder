@@ -91,6 +91,17 @@ pub enum ClientMessage {
     /// Cabut persetujuan sebuah hook.
     ForgetHook { hook: String },
 
+    /// Minta distribusi likuiditas pool yang sedang aktif.
+    ///
+    /// Terpisah dari `range_view` dengan sengaja. Distribusi butuh dua
+    /// perjalanan ke rantai, sekitar setengah detik, sedangkan `range_view`
+    /// dikirim ulang setiap kali user menggeser garis. Menggabungkannya akan
+    /// membuat garis terasa berat persis saat ia sedang digeser.
+    ///
+    /// Bentuk pool tidak berubah secepat harganya, jadi satu pembacaan cukup
+    /// untuk menemani banyak geseran.
+    GetDepth,
+
     /// Pindai pool paling ramai di rantai dan nilai kelayakannya.
     ///
     /// Membaca setiap swap pada jendela terakhir, jadi ia mahal dan tidak
@@ -158,6 +169,12 @@ pub enum ServerMessage {
     /// Rencana aksi pada posisi beserta hasil pemeriksaannya.
     ActionPlan(Box<crate::api::execute::ActionPlanView>),
 
+    /// Distribusi likuiditas pool yang sedang aktif.
+    ///
+    /// Menjawab pertanyaan yang menentukan hasil LP: berapa banyak modal orang
+    /// lain yang sudah ada di pita tempat harga bergerak. Porsi fee kita adalah
+    /// modal kita dibagi angka itu.
+    Depth(Box<crate::pools::distribusi::Distribusi>),
     /// Hasil pemindaian pool ramai untuk tab Signals.
     ///
     /// Jendela pengukuran ikut di dalamnya, bukan disimpulkan panel. Angka
