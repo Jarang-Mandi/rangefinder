@@ -302,8 +302,7 @@ export function App() {
    * harga chart datang berkala.
    */
   useEffect(() => {
-    const tabId = gmgnTabRef.current;
-    if (!rangeView || tabId === null) return;
+    if (!rangeView) return;
 
     // Perubahan yang datang dari chart tidak digambar ulang. Garisnya sudah
     // ada di tempat yang benar menurut user, dan memindahkannya ke hasil
@@ -318,17 +317,52 @@ export function App() {
     if (sidik === drawnRef.current) return;
     drawnRef.current = sidik;
 
-    void chrome.tabs
-      .sendMessage(tabId, {
+    void gambar(rangeView.lower.mcap_usd, rangeView.upper.mcap_usd);
+  }, [rangeView]);
+
+  /**
+   * Kirim perintah menggambar ke tab gmgn.
+   *
+   * KENAPA TAB DICARI ULANG KALAU BELUM DIKETAHUI
+   * Nomor tab biasanya datang bersama pesan dari content script. Setelah
+   * ekstensi dimuat ulang, content script yang lama kehilangan sambungannya
+   * dan tidak mengirim apa apa sampai halamannya dibuka ulang. Selama itu
+   * panel tidak tahu tab mana yang harus digambari, dan garis range tidak
+   * pernah muncul tanpa satu pun pesan kesalahan.
+   *
+   * Mencarinya sendiri membuat panel pulih tanpa user perlu tahu apa apa.
+   */
+  const gambar = useCallback(async (lowerPrice: number, upperPrice: number) => {
+    let tabId = gmgnTabRef.current;
+    if (tabId === null) {
+      try {
+        const tabs = await chrome.tabs.query({ url: "https://gmgn.ai/*" });
+        const ketemu = tabs.find((t) => typeof t.id === "number");
+        if (ketemu?.id !== undefined) {
+          tabId = ketemu.id;
+          gmgnTabRef.current = tabId;
+        }
+      } catch {
+        // Izin tab tidak ada atau tab tidak bisa dibaca. Bukan kondisi error.
+      }
+    }
+    if (tabId === null) return;
+
+    try {
+      await chrome.tabs.sendMessage(tabId, {
         target: "gmgn-chart",
         kind: "draw_lines",
-        upperPrice: rangeView.upper.mcap_usd,
-        lowerPrice: rangeView.lower.mcap_usd,
-      })
-      .catch(() => {
-        // Tab gmgn sudah tertutup atau berpindah. Bukan kondisi error.
+        upperPrice,
+        lowerPrice,
       });
-  }, [rangeView]);
+    } catch {
+      // Content script belum terpasang di tab itu, biasanya karena halamannya
+      // belum dibuka ulang setelah ekstensi dimuat ulang. Nomor tab dilupakan
+      // supaya percobaan berikutnya mencarinya lagi.
+      gmgnTabRef.current = null;
+      drawnRef.current = "";
+    }
+  }, []);
 
   const savePairing = useCallback(async (value: string) => {
     await chrome.storage.local.set({ [TOKEN_KEY]: value });
