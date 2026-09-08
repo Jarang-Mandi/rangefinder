@@ -74,13 +74,21 @@ pub async fn run(repo_root: &Path, token_arg: &str) -> Result<bool> {
         }
     );
 
-    let state_view = registry.contract("uniswap_v4", "state_view")?;
+    // Sumber data per tick berbeda menurut protokol pool.
+    let sumber = match pool.version {
+        rangefinder_engine::pools::PoolVersion::V4 => distribusi::SumberTick::V4 {
+            state_view: registry.contract("uniswap_v4", "state_view")?,
+        },
+        rangefinder_engine::pools::PoolVersion::V3 => distribusi::SumberTick::V3 {
+            pool: pool.id.parse()?,
+        },
+    };
     let multicall = registry.contract("common", "multicall3")?;
 
     let jam = std::time::Instant::now();
     let d = distribusi::susun(
         &provider,
-        state_view,
+        sumber,
         multicall,
         &pool.id,
         distribusi::KeadaanPool {

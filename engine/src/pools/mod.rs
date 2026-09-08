@@ -756,8 +756,14 @@ pub async fn muat_token<P: Provider>(
     // Angka pembanding diukur untuk kelompok kutipan teratas saja. Kelompok
     // lain jarang dibuka, dan mengukur semuanya berarti satu permintaan log
     // tambahan per kelompok pada jalur yang harus terasa seketika.
-    if let (Some(m), Some(k)) = (meta.as_ref(), quotes.first_mut()) {
-        ukur_stats(provider, registry, m, k).await;
+    //
+    // Tahap cepat dilewati sama sekali. Ia ada supaya panel punya sesuatu
+    // untuk ditampilkan dalam beberapa ratus milidetik, dan menambahkan
+    // pemindaian log di sana menghapus alasan keberadaannya.
+    if mode == ModePencarian::Penuh {
+        if let (Some(m), Some(k)) = (meta.as_ref(), quotes.first_mut()) {
+            ukur_stats(provider, registry, m, k).await;
+        }
     }
 
     Ok(TokenSnapshot { meta, quotes })
@@ -796,12 +802,26 @@ async fn ukur_stats<P: Provider>(
     // Taksiran memakai likuiditas di satu tick saja pernah melaporkan 0,82
     // untuk pool yang isinya kira kira 360, karena likuiditas berubah di setiap
     // tick yang terinisialisasi dan satu titik tidak mewakili seluruhnya.
-    let daftar: Vec<(String, distribusi::KeadaanPool)> = kelompok
+    let state_view = registry.contract("uniswap_v4", "state_view").ok();
+
+    // Sumber data per tick berbeda menurut protokol pool. Pool yang sumbernya
+    // tidak bisa ditentukan dilewati, bukan diberi TVL nol, karena nol berarti
+    // pool kosong dan itu kesimpulan yang berbeda.
+    let daftar: Vec<(String, distribusi::SumberTick, distribusi::KeadaanPool)> = kelompok
         .pools
         .iter()
-        .map(|p| {
-            (
+        .filter_map(|p| {
+            let sumber = match p.version {
+                PoolVersion::V4 => distribusi::SumberTick::V4 {
+                    state_view: state_view?,
+                },
+                PoolVersion::V3 => distribusi::SumberTick::V3 {
+                    pool: p.id.parse().ok()?,
+                },
+            };
+            Some((
                 p.id.clone(),
+                sumber,
                 distribusi::KeadaanPool {
                     tick_spacing: p.tick_spacing,
                     tick_sekarang: p.tick,
@@ -810,16 +830,13 @@ async fn ukur_stats<P: Provider>(
                     skala_meme,
                     skala_quote,
                 },
-            )
+            ))
         })
         .collect();
 
-    let tvl_pool = match (
-        registry.contract("uniswap_v4", "state_view"),
-        registry.contract("common", "multicall3"),
-    ) {
-        (Ok(sv), Ok(mc)) => distribusi::tvl_beberapa(provider, sv, mc, &daftar).await,
-        _ => Default::default(),
+    let tvl_pool = match registry.contract("common", "multicall3") {
+        Ok(mc) => distribusi::tvl_beberapa(provider, mc, &daftar).await,
+        Err(_) => Default::default(),
     };
 
     for pool in &mut kelompok.pools {
@@ -1411,6 +1428,16 @@ async fn scan_initialize_logs<P: Provider>(
                 // sanggup dilayani.
                 //
                 // Yang benar untuk 429 adalah menunggu, bukan mengecilkan.
+                // Batas LEBAR rentang tidak bisa diatasi dengan mengecilkan.
+                // Endpoint yang hanya mengizinkan sepuluh blok menuntut ratusan
+                // ribu permintaan untuk sekali pencarian, dan penyempitan
+                // otomatis hanya akan menyerah dengan pesan yang tidak
+                // menjelaskan apa apa.
+                if crate::chain::logs::lebar_dibatasi(&e) {
+                    return Err(anyhow::anyhow!(
+                        "endpoint RPC ini membatasi lebar rentang eth_getLogs, sedangkan pencarian pool menuntut pemindaian jutaan blok. Ganti ke endpoint yang mengizinkan rentang lebar, misalnya RPC publik Robinhood Chain. Pesan aslinya: {e}"
+                    ));
+                }
                 if dibatasi_laju(&e) && jeda_sisa > 0 {
                     let jeda = JEDA_DASAR_MS * (SABAR_MAKSIMUM - jeda_sisa + 1) as u64;
                     jeda_sisa -= 1;

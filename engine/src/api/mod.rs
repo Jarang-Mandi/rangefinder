@@ -1483,13 +1483,31 @@ impl AppState {
             Err(e) => return Some(kosong(format!("RPC tidak bisa dipakai: {e}"))),
         };
 
-        let state_view = match self.registry.contract("uniswap_v4", "state_view") {
-            Ok(a) => a,
-            Err(e) => return Some(kosong(e.to_string())),
-        };
         let multicall = match self.registry.contract("common", "multicall3") {
             Ok(a) => a,
             Err(e) => return Some(kosong(e.to_string())),
+        };
+
+        // Data per tick ada di tempat yang berbeda menurut protokolnya: V3
+        // menyimpannya di kontrak poolnya sendiri, V4 di PoolManager yang
+        // dibaca lewat StateView. Sebelum ini seluruh jalur mengandaikan V4,
+        // dan setiap pool V3 selalu melaporkan distribusi gagal dibaca.
+        let sumber = match pool.version {
+            crate::pools::PoolVersion::V4 => {
+                match self.registry.contract("uniswap_v4", "state_view") {
+                    Ok(a) => distribusi::SumberTick::V4 { state_view: a },
+                    Err(e) => return Some(kosong(e.to_string())),
+                }
+            }
+            crate::pools::PoolVersion::V3 => match pool.id.parse() {
+                Ok(a) => distribusi::SumberTick::V3 { pool: a },
+                Err(_) => {
+                    return Some(kosong(format!(
+                        "alamat pool V3 `{}` tidak bisa dibaca",
+                        pool.id
+                    )))
+                }
+            },
         };
 
         // Memecoin di sisi token0 berarti kutipannya token1. Arah ini
@@ -1499,7 +1517,7 @@ impl AppState {
 
         match distribusi::susun(
             &provider,
-            state_view,
+            sumber,
             multicall,
             &pool.id,
             distribusi::KeadaanPool {
@@ -2256,10 +2274,19 @@ pub const WS_UNAUTHORIZED: StatusCode = StatusCode::UNAUTHORIZED;
 fn sidik_pool(state: &protocol::TokenState) -> String {
     let mut bagian: Vec<&str> = state.pools.iter().map(|p| p.id.as_str()).collect();
     bagian.sort_unstable();
+
+    // KENAPA KETERISIAN STATISTIK IKUT DIHITUNG
+    // Tahap cepat memakai kunci pool dari cache dan tidak mengukur apa apa,
+    // sehingga daftar poolnya sering sama persis dengan tahap penuh. Tanpa
+    // suku ini, keduanya dianggap identik, kiriman kedua ditahan, dan APR,
+    // TVL, serta volume tidak pernah sampai ke panel meski sudah terhitung.
+    let ada_stats = state.pools.iter().any(|p| p.stats.is_some());
+
     format!(
-        "{}|{}|{}",
+        "{}|{}|{}|{}",
         state.selected_quote.as_deref().unwrap_or(""),
         state.selected_pool_id.as_deref().unwrap_or(""),
+        ada_stats,
         bagian.join(",")
     )
 }

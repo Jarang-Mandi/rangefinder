@@ -57,6 +57,31 @@ pub fn terlalu_banyak(e: &impl std::fmt::Display) -> bool {
         || teks.contains("query returned more than")
 }
 
+/// Berapa blok paling sedikit yang masih masuk akal untuk dipindai.
+///
+/// Endpoint yang membatasi di bawah ini tidak bisa dipakai alat ini sama
+/// sekali: penemuan pool V4 menuntut pemindaian jutaan blok, dan memecahnya
+/// menjadi potongan sepuluh blok berarti ratusan ribu permintaan.
+pub const JENDELA_TIDAK_LAYAK: u64 = 100;
+
+/// Benar kalau endpointnya membatasi lebar rentang log, bukan jumlah hasilnya.
+///
+/// KENAPA INI DIBEDAKAN
+/// Batas jumlah hasil bisa diatasi dengan mempersempit jendela. Batas LEBAR
+/// tidak: mempersempitnya sampai batas yang diizinkan menghasilkan ratusan
+/// ribu permintaan, dan penyempitan otomatis akan terus mencoba sampai
+/// menyerah dengan pesan yang tidak menjelaskan apa apa.
+///
+/// Alchemy paket gratis membatasi `eth_getLogs` pada sepuluh blok, sedangkan
+/// RPC publik Robinhood Chain menerima tiga juta. Alat ini tidak bisa berjalan
+/// di atas endpoint jenis pertama, dan itu harus dikatakan apa adanya.
+pub fn lebar_dibatasi(e: &impl std::fmt::Display) -> bool {
+    let teks = e.to_string().to_lowercase();
+    teks.contains("block range")
+        || teks.contains("range should work")
+        || teks.contains("free tier")
+}
+
 /// Benar kalau kegagalannya karena laju dibatasi.
 pub fn dibatasi_laju(e: &impl std::fmt::Display) -> bool {
     let teks = e.to_string().to_lowercase();
@@ -108,6 +133,16 @@ where
                     sampai_blok: sampai,
                     dipersempit: jendela < jendela_awal,
                 })
+            }
+            // Batas lebar rentang tidak bisa diatasi dengan menyempit. Yang
+            // benar adalah berhenti dan mengatakan endpointnya yang salah.
+            Err(e) if lebar_dibatasi(&e) => {
+                return Err(anyhow::Error::new(e).context(format!(
+                    "endpoint RPC ini membatasi lebar rentang eth_getLogs, dan \
+                     alat ini butuh pemindaian jutaan blok. Ganti ke endpoint \
+                     yang mengizinkan rentang lebar, misalnya RPC publik \
+                     Robinhood Chain. Gagal pada blok {dari} sampai {sampai}"
+                )))
             }
             Err(e) if jendela > jendela_minimum && terlalu_banyak(&e) => {
                 jendela = (jendela / 2).max(jendela_minimum);
@@ -179,12 +214,31 @@ mod tests {
     }
 
     #[test]
+    fn batas_lebar_dibedakan_dari_batas_jumlah() {
+        // Batas jumlah hasil diatasi dengan menyempit. Batas lebar rentang
+        // tidak: menyempitnya sampai sepuluh blok berarti ratusan ribu
+        // permintaan, dan penyempitan otomatis hanya akan menyerah dengan
+        // pesan yang tidak menjelaskan apa apa.
+        let lebar = Palsu(
+            "error code -32600: Under the Free tier plan, you can make \
+             eth_getLogs requests with up to a 10 block range",
+        );
+        assert!(lebar_dibatasi(&lebar));
+        assert!(!dibatasi_laju(&lebar));
+
+        let jumlah = Palsu("logs matched by query exceeds limit of 10000");
+        assert!(terlalu_banyak(&jumlah));
+        assert!(!lebar_dibatasi(&jumlah));
+    }
+
+    #[test]
     fn kegagalan_lain_bukan_keduanya() {
         // Kegagalan yang tidak dikenali harus dikembalikan apa adanya, bukan
         // diulang selamanya atau diubah jadi hasil kosong.
         let lain = Palsu("connection reset by peer");
         assert!(!terlalu_banyak(&lain));
         assert!(!dibatasi_laju(&lain));
+        assert!(!lebar_dibatasi(&lain));
     }
 
     #[test]

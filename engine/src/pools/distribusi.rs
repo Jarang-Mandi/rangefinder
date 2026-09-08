@@ -127,6 +127,78 @@ pub fn posisi(terkompresi: i32) -> (i16, u8) {
     (kata as i16, bit)
 }
 
+/// Dari mana data per tick dibaca.
+///
+/// V3 dan V4 menyimpan bitmap dan likuiditas tick dengan bentuk yang sama,
+/// hanya tempatnya berbeda: V3 di kontrak pool itu sendiri, V4 di PoolManager
+/// yang dibaca lewat StateView beserta poolId. Perakitan pitanya sama persis,
+/// jadi yang dipisahkan hanya pembacaannya.
+///
+/// Sebelum ini seluruh jalur mengandaikan V4, dan setiap pool V3 selalu
+/// melaporkan distribusi gagal dibaca.
+#[derive(Debug, Clone, Copy)]
+pub enum SumberTick {
+    /// Dibaca dari StateView memakai poolId.
+    V4 { state_view: Address },
+    /// Dibaca langsung dari kontrak poolnya.
+    V3 { pool: Address },
+}
+
+impl SumberTick {
+    fn panggil_bitmap(&self, id: FixedBytes<32>, kata: i16) -> (Address, alloy::primitives::Bytes) {
+        match self {
+            SumberTick::V4 { state_view } => crate::chain::multicall::encode(
+                *state_view,
+                &abi::IStateView::getTickBitmapCall { poolId: id, tick: kata },
+            ),
+            SumberTick::V3 { pool } => crate::chain::multicall::encode(
+                *pool,
+                &abi::IUniswapV3Pool::tickBitmapCall {
+                    wordPosition: kata,
+                },
+            ),
+        }
+    }
+
+    fn urai_bitmap(&self, keluaran: Option<&alloy::primitives::Bytes>) -> Option<U256> {
+        match self {
+            SumberTick::V4 { .. } => {
+                crate::chain::multicall::decode::<abi::IStateView::getTickBitmapCall>(keluaran)
+            }
+            SumberTick::V3 { .. } => {
+                crate::chain::multicall::decode::<abi::IUniswapV3Pool::tickBitmapCall>(keluaran)
+            }
+        }
+    }
+
+    fn panggil_tick(&self, id: FixedBytes<32>, tick: i32) -> (Address, alloy::primitives::Bytes) {
+        let t = alloy::primitives::aliases::I24::try_from(tick).unwrap_or_default();
+        match self {
+            SumberTick::V4 { state_view } => crate::chain::multicall::encode(
+                *state_view,
+                &abi::IStateView::getTickLiquidityCall { poolId: id, tick: t },
+            ),
+            SumberTick::V3 { pool } => crate::chain::multicall::encode(
+                *pool,
+                &abi::IUniswapV3Pool::ticksCall { tick: t },
+            ),
+        }
+    }
+
+    fn urai_net(&self, keluaran: Option<&alloy::primitives::Bytes>) -> Option<i128> {
+        match self {
+            SumberTick::V4 { .. } => {
+                crate::chain::multicall::decode::<abi::IStateView::getTickLiquidityCall>(keluaran)
+                    .and_then(|v| v.liquidityNet.to_string().parse::<i128>().ok())
+            }
+            SumberTick::V3 { .. } => {
+                crate::chain::multicall::decode::<abi::IUniswapV3Pool::ticksCall>(keluaran)
+                    .and_then(|v| v.liquidityNet.to_string().parse::<i128>().ok())
+            }
+        }
+    }
+}
+
 /// Susun distribusi likuiditas di sekitar harga sekarang.
 /// Keadaan pool yang dibutuhkan untuk menyusun distribusinya.
 ///
@@ -148,7 +220,7 @@ pub struct KeadaanPool {
 
 pub async fn susun<P: Provider>(
     provider: &P,
-    state_view: Address,
+    sumber: SumberTick,
     multicall: Address,
     pool_id: &str,
     k: KeadaanPool,
@@ -162,9 +234,15 @@ pub async fn susun<P: Provider>(
         skala_quote,
     } = k;
 
-    let id: FixedBytes<32> = pool_id
-        .parse()
-        .with_context(|| format!("`{pool_id}` bukan poolId bytes32"))?;
+    // Pada V3 pengenal poolnya adalah ALAMAT, bukan bytes32, dan ia memang
+    // tidak dipakai dalam panggilan mana pun karena datanya ada di kontrak
+    // poolnya sendiri. Penguraian yang gagal di sana bukan kesalahan.
+    let id: FixedBytes<32> = match sumber {
+        SumberTick::V4 { .. } => pool_id
+            .parse()
+            .with_context(|| format!("`{pool_id}` bukan poolId bytes32"))?,
+        SumberTick::V3 { .. } => FixedBytes::<32>::ZERO,
+    };
 
     let harga_sekarang = harga_di_tick(tick_sekarang, quote_adalah_token1, skala_meme, skala_quote);
 
@@ -196,22 +274,14 @@ pub async fn susun<P: Provider>(
     // Satu batch untuk seluruh kata bitmap.
     let mut calls = Vec::new();
     for k in dari_kata..=sampai_kata {
-        calls.push(crate::chain::multicall::encode(
-            state_view,
-            &abi::IStateView::getTickBitmapCall {
-                tick: k as i16,
-                poolId: id,
-            },
-        ));
+        calls.push(sumber.panggil_bitmap(id, k as i16));
     }
 
     let hasil = crate::chain::multicall::batch_call(provider, multicall, calls).await?;
 
     let mut tick_aktif: Vec<i32> = Vec::new();
     for (n, k) in (dari_kata..=sampai_kata).enumerate() {
-        let Some(kata) = crate::chain::multicall::decode::<abi::IStateView::getTickBitmapCall>(
-            hasil.get(n).and_then(|x| x.as_ref()),
-        ) else {
+        let Some(kata) = sumber.urai_bitmap(hasil.get(n).and_then(|x| x.as_ref())) else {
             continue;
         };
         if kata.is_zero() {
@@ -236,27 +306,19 @@ pub async fn susun<P: Provider>(
     // Satu batch lagi untuk liquidityNet setiap tick yang terinisialisasi.
     let mut calls = Vec::with_capacity(tick_aktif.len());
     for t in &tick_aktif {
-        calls.push(crate::chain::multicall::encode(
-            state_view,
-            &abi::IStateView::getTickLiquidityCall {
-                poolId: id,
-                tick: alloy::primitives::aliases::I24::try_from(*t).unwrap_or_default(),
-            },
-        ));
+        calls.push(sumber.panggil_tick(id, *t));
     }
 
     let hasil = crate::chain::multicall::batch_call(provider, multicall, calls).await?;
 
     let mut net: Vec<(i32, i128)> = Vec::with_capacity(tick_aktif.len());
     for (n, t) in tick_aktif.iter().enumerate() {
-        let Some(v) = crate::chain::multicall::decode::<abi::IStateView::getTickLiquidityCall>(
-            hasil.get(n).and_then(|x| x.as_ref()),
-        ) else {
-            // Dilewati, bukan dianggap nol. Nol berarti tick itu tidak mengubah
-            // likuiditas apa pun, dan itu kesimpulan yang berbeda.
+        // Dilewati, bukan dianggap nol. Nol berarti tick itu tidak mengubah
+        // likuiditas apa pun, dan itu kesimpulan yang berbeda.
+        let Some(v) = sumber.urai_net(hasil.get(n).and_then(|x| x.as_ref())) else {
             continue;
         };
-        net.push((*t, v.liquidityNet.to_string().parse::<i128>().unwrap_or(0)));
+        net.push((*t, v));
     }
 
     // PITA PENUTUP DIPOTONG DI BATAS TAMPILAN, BUKAN DI TEPI KATA BITMAP
@@ -316,9 +378,8 @@ pub const KATA_TVL: i32 = 8;
 /// Nol berarti poolnya kosong, kesimpulan yang sangat berbeda.
 pub async fn tvl_beberapa<P: Provider>(
     provider: &P,
-    state_view: Address,
     multicall: Address,
-    pools: &[(String, KeadaanPool)],
+    pools: &[(String, SumberTick, KeadaanPool)],
 ) -> HashMap<String, f64> {
     let mut out: HashMap<String, f64> = HashMap::new();
     if pools.is_empty() {
@@ -327,10 +388,16 @@ pub async fn tvl_beberapa<P: Provider>(
 
     // TAHAP SATU: bitmap seluruh pool dalam satu batch.
     let mut calls = Vec::new();
-    let mut rencana: Vec<(usize, String, KeadaanPool, i32, i32)> = Vec::new();
-    for (id, k) in pools {
-        let Ok(bytes) = id.parse::<FixedBytes<32>>() else {
-            continue;
+    let mut rencana: Vec<(usize, String, SumberTick, KeadaanPool, i32, i32)> = Vec::new();
+    for (id, sumber, k) in pools {
+        // Pengenal pool V3 adalah alamat, bukan bytes32, dan ia memang tidak
+        // dipakai dalam panggilan mana pun di jalur itu.
+        let bytes = match sumber {
+            SumberTick::V4 { .. } => match id.parse::<FixedBytes<32>>() {
+                Ok(b) => b,
+                Err(_) => continue,
+            },
+            SumberTick::V3 { .. } => FixedBytes::<32>::ZERO,
         };
         if k.tick_spacing <= 0 {
             continue;
@@ -340,15 +407,9 @@ pub async fn tvl_beberapa<P: Provider>(
         let sampai = tengah + KATA_TVL / 2;
         let awal = calls.len();
         for w in dari..=sampai {
-            calls.push(crate::chain::multicall::encode(
-                state_view,
-                &abi::IStateView::getTickBitmapCall {
-                    tick: w as i16,
-                    poolId: bytes,
-                },
-            ));
+            calls.push(sumber.panggil_bitmap(bytes, w as i16));
         }
-        rencana.push((awal, id.clone(), *k, dari, sampai));
+        rencana.push((awal, id.clone(), *sumber, *k, dari, sampai));
     }
 
     let Ok(hasil) = crate::chain::multicall::batch_call(provider, multicall, calls).await else {
@@ -358,16 +419,19 @@ pub async fn tvl_beberapa<P: Provider>(
 
     // TAHAP DUA: likuiditas tiap tick yang terinisialisasi, juga satu batch.
     let mut calls = Vec::new();
-    let mut rencana2: Vec<(usize, usize, String, KeadaanPool, Vec<i32>)> = Vec::new();
-    for (awal, id, k, dari, sampai) in rencana {
-        let Ok(bytes) = id.parse::<FixedBytes<32>>() else {
-            continue;
+    let mut rencana2: Vec<(usize, usize, String, SumberTick, KeadaanPool, Vec<i32>)> = Vec::new();
+    for (awal, id, sumber, k, dari, sampai) in rencana {
+        let bytes = match sumber {
+            SumberTick::V4 { .. } => match id.parse::<FixedBytes<32>>() {
+                Ok(b) => b,
+                Err(_) => continue,
+            },
+            SumberTick::V3 { .. } => FixedBytes::<32>::ZERO,
         };
         let mut ticks = Vec::new();
         for (n, w) in (dari..=sampai).enumerate() {
-            let Some(kata) = crate::chain::multicall::decode::<abi::IStateView::getTickBitmapCall>(
-                hasil.get(awal + n).and_then(|x| x.as_ref()),
-            ) else {
+            let Some(kata) = sumber.urai_bitmap(hasil.get(awal + n).and_then(|x| x.as_ref()))
+            else {
                 continue;
             };
             if kata.is_zero() {
@@ -386,15 +450,9 @@ pub async fn tvl_beberapa<P: Provider>(
 
         let awal2 = calls.len();
         for t in &ticks {
-            calls.push(crate::chain::multicall::encode(
-                state_view,
-                &abi::IStateView::getTickLiquidityCall {
-                    poolId: bytes,
-                    tick: alloy::primitives::aliases::I24::try_from(*t).unwrap_or_default(),
-                },
-            ));
+            calls.push(sumber.panggil_tick(bytes, *t));
         }
-        rencana2.push((awal2, ticks.len(), id, k, ticks));
+        rencana2.push((awal2, ticks.len(), id, sumber, k, ticks));
     }
 
     if calls.is_empty() {
@@ -406,15 +464,13 @@ pub async fn tvl_beberapa<P: Provider>(
         return out;
     };
 
-    for (awal, jumlah, id, k, ticks) in rencana2 {
+    for (awal, jumlah, id, sumber, k, ticks) in rencana2 {
         let mut net: Vec<(i32, i128)> = Vec::with_capacity(jumlah);
         for (n, t) in ticks.iter().enumerate() {
-            let Some(v) = crate::chain::multicall::decode::<abi::IStateView::getTickLiquidityCall>(
-                hasil2.get(awal + n).and_then(|x| x.as_ref()),
-            ) else {
+            let Some(v) = sumber.urai_net(hasil2.get(awal + n).and_then(|x| x.as_ref())) else {
                 continue;
             };
-            net.push((*t, v.liquidityNet.to_string().parse::<i128>().unwrap_or(0)));
+            net.push((*t, v));
         }
 
         let bawah = *ticks.first().unwrap_or(&k.tick_sekarang);

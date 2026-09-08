@@ -809,3 +809,27 @@
   margin: 0;
   font-size: 13px;
 }
+
+/* Kabar dari engine, jawaban langsung atas aksi yang baru ditekan.
+ * Diletakkan di atas isi tab supaya terlihat tanpa menggulir. */
+.kabar {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px var(--s3);
+  border: none;
+  border-radius: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-raised);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.kabar.critical {
+  color: var(--lower);
+}
+
+.kabar.warning {
+  color: var(--warn);
+}

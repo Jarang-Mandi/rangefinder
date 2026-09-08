@@ -1248,6 +1248,33 @@ garis persis di tempat kursor dilepas, dan hasil pembulatan ke grid tick tetap
 terbaca sebagai angka di kartu Range. Penggambaran ulang hanya berlaku untuk
 perubahan yang bukan dari chart: preset, custom, dan ganti pool.
 
+**Endpoint RPC harus mengizinkan pemindaian log yang lebar.** Alchemy paket
+gratis membatasi `eth_getLogs` pada sepuluh blok, sedangkan penemuan pool V4
+menuntut pemindaian jutaan blok. Batas LEBAR rentang berbeda dari batas JUMLAH
+hasil: yang kedua bisa diatasi dengan menyempitkan jendela, yang pertama tidak,
+karena menyempitkannya sampai sepuluh blok berarti ratusan ribu permintaan.
+Keduanya kini dibedakan, dan batas lebar dilaporkan sebagai kesalahan pemilihan
+endpoint, bukan sebagai kegagalan pemindaian yang tidak menjelaskan apa apa.
+
+**Statistik pool ikut menentukan apakah keadaan token dikirim ulang.** Tahap
+cepat memakai kunci pool dari cache dan tidak mengukur apa apa, sehingga daftar
+poolnya sering sama persis dengan tahap penuh. Sebelum ini keduanya dianggap
+identik, kiriman kedua ditahan, dan APR, TVL, serta volume tidak pernah sampai
+ke panel meski sudah terhitung.
+
+**Distribusi likuiditas berlaku untuk V3 maupun V4.** Keduanya menyimpan bitmap
+dan likuiditas tick dengan bentuk yang sama, hanya tempatnya berbeda: V3 di
+kontrak poolnya sendiri, V4 di PoolManager lewat StateView. Sebelum ini seluruh
+jalur mengandaikan V4, dan setiap pool V3 selalu melaporkan distribusi gagal
+dibaca.
+
+**Settings menjadi tab tersendiri**, bukan bagian tab Range. Isinya diatur sekali
+lalu jarang disentuh, sedangkan tab Range dipakai setiap kali menaruh posisi.
+
+**Kabar dari engine tampil di panel**, bukan hanya di konsol. Aksi seperti
+mengganti endpoint RPC sebelumnya tidak memberi tanda apa pun di layar, sehingga
+user tidak tahu apakah permintaannya sampai.
+
 **Setoran memakai dua kotak yang selalu terlihat**, mengikuti tata letak acuan
 MMT Finance: nama token, jumlah, nilainya dalam USD, dan saldo wallet, lalu satu
 tombol besar yang labelnya menyatakan keadaan, lalu baris estimasi APR. Rasio

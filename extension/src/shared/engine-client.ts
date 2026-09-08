@@ -28,6 +28,7 @@ import {
   type EnginePing,
   type EngineStatus,
   type ActionPlanView,
+  type AlertLevel,
   type Bar,
   type JenisAksi,
   type Kejadian,
@@ -52,7 +53,7 @@ export type ConnectionState =
 interface Handlers {
   onState: (state: ConnectionState, detail?: string) => void;
   onStatus: (status: EngineStatus) => void;
-  onAlert: (level: string, code: string, message: string) => void;
+  onAlert: (level: AlertLevel, code: string, message: string) => void;
   onTokenState?: (token: TokenState) => void;
   onRangeView?: (view: RangeView) => void;
   onOpenPlan?: (plan: OpenPlanView) => void;

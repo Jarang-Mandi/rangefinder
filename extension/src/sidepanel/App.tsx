@@ -29,6 +29,7 @@ import {
   isEvmAddress,
   type EngineStatus,
   type ActionPlanView,
+  type AlertLevel,
   type BarisScan,
   type Distribusi,
   type LabelScan,
@@ -53,13 +54,14 @@ import {
 
 const TOKEN_KEY = "rangefinder.pairingToken";
 
-type TabId = "range" | "signals" | "positions" | "pnl";
+type TabId = "range" | "signals" | "positions" | "pnl" | "settings";
 
 const TABS: { id: TabId; label: string; phase: number }[] = [
   { id: "range", label: "Range", phase: 1 },
   { id: "signals", label: "Signals", phase: 0 },
   { id: "positions", label: "Positions", phase: 0 },
   { id: "pnl", label: "PnL", phase: 0 },
+  { id: "settings", label: "Settings", phase: 0 },
 ];
 
 export function App() {
@@ -98,7 +100,21 @@ export function App() {
    * angka di kartu Range. Jadi penggambaran ulang hanya berlaku untuk
    * perubahan yang BUKAN dari chart: preset, custom, dan ganti pool.
    */
+  /**
+   * Kabar terakhir dari engine, ditampilkan sebagai baris di atas isi tab.
+   *
+   * Sebelumnya kabar hanya masuk konsol panel, sehingga aksi seperti mengganti
+   * endpoint RPC tidak memberi tanda apa pun di layar dan user tidak tahu
+   * apakah permintaannya sampai.
+   */
+  const [kabar, setKabar] = useState<{
+    level: AlertLevel;
+    message: string;
+  } | null>(null);
+
   const dariChartRef = useRef(false);
+  /** Alamat token yang keadaannya terakhir diterima. Lihat `onTokenState`. */
+  const alamatTerakhirRef = useRef("");
   const [depth, setDepth] = useState<Distribusi | null>(null);
   const [scanBusy, setScanBusy] = useState(false);
 
@@ -128,15 +144,28 @@ export function App() {
       },
       onStatus: setStatus,
       onTokenState: (t) => {
+        // Satu token bisa mengirim beberapa kali: tahap cepat dari cache,
+        // tahap penuh yang membawa statistik pool, lalu susulan saldo.
+        // Mereset range pada setiap kiriman akan menghapus garis yang sudah
+        // digambar dan rencana yang sudah disusun, padahal tokennya sama.
+        // Ref, bukan state: handler ini dibuat sekali dan akan memegang nilai
+        // state yang basi selamanya kalau membacanya langsung.
+        const alamatBaru = (t.address ?? "").toLowerCase();
+        const tokenBerganti = alamatBaru !== alamatTerakhirRef.current;
+        alamatTerakhirRef.current = alamatBaru;
+
         setTokenState(t);
         setTokenLoading(false);
-        setRangeView(null);
-        setDepth(null);
-        // Rencana lama milik token lama. Membiarkannya berarti menawarkan
-        // tombol buka posisi untuk pool yang sudah tidak dilihat lagi.
-        setOpenPlan(null);
-        setSendResult(null);
-        drawnRef.current = "";
+
+        if (tokenBerganti) {
+          setRangeView(null);
+          setDepth(null);
+          // Rencana lama milik token lama. Membiarkannya berarti menawarkan
+          // tombol buka posisi untuk pool yang sudah tidak dilihat lagi.
+          setOpenPlan(null);
+          setSendResult(null);
+          drawnRef.current = "";
+        }
       },
       onRangeView: (v) => {
         setRangeView((lama) => {
@@ -184,8 +213,10 @@ export function App() {
         // Kegagalan eksekusi datang sebagai alert, dan tanpa ini tombolnya
         // akan tetap mati sesudahnya.
         setExecBusy(false);
-        // Fase 5 memindahkan ini ke toast di halaman gmgn beserta suaranya,
-        // sesuai PRD 3.7. Untuk sekarang cukup tercatat di konsol panel.
+        // Toast di halaman gmgn menangani kejadian yang layak mengganggu user,
+        // sesuai PRD 3.7. Yang di sini adalah jawaban langsung atas aksi yang
+        // baru saja user tekan, dan itu harus terlihat di tempat ia menekannya.
+        setKabar({ level, message });
         console.info(`[rangefinder] ${level} ${code}: ${message}`);
       },
     });
@@ -396,13 +427,23 @@ export function App() {
         ))}
       </nav>
 
+      {kabar ? (
+        <button
+          type="button"
+          class={`kabar ${kabar.level}`}
+          onClick={() => setKabar(null)}
+          title="Klik untuk menutup"
+        >
+          {kabar.message}
+        </button>
+      ) : null}
+
       <div class="content">
         {tab === "range" ? (
           <RangeTab
             status={status}
             state={state}
             detail={stateDetail}
-            client={clientRef.current}
             token={tokenState}
             loadingToken={tokenLoading}
             onLoadToken={loadToken}
@@ -432,7 +473,6 @@ export function App() {
               setExecBusy(true);
               clientRef.current?.openPosition();
             }}
-            onForget={forgetPairing}
           />
         ) : tab === "signals" ? (
           <SignalsTab
@@ -460,6 +500,12 @@ export function App() {
               setPosBusy(true);
               clientRef.current?.getPositions();
             }}
+          />
+        ) : tab === "settings" ? (
+          <SettingsTab
+            status={status}
+            client={clientRef.current}
+            onForget={forgetPairing}
           />
         ) : tab === "positions" ? (
           <PositionsTab
@@ -562,7 +608,6 @@ function RangeTab({
   status,
   state,
   detail,
-  client,
   token,
   loadingToken,
   onLoadToken,
@@ -580,12 +625,10 @@ function RangeTab({
   onApproveToken,
   onSwapZap,
   onOpenPosition,
-  onForget,
 }: {
   status: EngineStatus | null;
   state: ConnectionState;
   detail?: string;
-  client: EngineClient | null;
   token: TokenState | null;
   loadingToken: boolean;
   onLoadToken: (address: string, navigate: boolean) => void;
@@ -603,9 +646,7 @@ function RangeTab({
   onApproveToken: (token: string) => void;
   onSwapZap: () => void;
   onOpenPosition: () => void;
-  onForget: () => void;
 }) {
-  const [showEngine, setShowEngine] = useState(false);
 
   if (!status) {
     return (
@@ -650,32 +691,50 @@ function RangeTab({
         </>
       ) : null}
 
-      <section class="card">
-        <div class="section-title">
+    </div>
+  );
+}
+
+/**
+ * Tab Settings.
+ *
+ * Dipisahkan dari tab Range atas permintaan user. Isinya keadaan engine dan
+ * hal hal yang diatur sekali lalu jarang disentuh, sedangkan tab Range dipakai
+ * setiap kali menaruh posisi. Mencampurnya membuat yang sering dipakai harus
+ * digulir melewati yang jarang.
+ */
+function SettingsTab({
+  status,
+  client,
+  onForget,
+}: {
+  status: EngineStatus | null;
+  client: EngineClient | null;
+  onForget: () => void;
+}) {
+  if (!status) {
+    return (
+      <div class="stack">
+        <section class="card">
           <h2>Settings</h2>
-          <button class="chip" style="cursor: pointer" onClick={() => setShowEngine((v) => !v)}>
-            {showEngine ? "tutup" : "buka"}
-          </button>
-        </div>
-        {showEngine ? (
-          <div class="stack" style="margin-top: var(--s3)">
-            <ChainCard status={status} />
-            <WalletCard status={status} client={client} />
-            <RegistryCard status={status} />
-            <EngineCard
-              status={status}
-              onSetRpc={(http) => client?.setRpc(http)}
-              onForget={onForget}
-            />
-          </div>
-        ) : (
-          <p class="muted" style="margin: 0">
-            Chain {status.chain.healthy ? "sehat" : "bermasalah"}, wallet{" "}
-            {!status.wallet.exists ? "belum ada" : status.wallet.locked ? "terkunci" : "terbuka"},
-            registry {status.registry.verified} dari {status.registry.total}.
+          <p class="muted" style="margin: var(--s2) 0 0">
+            Menunggu engine.
           </p>
-        )}
-      </section>
+        </section>
+      </div>
+    );
+  }
+
+  return (
+    <div class="stack">
+      <ChainCard status={status} />
+      <WalletCard status={status} client={client} />
+      <RegistryCard status={status} />
+      <EngineCard
+        status={status}
+        onSetRpc={(http) => client?.setRpc(http)}
+        onForget={onForget}
+      />
     </div>
   );
 }
@@ -1940,6 +1999,11 @@ function SetoranCard({
         </label>
       </div>
 
+      {/* Zap menyala berarti satu aset saja: engine menukar sebagiannya
+          sendiri supaya cocok rasio range. Kotak sisi yang lain disembunyikan,
+          bukan dinonaktifkan, karena kotak mati yang tetap terlihat mengundang
+          pertanyaan kenapa ia tidak bisa diisi. */}
+      {zap && sisiAktif !== "meme" ? null : (
       <KotakSetor
         simbol={simbolMeme}
         nilai={isiMeme}
@@ -1951,7 +2015,9 @@ function SetoranCard({
         }}
         onSelesai={() => susun("meme")}
       />
+      )}
 
+      {zap && sisiAktif !== "quote" ? null : (
       <KotakSetor
         simbol={simbolQuote}
         nilai={isiQuote}
@@ -1963,6 +2029,32 @@ function SetoranCard({
         }}
         onSelesai={() => susun("quote")}
       />
+      )}
+
+      {zap ? (
+        <div class="setor-sisi" style="margin-top: var(--s2)">
+          <button
+            class={`preset${sisiAktif === "meme" ? " aktif" : ""}`}
+            onClick={() => setSisiAktif("meme")}
+          >
+            setor {simbolMeme}
+          </button>
+          <button
+            class={`preset${sisiAktif === "quote" ? " aktif" : ""}`}
+            onClick={() => setSisiAktif("quote")}
+          >
+            setor {simbolQuote}
+          </button>
+        </div>
+      ) : null}
+
+      {zap && setor ? (
+        <p class="hint">
+          Engine menukar sebagiannya supaya cocok rasio range. Hasilnya kira kira{" "}
+          {formatCompact(setor.jumlah_memecoin)} {simbolMeme} dan{" "}
+          {formatCompact(setor.jumlah_quote)} {simbolQuote}.
+        </p>
+      ) : null}
 
       <button
         class="lebar utama"
