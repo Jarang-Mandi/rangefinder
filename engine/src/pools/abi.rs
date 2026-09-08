@@ -77,3 +77,26 @@ sol! {
         int24 tick
     );
 }
+
+sol! {
+    /// Event `Swap` dari PoolManager V4.
+    ///
+    /// `id` terindeks, jadi volume per pool bisa dihitung tanpa satu permintaan
+    /// per pool: satu pemindaian atas seluruh PoolManager, lalu dikelompokkan
+    /// di sini menurut poolId.
+    ///
+    /// `amount0` dan `amount1` bertanda, dan tandanya dari sudut pandang pool.
+    /// Yang dipakai sebagai ukuran volume adalah nilai mutlaknya.
+    #[derive(Debug)]
+    event Swap(
+        bytes32 indexed id,
+        address indexed sender,
+        int128 amount0,
+        int128 amount1,
+        uint160 sqrtPriceX96,
+        uint128 liquidity,
+        int24 tick,
+        uint24 fee
+    );
+}
+

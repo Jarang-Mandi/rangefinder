@@ -11,6 +11,7 @@
 //!   RPC adalah kondisi normal yang harus ditangani, bukan kejadian luar biasa.
 
 pub mod endpoint;
+pub mod logs;
 pub mod multicall;
 pub mod registry;
 

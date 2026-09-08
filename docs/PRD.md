@@ -1065,6 +1065,67 @@ Toast muncul di pojok kanan atas halaman gmgn, sesuai PRD 3.7. Yang perlu ditega
 
 **Yang diberitahukan adalah perubahan, bukan keadaan.** Memberi tahu setiap kali posisi berada di luar range akan membanjiri layar setiap kali daftar dimuat ulang. Yang layak diberitahukan adalah baru saja keluar, atau baru saja kembali masuk. Pemuatan pertama tidak pernah memicu notifikasi.
 
+### 6.13 Pemindaian pool ramai
+
+Ini sumber daftar kandidat tab Signals. Enam keputusan di sini menyimpang dari
+3.4 atau memperjelasnya, dan semuanya datang dari menjalankan alatnya terhadap
+rantai sungguhan.
+
+**Sumbernya rantai, bukan API gmgn.** 3.4 semula membayangkan pemindaian lewat
+content script gmgn dengan batas satu permintaan per dua detik. Volume swap on
+chain lebih baik untuk keperluan ini, dan alasannya bukan sekadar keandalan:
+yang kita cari adalah pool yang membayar fee, dan yang membayar fee adalah swap
+yang benar benar terjadi di pool itu. Peringkat gmgn mengukur perhatian pasar,
+yang berkorelasi tapi bukan hal yang sama. Batas laju gmgn juga menjadi tidak
+relevan, karena sesi user tidak disentuh sama sekali.
+
+**Dua penolakan RPC yang obatnya berlawanan.** `logs matched by query exceeds
+limit` berarti jawabannya kebanyakan dan obatnya mempersempit jendela.
+`429 Too Many Requests` berarti permintaannya kerapatan dan obatnya menunggu.
+Memperlakukan keduanya sama memperburuk salah satunya: mempersempit saat
+dibatasi laju justru menambah jumlah permintaan. Keduanya pernah terjadi
+berurutan pada dua percobaan yang berdekatan, dan itulah kenapa keduanya
+ditangani satu helper bersama di `chain::logs`.
+
+**Jendela pemindaian pendek, jendela volume panjang.** Pemindaian harus membaca
+setiap swap di rantai untuk menemukan pool mana yang ramai, jadi jendelanya
+beberapa menit. Jendela sependek itu tidak boleh dipakai memproyeksikan hasil
+setahun: pengalinya ratusan ribu, dan satu ledakan volume dua menit pernah
+menghasilkan proyeksi 7.645.797 persen. Setelah poolnya diketahui, lognya bisa
+disaring menurut poolId, sehingga jendela satu jam menjadi murah. Jendela yang
+benar benar terpakai selalu ikut hasilnya, karena volume tanpa jendela tidak
+bisa dibandingkan.
+
+**Rasio efisiensi mengukur kelurusan jalan, bukan panjangnya.** Event `Swap`
+membawa tick, sehingga deret harga tersedia dari sumber paling berwenang tanpa
+satu pun permintaan tambahan, dan rasio efisiensi Kaufman bisa dihitung darinya.
+Tapi rasio itu saja tidak cukup: pool yang hanya berpindah dua tick menghasilkan
+rasio 1,00 karena dua titik selalu lurus, dan hasil sungguhan pernah memberi
+label `LP Jual Naik` pada perpindahan 0,0 persen. Arah baru disebut kalau
+perpindahan bersihnya melewati satu persen. Di atas 60 persen, arahnya juga
+tidak disebut, karena range yang dipasang setelah gerakan sebesar itu akan
+langsung tertinggal.
+
+**Proyeksi hasil memakai modal acuan, bukan pembagian lurus.** Bagian LP atas
+fee adalah `modal / (kedalaman + modal)`. Bentuk `modal / kedalaman` hanya sah
+kalau modalnya jauh lebih kecil daripada poolnya, dan pada pool tipis ia
+meledak: kedalaman 296 dengan volume 35.500 menghasilkan 1.890.130 persen,
+karena rumusnya diam diam mengandaikan kita menguasai seluruh pool tanpa
+mengencerkannya. Modal acuan disebutkan bersama angkanya, sehingga hasilnya
+menjadi pernyataan yang bisa diperiksa: sekian persen kalau menaruh sekian.
+
+Modal itu sendiri diukur pada rentang yang harga benar benar lewati, bukan pita
+tetap, dan **kedua kaki posisi ikut dihitung**. Menghitung satu kaki saja
+membuat modalnya terbaca nol setiap kali harga kebetulan berada di ujung
+rentangnya, karena kaki di sisi itu memang menyusut sampai nol.
+
+**Kutipan dinilai dari alamat, tidak pernah dari simbol.** Simbol ditentukan
+penerbit token, jadi siapa pun bisa menerbitkan token bersimbol USDG, dan
+pemindaian sungguhan memang menemukannya. Baris yang alamat kutipannya tidak
+ada di registry tidak diberi angka uang sama sekali, dan panel menandainya
+dengan tanda tanya di depan simbol. Masalah yang sama pernah muncul pada FIG,
+yang punya pool terhadap 32 token berbeda dan sebagian besar tiruan.
+
 ## 7. Technical Specifications
 
 ### 7.1 Arsitektur
@@ -1136,7 +1197,7 @@ Panel ke engine:
 | `get_notifications` | tanpa isi. Minta riwayat notifikasi terakhir | 5 |
 | `plan_action` | `{ tokenId, action }` dengan `action` bernilai `klaim_fee` atau `tutup_posisi`. Menyusun dan menyimulasikan aksi, TIDAK mengirim apa pun | 5 |
 | `execute_action` | tanpa isi. Menyetujui aksi terakhir yang tersimpan di engine | 5 |
-| `scan` | `{ filters }` | 6 |
+| `scan` | tanpa isi. Pindai pool paling ramai di rantai dan nilai kelayakannya. Mahal, karena engine membaca setiap swap pada jendela terakhir, jadi ia hanya berjalan saat user memintanya. Jawabannya datang belakangan sebagai `scan_results`. Penyaring belum ikut dikirim panel: seluruh penyaringan masih berjalan di engine, lihat 6.13 | 6 |
 
 Engine ke panel:
 
@@ -1151,6 +1212,7 @@ Engine ke panel:
 | `positions` | `{ positions[], owner, keluarRange, error, dimuatPada }`. Setiap posisi membawa versi protokol, PoolKey, tick, likuiditas, status in range, dan fee yang belum diklaim | 5 |
 | `notify` | `{ level, code, message, subject, at, ditahan }`. Berbeda dari `alert`: pesan ini melewati pendinginan, masuk riwayat, dan membawa petunjuk durasi serta suara. `alert` dipakai untuk kegagalan seketika pada aksi yang sedang dijalankan user | 5 |
 | `notify_history` | daftar kejadian terakhir, terbaru lebih dulu, paling banyak 50 | 5 |
+| `scan_results` | `{ rows[], jendelaPindaiMenit, jendelaVolumeMenit, volumeJendelaPendek, modalAcuan, totalSwap, dipindaiPada, error }`. Setiap baris membawa simbol, pasangan beserta penanda apakah alamat kutipannya dikenal, market cap, volume, modal yang dibutuhkan, hasil fee sepanjang jendela, proyeksi APR, rasio efisiensi, umur, daftar risiko, satu label aksi, dan alasannya. Jendela ikut di dalam pesan, tidak disimpulkan panel: angka hasil dan proyeksi keduanya bergantung padanya, dan jendelanya bisa menyempit sendiri kalau RPC menolak | 6 |
 | `signals` | `{ address, barTerpakai, harga, sideways, basis, saran, konsentrasiDibandingLebar, dihitungPada }`. `sideways` dan `basis` kosong berarti datanya belum cukup, BUKAN berarti kondisinya tidak menarik | 6 |
 | `action_plan` | `{ tokenId, action, nama, gates[], gasEstimate, dryRun, menutup, siap, expiresAt, fee0, fee1 }`. Simulasi ditampilkan sebelum tombol konfirmasi aktif, sesuai 3.5 | 5 |
 | `token_state` | `{ address, meta, quotes[], pools[], selectedQuote, selectedPoolId, error }`. Setiap `quote` membawa `{ quote, quoteSymbol, quoteDecimals, canonical, pools[] }`. Dikirim dua kali saat memuat: sekali cepat dari kunci pool yang tersimpan, sekali lagi setelah pemindaian selesai kalau ada yang berubah. Lihat 4.3c | 2 |
@@ -1410,6 +1472,17 @@ Kalau jam impas lebih panjang daripada ekspektasi waktu bertahan dari 11.2, posi
 Satu pair bisa punya pool di beberapa fee tier. Yang paling likuid belum tentu paling menguntungkan untuk LP. Engine menghitung `volume x fee_tier / likuiditas` untuk setiap pool yang ada, termasuk lintas V3 dan V4, lalu mengurutkan berdasarkan proyeksi fee per dolar modal. Pada memecoin, pool 1 persen sering mengalahkan pool 0,3 persen meski volumenya lebih kecil.
 
 Pemeringkatan ini berjalan **setelah** penyaringan fee di luar akal sehat pada 4.3b, bukan sebelumnya. Tanpa urutan itu, rumus `volume x fee_tier / likuiditas` justru memilih pool fee 80 persen yang volumenya nol.
+
+Terpasang di `signals::optimizer` dan bisa dijalankan langsung lewat
+`cargo xtask optimizer <alamat_token>`. Pool tanpa volume tidak diberi proyeksi
+nol lalu diurutkan di bawah, melainkan ditandai terpisah: nol di sini berarti
+belum ada perdagangan pada jendela yang diukur, dan itu berbeda dari pool yang
+ramai tapi likuiditasnya terlalu tebal. Fee dinamis tidak diproyeksikan sama
+sekali, karena besarannya baru diketahui saat swap terjadi.
+
+Rumus di atas dipakai untuk **memeringkat pool pada token yang sama**, dan hanya
+berarti sebagai perbandingan. Untuk menyatakan hasilnya sebagai angka yang bisa
+dibaca sendiri, 6.13 memakai bentuk yang memuat modal acuan di penyebut.
 
 ### 11.6 LP satu sisi sebagai alat eksekusi
 

@@ -1268,6 +1268,77 @@ impl AppState {
     /// dijalankan di tugas terpisah. Kegagalan dikirim sebagai bagian dari
     /// muatan, bukan menggantikannya, supaya panel tetap bisa menampilkan
     /// posisi lama sambil menyebutkan apa yang salah.
+    /// Pindai pool ramai dan kirim hasilnya ke panel.
+    ///
+    /// Kegagalan dikirim sebagai `error` di dalam hasil, bukan ditelan menjadi
+    /// daftar kosong. Daftar kosong berarti rantainya sepi, dan user yang
+    /// membaca daftar kosong akan menyimpulkan tidak ada peluang, bukan bahwa
+    /// alatnya sedang tidak bisa membaca.
+    pub async fn on_scan(&self) {
+        let view = self.susun_scan().await;
+        let _ = self
+            .events
+            .send(protocol::ServerMessage::ScanResults(Box::new(view)));
+    }
+
+    async fn susun_scan(&self) -> protocol::ScanView {
+        use crate::pools::kandidat;
+
+        let waktu = chrono::Utc::now().to_rfc3339();
+        let kosong = |error: Option<String>| protocol::ScanView {
+            rows: Vec::new(),
+            jendela_pindai_menit: 0.0,
+            jendela_volume_menit: 0.0,
+            volume_jendela_pendek: false,
+            modal_acuan: kandidat::MODAL_ACUAN,
+            total_swap: 0,
+            dipindai_pada: waktu.clone(),
+            error,
+        };
+
+        let provider = match self.chain.provider().await {
+            Ok(p) => p,
+            Err(e) => return kosong(Some(format!("RPC tidak bisa dipakai: {e}"))),
+        };
+
+        let hasil = match crate::pools::scan::pindai(&provider, &self.registry).await {
+            Ok(h) => h,
+            Err(e) => return kosong(Some(format!("pemindaian gagal: {e}"))),
+        };
+
+        let menit = |dari: u64, sampai: u64| {
+            sampai.saturating_sub(dari) as f64 * self.registry.chain.block_time_ms as f64
+                / 60_000.0
+        };
+        let jendela_pindai_menit = menit(hasil.dari_blok, hasil.sampai_blok);
+
+        // Allowlist hook masih kosong sampai kriteria adopsi PRD 5.4 berjalan.
+        // Kosong berarti setiap pool berhook ditandai `Hindari`, dan itu sikap
+        // bawaan yang benar: hook yang belum diperiksa bisa menghalangi
+        // penarikan, dan itu kehilangan modal seluruhnya, bukan risiko harga.
+        let daftar =
+            match kandidat::perkaya(&provider, &self.registry, &hasil, &[]).await {
+                Ok(d) => d,
+                Err(e) => {
+                    let mut v = kosong(Some(format!("penilaian kandidat gagal: {e}")));
+                    v.total_swap = hasil.total_swap;
+                    v.jendela_pindai_menit = jendela_pindai_menit;
+                    return v;
+                }
+            };
+
+        protocol::ScanView {
+            rows: daftar.baris,
+            jendela_pindai_menit,
+            jendela_volume_menit: daftar.jendela_volume_detik / 60.0,
+            volume_jendela_pendek: daftar.volume_jendela_pendek,
+            modal_acuan: kandidat::MODAL_ACUAN,
+            total_swap: hasil.total_swap,
+            dipindai_pada: hasil.dipindai_pada,
+            error: None,
+        }
+    }
+
     pub async fn on_get_positions(&self) {
         let view = self.susun_positions().await;
 

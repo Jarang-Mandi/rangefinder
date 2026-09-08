@@ -212,3 +212,53 @@ itu ditulis sebagai KPI di PRD. Ukuran biner tidak penting untuk aplikasi lokal.
 **Konsekuensi.** Build rilis lebih lambat. `panic = "abort"` berarti panic tidak
 bisa ditangkap, jadi jalur yang boleh gagal wajib memakai `Result`, bukan
 mengandalkan `catch_unwind`.
+
+---
+
+## 0007 Pemindaian kandidat dibaca dari rantai, bukan dari API gmgn
+
+**Tanggal** 8 September 2026. **Status** berlaku.
+
+**Konteks.** PRD 3.4 semula membayangkan tab Signals diisi dengan memindai
+daftar peringkat gmgn lewat content script, dengan batas satu permintaan per dua
+detik supaya sesi user tidak kena rate limit.
+
+**Pilihan.** Sumbernya adalah event `Swap` pada PoolManager V4, dibaca langsung
+dari RPC.
+
+**Alasan.** Yang dicari alat ini adalah pool yang membayar fee, dan yang membayar
+fee adalah swap yang benar benar terjadi di pool itu. Peringkat gmgn mengukur
+perhatian pasar, yang berkorelasi tapi bukan hal yang sama. Endpoint gmgn juga
+privat, membawa parameter fingerprint, dan bisa berubah kapan saja tanpa
+pemberitahuan.
+
+**Konsekuensi.** Batas laju gmgn menjadi tidak relevan, karena sesi user tidak
+disentuh sama sekali. Sebagai gantinya, batas log RPC menjadi kendala baru, dan
+jendela pemindaian harus bisa menyempit sendiri. Data yang hanya ada di gmgn,
+seperti flag risiko holder dan status kreator pada 5.4 kelompok pertama, tetap
+harus datang dari sana kalau nanti dibutuhkan.
+
+---
+
+## 0008 Angka hasil dinyatakan terhadap modal acuan yang disebutkan
+
+**Tanggal** 8 September 2026. **Status** berlaku.
+
+**Konteks.** PRD 11.5 memakai `volume x fee / likuiditas` untuk memeringkat pool.
+Rumus itu benar sebagai alat perbandingan antar pool pada token yang sama, tapi
+begitu ditampilkan sebagai persentase ia meledak pada pool tipis. Pemindaian
+sungguhan menghasilkan 1.890.130 persen dan 7.645.797 persen.
+
+**Pilihan.** Bagian LP dihitung sebagai `modal / (kedalaman + modal)` dengan
+modal acuan tetap yang ikut ditampilkan, dan hasil per jendela disajikan
+berdampingan dengan proyeksi setahunnya.
+
+**Alasan.** Bentuk `modal / kedalaman` diam diam mengandaikan modal kita jauh
+lebih kecil daripada poolnya. Pada pool tipis andaian itu terbalik: modal kita
+menjadi hampir seluruh pool, dan bagian kita tidak pernah melewati satu. Angka
+yang tidak terbatas bukan sekadar tidak berguna, ia terlihat seperti temuan.
+
+**Konsekuensi.** Setiap angka hasil hanya berarti bersama modal acuannya, jadi
+modal itu wajib ikut di pesan protokol dan wajib tampil di panel. Kalau nanti
+modal acuan diambil dari ukuran posisi user, peringkat daftarnya bisa berubah,
+dan itu memang benar: pool tipis memang lebih menarik bagi modal kecil.

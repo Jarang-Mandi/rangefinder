@@ -17,5 +17,6 @@
 pub mod bar;
 pub mod dump_basis;
 pub mod metrik;
+pub mod optimizer;
 pub mod penempatan;
 pub mod sideways;

@@ -309,6 +309,8 @@ cargo xtask pairs <token>  lihat token itu berpasangan dengan apa saja di V4
 cargo xtask v4probe       buktikan ABI V4 ada di bytecode yang terpasang
 cargo xtask zap <token> [nominal]   jalankan penyelesai zap terhadap pool sungguhan
 cargo xtask positions <wallet>     muat posisi LP sebuah wallet dari rantai
+cargo xtask optimizer <token>      peringkatkan pool token itu menurut hasil per modal
+cargo xtask scan                   pindai pool paling ramai dan nilai kelayakannya
 cargo test                seluruh uji unit engine
 cargo clippy --all-targets
 ```

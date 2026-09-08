@@ -330,3 +330,127 @@
   margin-top: var(--s1);
   font-weight: 600;
 }
+
+/* Daftar pool ramai, PRD 3.4.
+ *
+ * Baris dipisahkan garis tipis dan pergeseran nilai permukaan, bukan gradasi.
+ * Label aksi memakai warna datar yang sudah ada di token, supaya "beli turun"
+ * dan "jual naik" mewarisi arti warna yang sama dengan garis range di chart. */
+
+.scan-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  margin-top: var(--s3);
+}
+
+.scan-row {
+  border: 1px solid var(--border);
+  border-radius: var(--r-card);
+  background: var(--surface-raised);
+  padding: var(--s2) var(--s3) var(--s3);
+}
+
+/* Yang ditolak tetap terbaca, hanya mundur ke belakang. Menyembunyikannya
+ * berarti membuang alasan penolakan, dan alasan itulah bagian yang mengajari. */
+.scan-row.ditolak {
+  background: var(--surface);
+  border-color: var(--border);
+}
+
+.scan-row.ditolak .scan-sym {
+  color: var(--text-muted);
+}
+
+.scan-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  width: 100%;
+  background: none;
+  border: none;
+  border-radius: var(--r-control);
+  padding: var(--s1) 0;
+  text-align: left;
+}
+
+.scan-head:not(:disabled):hover .scan-sym {
+  color: var(--accent);
+}
+
+.scan-head:disabled {
+  cursor: default;
+}
+
+.scan-sym {
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.scan-pair {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.scan-label {
+  margin-left: auto;
+  flex: none;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 3px 7px;
+  border-radius: var(--r-chip);
+  border: 1px solid var(--border-strong);
+  color: var(--text-muted);
+}
+
+.scan-label.lp_sideways {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.scan-label.lp_beli_turun {
+  color: var(--lower);
+  border-color: var(--lower);
+}
+
+.scan-label.lp_jual_naik {
+  color: var(--upper);
+  border-color: var(--upper);
+}
+
+.scan-label.hindari {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.scan-num {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--s1) var(--s2);
+  margin-top: var(--s2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.scan-num span {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  color: var(--text);
+}
+
+.scan-num i {
+  font-style: normal;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.scan-alasan {
+  margin: var(--s2) 0 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}

@@ -81,6 +81,13 @@ pub enum ClientMessage {
     /// Minta riwayat notifikasi terakhir.
     GetNotifications,
 
+    /// Pindai pool paling ramai di rantai dan nilai kelayakannya.
+    ///
+    /// Membaca setiap swap pada jendela terakhir, jadi ia mahal dan tidak
+    /// dijalankan sendiri secara berkala. User yang memintanya, dan jawabannya
+    /// datang belakangan sebagai `scan_results`.
+    Scan,
+
     /// Minta daftar posisi LP milik wallet, dimuat ulang dari rantai.
     ///
     /// Menyentuh jaringan dan bisa makan beberapa detik, jadi jawabannya
@@ -141,6 +148,11 @@ pub enum ServerMessage {
     /// Rencana aksi pada posisi beserta hasil pemeriksaannya.
     ActionPlan(Box<crate::api::execute::ActionPlanView>),
 
+    /// Hasil pemindaian pool ramai untuk tab Signals.
+    ///
+    /// Jendela pengukuran ikut di dalamnya, bukan disimpulkan panel. Angka
+    /// hasil dan proyeksi tidak berarti tanpa jendelanya.
+    ScanResults(Box<ScanView>),
     /// Daftar posisi LP milik wallet beserta keadaannya.
     Positions(Box<PositionsView>),
 
@@ -202,6 +214,36 @@ pub struct RegistrySummary {
     pub unpinned: usize,
     pub no_code: usize,
     pub checks: Vec<RegistryCheck>,
+}
+
+/// Hasil pemindaian pool ramai, PRD 3.4.
+///
+/// JENDELA IKUT DI SINI, BUKAN DISIMPULKAN PANEL
+/// Angka hasil dan proyeksi APR keduanya bergantung pada lamanya jendela
+/// pengukuran, dan jendela itu bisa menyempit sendiri kalau RPC menolak.
+/// Panel yang menebak jendelanya akan menampilkan angka yang salah tanpa satu
+/// pun error muncul, yang tepat pernah terjadi saat volume dan jendelanya
+/// datang dari dua sumber berbeda.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScanView {
+    pub rows: Vec<crate::pools::kandidat::BarisScan>,
+    /// Jendela pemindaian swap, dalam menit.
+    pub jendela_pindai_menit: f64,
+    /// Jendela pengukuran volume, dalam menit.
+    pub jendela_volume_menit: f64,
+    /// Benar kalau volume terpaksa diukur pada jendela pemindaian yang pendek.
+    pub volume_jendela_pendek: bool,
+    /// Modal acuan yang dipakai menghitung kolom hasil dan APR.
+    pub modal_acuan: f64,
+    /// Total swap yang terbaca sebelum dipangkas ke pool teratas.
+    pub total_swap: usize,
+    pub dipindai_pada: String,
+    /// Terisi kalau pemindaiannya gagal seluruhnya.
+    ///
+    /// Kegagalan dilaporkan sebagai kegagalan, bukan sebagai daftar kosong.
+    /// Daftar kosong berarti rantainya sedang sepi, dan itu kesimpulan yang
+    /// sangat berbeda dari tidak bisa membaca.
+    pub error: Option<String>,
 }
 
 /// Daftar posisi beserta ringkasannya.

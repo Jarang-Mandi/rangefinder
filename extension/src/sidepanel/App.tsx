@@ -29,6 +29,8 @@ import {
   isEvmAddress,
   type EngineStatus,
   type ActionPlanView,
+  type BarisScan,
+  type LabelScan,
   type HasilBasis,
   type JenisAksi,
   type Kejadian,
@@ -37,6 +39,7 @@ import {
   type PositionsView,
   type Posisi,
   type SaranPenempatan,
+  type ScanView,
   type SignalsView,
   type SinyalSideways,
   type QuoteGroup,
@@ -76,6 +79,8 @@ export function App() {
   const [actionPlan, setActionPlan] = useState<ActionPlanView | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
   const [signals, setSignals] = useState<SignalsView | null>(null);
+  const [scan, setScan] = useState<ScanView | null>(null);
+  const [scanBusy, setScanBusy] = useState(false);
   /** Riwayat notifikasi, terbaru lebih dulu. */
   const [riwayat, setRiwayat] = useState<Kejadian[]>([]);
 
@@ -116,6 +121,10 @@ export function App() {
       },
       onRangeView: setRangeView,
       onSignals: setSignals,
+      onScan: (v) => {
+        setScan(v);
+        setScanBusy(false);
+      },
       onActionPlan: (p) => {
         setActionPlan(p);
         setActionBusy(false);
@@ -350,7 +359,22 @@ export function App() {
             onForget={forgetPairing}
           />
         ) : tab === "signals" ? (
-          <SignalsTab view={signals} />
+          <SignalsTab
+            view={signals}
+            scan={scan}
+            scanBusy={scanBusy}
+            onScan={() => {
+              setScanBusy(true);
+              clientRef.current?.scan();
+            }}
+            onPilih={(b) => {
+              // Klik baris membuka token itu di gmgn DAN memuat poolnya di tab
+              // Range, sesuai PRD 3.4. Berpindah tab dilakukan di sini supaya
+              // user langsung melihat hasilnya, bukan harus mencarinya.
+              loadToken(b.token, true);
+              setTab("range");
+            }}
+          />
         ) : tab === "pnl" ? (
           <PnlTab
             view={positions}
@@ -685,6 +709,160 @@ function TokenCard({
 }
 
 /**
+ * Angka besar dalam bentuk yang bisa dibaca sekilas.
+ *
+ * Panel ini sempit, dan deretan angka penuh berdampingan justru membuat
+ * perbandingannya lebih sulit, bukan lebih mudah.
+ */
+function ringkas(v: number): string {
+  const a = Math.abs(v);
+  if (a >= 1e9) return `${(v / 1e9).toFixed(2)}B`;
+  if (a >= 1e6) return `${(v / 1e6).toFixed(2)}M`;
+  if (a >= 1e3) return `${(v / 1e3).toFixed(1)}K`;
+  if (a >= 1) return v.toFixed(2);
+  return v.toFixed(4);
+}
+
+const NAMA_LABEL: Record<LabelScan, string> = {
+  lp_sideways: "LP Sideways",
+  lp_beli_turun: "LP Beli Turun",
+  lp_jual_naik: "LP Jual Naik",
+  pantau: "Pantau",
+  hindari: "Hindari",
+};
+
+/**
+ * Daftar pool yang sedang ramai, PRD 3.4.
+ *
+ * KENAPA ANGKANYA DALAM KUTIPAN, BUKAN DOLAR
+ * Setiap angka uang di sini adalah satuan token kutipan pool itu. Mengubahnya
+ * ke dolar butuh kurs yang tidak selalu ada, dan kurs yang ditebak akan masuk
+ * ke angka yang seharusnya murni hasil penjumlahan. Kolom pasangan menyebutkan
+ * satuannya, jadi angkanya tidak pernah tanpa satuan.
+ *
+ * KENAPA BARIS YANG DITOLAK TETAP TAMPIL
+ * Melihat alasan penolakan adalah cara user belajar membaca pasar, dan itu
+ * lebih berharga daripada daftar yang hanya berisi kandidat bagus. Yang
+ * ditolak tidak bisa diklik, dan alasannya tertulis.
+ */
+function ScanCard({
+  scan,
+  busy,
+  onScan,
+  onPilih,
+}: {
+  scan: ScanView | null;
+  busy: boolean;
+  onScan: () => void;
+  onPilih: (b: BarisScan) => void;
+}) {
+  return (
+    <section class="card">
+      <div class="section-title">
+        <h2>Pool yang sedang ramai</h2>
+        <button class="toggle" onClick={onScan} disabled={busy}>
+          {busy ? "memindai" : "pindai"}
+        </button>
+      </div>
+
+      {!scan ? (
+        <p class="muted" style="margin: var(--s2) 0 0">
+          Belum dipindai. Engine akan membaca setiap swap pada beberapa menit
+          terakhir, lalu memeringkatnya menurut hasil fee per modal.
+        </p>
+      ) : scan.error ? (
+        <p class="error" style="margin: var(--s2) 0 0">{scan.error}</p>
+      ) : scan.rows.length === 0 ? (
+        <p class="muted" style="margin: var(--s2) 0 0">
+          Tidak ada pool yang ramai pada jendela ini.
+        </p>
+      ) : (
+        <>
+          <div class="scan-list">
+            {scan.rows.map((b) => (
+              <ScanRow key={b.pool_id} b={b} onPilih={onPilih} />
+            ))}
+          </div>
+          <p class="hint">
+            Kolom hasil adalah fee sepanjang {scan.jendela_volume_menit.toFixed(0)}{" "}
+            menit terakhir atas modal acuan {ringkas(scan.modal_acuan)} kutipan.
+            Modal adalah kutipan yang dibutuhkan untuk menutup rentang yang harga
+            benar benar lewati.
+            {scan.volume_jendela_pendek
+              ? " Jendela panjang gagal dibaca, jadi angkanya lebih kasar dari biasanya."
+              : ""}
+          </p>
+        </>
+      )}
+    </section>
+  );
+}
+
+function ScanRow({
+  b,
+  onPilih,
+}: {
+  b: BarisScan;
+  onPilih: (b: BarisScan) => void;
+}) {
+  const bisa = b.label !== "hindari";
+  return (
+    <div class={`scan-row${bisa ? "" : " ditolak"}`}>
+      <button
+        class="scan-head"
+        disabled={!bisa}
+        onClick={() => bisa && onPilih(b)}
+        title={bisa ? "Buka token ini di gmgn dan isi tab Range" : b.alasan}
+      >
+        <span class="scan-sym">{b.symbol}</span>
+        <span class="scan-pair">
+          {b.quote_dikenal ? b.quote_symbol : `?${b.quote_symbol}`}
+        </span>
+        <span class={`scan-label ${b.label}`}>{NAMA_LABEL[b.label]}</span>
+      </button>
+
+      <div class="scan-num">
+        <span>
+          <i>mcap</i>
+          {b.mcap === null ? "-" : ringkas(b.mcap)}
+        </span>
+        <span>
+          <i>volume</i>
+          {b.volume === null ? "-" : ringkas(b.volume)}
+        </span>
+        <span>
+          <i>modal</i>
+          {b.kedalaman === null ? "-" : ringkas(b.kedalaman)}
+        </span>
+        <span>
+          <i>hasil</i>
+          {b.hasil_jendela === null ? "-" : `${b.hasil_jendela.toFixed(2)}%`}
+        </span>
+        <span>
+          <i>umur</i>
+          {b.umur_jam >= 24
+            ? `${(b.umur_jam / 24).toFixed(0)} hari`
+            : `${b.umur_jam.toFixed(1)} jam`}
+        </span>
+        <span>
+          <i>fee</i>
+          {b.dynamic_fee ? "dinamis" : `${(b.fee / 10_000).toFixed(2)}%`}
+        </span>
+      </div>
+
+      <p class="scan-alasan">{b.alasan}</p>
+
+      {!b.quote_dikenal && b.label !== "hindari" ? (
+        <p class="warn-line">
+          Alamat kutipannya bukan yang ada di registry. Simbol bisa ditiru siapa
+          saja, jadi periksa alamatnya sebelum menaruh dana.
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+/**
  * Tab Signals.
  *
  * Menjawab dua pertanyaan yang berbeda. Detektor menjawab "kapan layak masuk",
@@ -696,13 +874,31 @@ function TokenCard({
  * user belajar membaca pasar, dan itu jauh lebih berharga daripada daftar yang
  * hanya berisi kandidat bagus.
  */
-function SignalsTab({ view }: { view: SignalsView | null }) {
+function SignalsTab({
+  view,
+  scan,
+  scanBusy,
+  onScan,
+  onPilih,
+}: {
+  view: SignalsView | null;
+  scan: ScanView | null;
+  scanBusy: boolean;
+  onScan: () => void;
+  onPilih: (b: BarisScan) => void;
+}) {
   if (!view) {
     return (
       <div class="stack">
+        <ScanCard
+          scan={scan}
+          busy={scanBusy}
+          onScan={onScan}
+          onPilih={onPilih}
+        />
         <section class="card">
           <div class="section-title">
-            <h2>Signals</h2>
+            <h2>Detektor</h2>
           </div>
           <p class="muted" style="margin: var(--s2) 0 0">
             Belum ada data candle. Buka halaman token di gmgn, dan deretnya akan
@@ -720,9 +916,10 @@ function SignalsTab({ view }: { view: SignalsView | null }) {
 
   return (
     <div class="stack">
+      <ScanCard scan={scan} busy={scanBusy} onScan={onScan} onPilih={onPilih} />
       <section class="card">
         <div class="section-title">
-          <h2>Signals</h2>
+          <h2>Token yang sedang dibuka</h2>
           <span class="chip">{view.bar_terpakai} bar</span>
         </div>
         <div class="row" style="margin-top: var(--s2)">

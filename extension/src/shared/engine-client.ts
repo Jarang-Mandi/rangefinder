@@ -20,6 +20,7 @@ import {
   asOpenPlan,
   asPositions,
   asRangeView,
+  asScan,
   asSendResult,
   asTokenState,
   type ClientMessage,
@@ -32,6 +33,7 @@ import {
   type OpenPlanView,
   type PositionsView,
   type RangeView,
+  type ScanView,
   type SignalsView,
   type SendResultView,
   type ServerMessage,
@@ -56,6 +58,7 @@ interface Handlers {
   onPositions?: (view: PositionsView) => void;
   onActionPlan?: (plan: ActionPlanView) => void;
   onSignals?: (view: SignalsView) => void;
+  onScan?: (view: ScanView) => void;
   onNotify?: (k: Kejadian) => void;
   onNotifyHistory?: (riwayat: Kejadian[]) => void;
 }
@@ -187,6 +190,11 @@ export class EngineClient {
       const sinyal = asSignals(msg);
       if (sinyal) {
         this.handlers.onSignals?.(sinyal);
+        return;
+      }
+      const pindaian = asScan(msg);
+      if (pindaian) {
+        this.handlers.onScan?.(pindaian);
         return;
       }
       const kabar = asNotify(msg);
@@ -321,6 +329,16 @@ export class EngineClient {
   /** Minta riwayat notifikasi terakhir. */
   getNotifications() {
     this.send({ type: "get_notifications" });
+  }
+
+  /**
+   * Minta engine memindai pool paling ramai.
+   *
+   * Mahal: engine membaca setiap swap pada jendela terakhir. Karena itu ia
+   * hanya dijalankan saat user memintanya, tidak berkala sendiri.
+   */
+  scan() {
+    this.send({ type: "scan" });
   }
 
   /** Jalankan swap zap dari rencana terakhir. */

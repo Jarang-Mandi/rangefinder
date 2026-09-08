@@ -18,8 +18,10 @@
 //!   penting tentang UniversalRouter yang merupakan fork.
 
 mod dryrun;
+mod optimizer;
 mod pairs;
 mod positions;
+mod scan;
 mod v4probe;
 mod zap;
 mod golden;
@@ -63,6 +65,21 @@ fn main() -> Result<()> {
             let from = args.get(2).cloned();
             let rt = tokio::runtime::Runtime::new()?;
             let ok = rt.block_on(dryrun::run(&root, &token, from.as_deref()))?;
+            finish(ok)
+        }
+        "scan" => {
+            let rt = tokio::runtime::Runtime::new()?;
+            let ok = rt.block_on(scan::run(&root))?;
+            finish(ok)
+        }
+        "optimizer" => {
+            let token = args.get(1).cloned().unwrap_or_default();
+            if token.is_empty() {
+                eprintln!("cara pakai: cargo xtask optimizer <alamat_token>");
+                std::process::exit(2);
+            }
+            let rt = tokio::runtime::Runtime::new()?;
+            let ok = rt.block_on(optimizer::run(&root, &token))?;
             finish(ok)
         }
         "positions" => {

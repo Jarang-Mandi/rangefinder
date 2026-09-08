@@ -15,6 +15,9 @@
 
 pub mod abi;
 pub mod cache;
+pub mod kandidat;
+pub mod scan;
+pub mod volume;
 
 use alloy::primitives::{Address, FixedBytes, U256};
 use alloy::providers::Provider;

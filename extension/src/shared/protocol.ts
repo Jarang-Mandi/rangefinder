@@ -428,6 +428,72 @@ export interface Posisi {
   kosong: boolean;
 }
 
+/** Label aksi yang tegas untuk satu baris hasil pemindaian, PRD 3.4. */
+export type LabelScan =
+  | "lp_sideways"
+  | "lp_beli_turun"
+  | "lp_jual_naik"
+  | "pantau"
+  | "hindari";
+
+/**
+ * Satu baris daftar kandidat tab Signals.
+ *
+ * Setiap angka uang di sini dinyatakan dalam token kutipan pool itu, bukan
+ * dalam dolar. Baris yang kutipannya tidak dikenal tidak punya angka uang sama
+ * sekali, dan itu bukan kekurangan yang perlu ditambal panel dengan tebakan.
+ */
+export interface BarisScan {
+  pool_id: string;
+  token: string;
+  symbol: string;
+  quote: string;
+  quote_symbol: string;
+  /**
+   * Benar kalau ALAMAT kutipannya ada di registry.
+   *
+   * Simbol ditentukan penerbit token, jadi siapa pun bisa menerbitkan token
+   * bersimbol USDG, dan pemindaian memang menemukannya. Panel harus
+   * membedakan keduanya secara kasat mata.
+   */
+  quote_dikenal: boolean;
+  fee: number;
+  dynamic_fee: boolean;
+  hooks: string | null;
+  tick: number;
+  tick_spacing: number;
+  liquidity: string;
+  harga: number | null;
+  mcap: number | null;
+  volume: number | null;
+  swap: number;
+  /** Kutipan yang dibutuhkan untuk menutup rentang yang harga lewati. */
+  kedalaman: number | null;
+  umur_jam: number;
+  /** Hasil fee sepanjang jendela pengukuran atas modal acuan, persen. */
+  hasil_jendela: number | null;
+  /** Hasil di atas yang direntangkan menjadi setahun, persen. */
+  fee_apr: number | null;
+  modal_acuan: number;
+  efisiensi: number | null;
+  lebar_persen: number | null;
+  perpindahan_persen: number | null;
+  risiko: string[];
+  label: LabelScan;
+  alasan: string;
+}
+
+export interface ScanView {
+  rows: BarisScan[];
+  jendela_pindai_menit: number;
+  jendela_volume_menit: number;
+  volume_jendela_pendek: boolean;
+  modal_acuan: number;
+  total_swap: number;
+  dipindai_pada: string;
+  error: string | null;
+}
+
 export interface PositionsView {
   positions: Posisi[];
   owner: string;
@@ -484,6 +550,7 @@ export type ServerMessage =
   | ({ type: "open_plan" } & Partial<OpenPlanView>)
   | ({ type: "send_result" } & Partial<SendResultView>)
   | ({ type: "positions" } & Partial<PositionsView>)
+  | ({ type: "scan_results" } & Partial<ScanView>)
   | ({ type: "action_plan" } & Partial<ActionPlanView>)
   | ({ type: "signals" } & Partial<SignalsView>)
   | ({ type: "notify" } & Partial<Kejadian>)
@@ -503,6 +570,7 @@ export type ClientMessage =
   | { type: "approve_token"; token: string }
   | { type: "get_positions" }
   | { type: "get_notifications" }
+  | { type: "scan" }
   | { type: "plan_action"; token_id: string; action: JenisAksi }
   | { type: "execute_action" }
   | { type: "swap_zap" }
@@ -526,6 +594,10 @@ export function asActionPlan(msg: unknown): ActionPlanView | null {
 
 export function asPositions(msg: unknown): PositionsView | null {
   return untag<PositionsView>(msg, "positions");
+}
+
+export function asScan(msg: unknown): ScanView | null {
+  return untag<ScanView>(msg, "scan_results");
 }
 
 export function asNotify(msg: unknown): Kejadian | null {
