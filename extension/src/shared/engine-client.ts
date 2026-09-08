@@ -16,6 +16,7 @@ import {
   asEngineStatus,
   asActionPlan,
   asNotify,
+  asSignals,
   asOpenPlan,
   asPositions,
   asRangeView,
@@ -25,11 +26,13 @@ import {
   type EnginePing,
   type EngineStatus,
   type ActionPlanView,
+  type Bar,
   type JenisAksi,
   type Kejadian,
   type OpenPlanView,
   type PositionsView,
   type RangeView,
+  type SignalsView,
   type SendResultView,
   type ServerMessage,
   type TokenState,
@@ -52,6 +55,7 @@ interface Handlers {
   onSendResult?: (result: SendResultView) => void;
   onPositions?: (view: PositionsView) => void;
   onActionPlan?: (plan: ActionPlanView) => void;
+  onSignals?: (view: SignalsView) => void;
   onNotify?: (k: Kejadian) => void;
   onNotifyHistory?: (riwayat: Kejadian[]) => void;
 }
@@ -180,6 +184,11 @@ export class EngineClient {
         this.handlers.onActionPlan?.(aksi);
         return;
       }
+      const sinyal = asSignals(msg);
+      if (sinyal) {
+        this.handlers.onSignals?.(sinyal);
+        return;
+      }
       const kabar = asNotify(msg);
       if (kabar) {
         this.handlers.onNotify?.(kabar);
@@ -287,6 +296,16 @@ export class EngineClient {
   /** Muat ulang posisi LP wallet dari rantai. */
   getPositions() {
     this.send({ type: "get_positions" });
+  }
+
+  /**
+   * Kirim deret candle dari chart gmgn.
+   *
+   * Dikirim jauh lebih jarang daripada harga, karena isinya ratusan bar dan
+   * jawaban detektor tidak berubah dalam hitungan detik.
+   */
+  reportChartBars(address: string, bars: Bar[]) {
+    this.send({ type: "chart_bars", address, bars });
   }
 
   /** Susun rencana sebuah aksi pada posisi. Tidak mengirim apa pun. */

@@ -29,12 +29,16 @@ import {
   isEvmAddress,
   type EngineStatus,
   type ActionPlanView,
+  type HasilBasis,
   type JenisAksi,
   type Kejadian,
   type OpenPlanView,
   type PoolInfo,
   type PositionsView,
   type Posisi,
+  type SaranPenempatan,
+  type SignalsView,
+  type SinyalSideways,
   type QuoteGroup,
   type SendResultView,
   type RangeBound,
@@ -48,7 +52,7 @@ type TabId = "range" | "signals" | "positions" | "pnl";
 
 const TABS: { id: TabId; label: string; phase: number }[] = [
   { id: "range", label: "Range", phase: 1 },
-  { id: "signals", label: "Signals", phase: 6 },
+  { id: "signals", label: "Signals", phase: 0 },
   { id: "positions", label: "Positions", phase: 0 },
   { id: "pnl", label: "PnL", phase: 0 },
 ];
@@ -71,6 +75,7 @@ export function App() {
   const [posBusy, setPosBusy] = useState(false);
   const [actionPlan, setActionPlan] = useState<ActionPlanView | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
+  const [signals, setSignals] = useState<SignalsView | null>(null);
   /** Riwayat notifikasi, terbaru lebih dulu. */
   const [riwayat, setRiwayat] = useState<Kejadian[]>([]);
 
@@ -110,6 +115,7 @@ export function App() {
         drawnRef.current = "";
       },
       onRangeView: setRangeView,
+      onSignals: setSignals,
       onActionPlan: (p) => {
         setActionPlan(p);
         setActionBusy(false);
@@ -205,6 +211,16 @@ export function App() {
           const url = typeof m.url === "string" ? m.url : "";
           const found = url.match(/\/token\/(0x[a-fA-F0-9]{40})/);
           if (found) loadToken(found[1], false);
+          break;
+        }
+        case "chart_bars": {
+          // Deret penuh dipakai detektor sinyal. Dikirim jauh lebih jarang
+          // daripada harga, karena isinya ratusan bar.
+          const bars = m.bars;
+          const address = addressRef.current;
+          if (Array.isArray(bars) && address) {
+            clientRef.current?.reportChartBars(address, bars as never);
+          }
           break;
         }
         case "chart_price": {
@@ -333,6 +349,8 @@ export function App() {
             }}
             onForget={forgetPairing}
           />
+        ) : tab === "signals" ? (
+          <SignalsTab view={signals} />
         ) : tab === "pnl" ? (
           <PnlTab
             view={positions}
@@ -663,6 +681,288 @@ function TokenCard({
         </section>
       ) : null}
     </>
+  );
+}
+
+/**
+ * Tab Signals.
+ *
+ * Menjawab dua pertanyaan yang berbeda. Detektor menjawab "kapan layak masuk",
+ * doktrin penempatan menjawab "di mana garisnya ditaruh". Yang kedua itu yang
+ * user nyatakan sebagai kesulitannya sendiri, jadi ia diberi ruang paling besar
+ * dan selalu disertai alasannya.
+ *
+ * Kondisi yang ditolak TIDAK disembunyikan. Melihat alasan penolakan adalah cara
+ * user belajar membaca pasar, dan itu jauh lebih berharga daripada daftar yang
+ * hanya berisi kandidat bagus.
+ */
+function SignalsTab({ view }: { view: SignalsView | null }) {
+  if (!view) {
+    return (
+      <div class="stack">
+        <section class="card">
+          <div class="section-title">
+            <h2>Signals</h2>
+          </div>
+          <p class="muted" style="margin: var(--s2) 0 0">
+            Belum ada data candle. Buka halaman token di gmgn, dan deretnya akan
+            terkirim sendiri dalam beberapa detik.
+          </p>
+          <p class="hint">
+            Bar dibaca dari chart yang sedang Anda lihat, bukan dari sumber lain.
+            Angka yang dipakai untuk keputusan harus sama dengan yang ada di
+            layar.
+          </p>
+        </section>
+      </div>
+    );
+  }
+
+  return (
+    <div class="stack">
+      <section class="card">
+        <div class="section-title">
+          <h2>Signals</h2>
+          <span class="chip">{view.bar_terpakai} bar</span>
+        </div>
+        <div class="row" style="margin-top: var(--s2)">
+          <span class="label">Harga sekarang</span>
+          <span class="value num">{view.harga.toPrecision(6)}</span>
+        </div>
+      </section>
+
+      {view.saran ? (
+        <SaranCard
+          saran={view.saran}
+          dibanding={view.konsentrasi_dibanding_lebar}
+        />
+      ) : (
+        <section class="card">
+          <div class="section-title">
+            <h2>Penempatan</h2>
+            <span class="chip">
+              <span class="dot warn" />
+              belum ada saran
+            </span>
+          </div>
+          <p class="muted" style="margin: var(--s2) 0 0">
+            Tidak ada detektor yang lolos, jadi tidak ada saran penempatan.
+            Alasannya ada di kartu di bawah.
+          </p>
+        </section>
+      )}
+
+      <SidewaysCard sinyal={view.sideways} />
+      <BasisCard hasil={view.basis} />
+    </div>
+  );
+}
+
+/**
+ * Saran penempatan beserta alasannya.
+ *
+ * Alasan ditampilkan penuh, bukan disembunyikan di balik tooltip. Ini bagian
+ * yang paling penting bagi user: bukan angkanya, melainkan kenapa angkanya
+ * begitu.
+ */
+function SaranCard({
+  saran,
+  dibanding,
+}: {
+  saran: SaranPenempatan;
+  dibanding: number | null;
+}) {
+  const nama =
+    saran.bentuk === "dua_sisi"
+      ? "dua sisi"
+      : saran.bentuk === "beli_turun"
+        ? "beli turun"
+        : "jual naik";
+
+  return (
+    <section class="card">
+      <div class="section-title">
+        <h2>Penempatan</h2>
+        <span class="chip">
+          <span class="dot ok" />
+          {nama}
+        </span>
+      </div>
+
+      <div class="stack" style="margin-top: var(--s2)">
+        <div class="row">
+          <span class="label">Batas bawah</span>
+          <span class="value num">{saran.bawah.toPrecision(6)}</span>
+        </div>
+        <div class="row">
+          <span class="label">Batas atas</span>
+          <span class="value num">{saran.atas.toPrecision(6)}</span>
+        </div>
+        <div class="row">
+          <span class="label">Lebar</span>
+          <span class="value num">{saran.lebar_persen.toFixed(1)}%</span>
+        </div>
+        {dibanding !== null ? (
+          <div class="row">
+            <span class="label">Konsentrasi</span>
+            <span class="value num naik">
+              {dibanding.toFixed(1)}x range lima kali lebih lebar
+            </span>
+          </div>
+        ) : null}
+        {saran.pembatalan !== null ? (
+          <div class="row">
+            <span class="label">Pembatalan</span>
+            <span class="value num turun">{saran.pembatalan.toPrecision(6)}</span>
+          </div>
+        ) : null}
+      </div>
+
+      <div class="stack" style="margin-top: var(--s3)">
+        {saran.alasan.map((a, i) => (
+          <p key={i} class="hint" style="margin: 0">
+            {a}
+          </p>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function SidewaysCard({ sinyal }: { sinyal: SinyalSideways | null }) {
+  if (!sinyal) {
+    return (
+      <section class="card">
+        <div class="section-title">
+          <h2>Sideways</h2>
+          <span class="chip">data belum cukup</span>
+        </div>
+        <p class="hint">
+          Butuh 240 bar, yaitu empat jam pada candle satu menit. Ini berbeda dari
+          skor rendah: yang satu belum bisa diperiksa, yang lain sudah diperiksa
+          dan tidak menarik.
+        </p>
+      </section>
+    );
+  }
+
+  const lolos = sinyal.ditolak.length === 0;
+  return (
+    <section class="card">
+      <div class="section-title">
+        <h2>Sideways</h2>
+        <span class="chip">
+          <span class={`dot ${lolos ? "ok" : "bad"}`} />
+          skor {sinyal.skor.toFixed(0)}
+        </span>
+      </div>
+
+      <div class="stack" style="margin-top: var(--s2)">
+        <BarisMetrik nama="Efficiency ratio" nilai={sinyal.er.toFixed(2)} ket="makin kecil makin menyamping" />
+        <BarisMetrik nama="Volume z score" nilai={sinyal.volume_z.toFixed(2)} ket="seberapa ramai dibanding biasanya" />
+        <BarisMetrik nama="Containment" nilai={`${(sinyal.containment * 100).toFixed(0)}%`} ket="bar yang tutup di dalam kanal" />
+        <BarisMetrik nama="Lebar kanal" nilai={`${(sinyal.bandwidth * 100).toFixed(1)}%`} ket="relatif terhadap harga tengah" />
+        <BarisMetrik nama="Kontraksi" nilai={sinyal.kontraksi.toFixed(2)} ket="volatilitas pendek dibanding panjang" />
+        <BarisMetrik nama="Keseimbangan tape" nilai={sinyal.tape.toFixed(2)} ket="makin besar makin seimbang" />
+      </div>
+
+      {!lolos ? (
+        <div class="stack" style="margin-top: var(--s3)">
+          {sinyal.ditolak.map((d, i) => (
+            <p key={i} class="hint" style="margin: 0">
+              {d}
+            </p>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function BasisCard({ hasil }: { hasil: HasilBasis | null }) {
+  if (!hasil) {
+    return (
+      <section class="card">
+        <div class="section-title">
+          <h2>Dump lalu basis</h2>
+          <span class="chip">data belum cukup</span>
+        </div>
+        <p class="hint">
+          Butuh cukup bar untuk melihat puncak, penurunan, dan basisnya sekaligus.
+        </p>
+      </section>
+    );
+  }
+
+  const lolos = hasil.gagal.length === 0;
+  return (
+    <section class="card">
+      <div class="section-title">
+        <h2>Dump lalu basis</h2>
+        <span class="chip">
+          <span class={`dot ${lolos ? "ok" : "bad"}`} />
+          skor {hasil.skor.toFixed(0)}
+        </span>
+      </div>
+
+      <div class="stack" style="margin-top: var(--s2)">
+        <BarisMetrik nama="Kedalaman" nilai={`${(hasil.drawdown * 100).toFixed(0)}%`} ket="dari puncak ke dasar" />
+        <BarisMetrik nama="Bar turun" nilai={String(hasil.bar_turun)} ket="makin sedikit makin tajam" />
+        <BarisMetrik nama="Usia basis" nilai={`${hasil.usia_basis} bar`} ket="sejak dasar terbentuk" />
+        <BarisMetrik nama="Volume basis" nilai={`${hasil.rasio_volume_hidup.toFixed(1)}x`} ket="dibanding sebelum pump" />
+        <BarisMetrik nama="Volume mereda" nilai={`${hasil.rasio_volume_mereda.toFixed(2)}x`} ket="dibanding puncak dump" />
+      </div>
+
+      {lolos ? (
+        <div class="stack" style="margin-top: var(--s3)">
+          <div class="row">
+            <span class="label">Dasar basis</span>
+            <span class="value num">{hasil.jangkar.l_basis.toPrecision(6)}</span>
+          </div>
+          <div class="row">
+            <span class="label">Harga paling ramai</span>
+            <span class="value num">{hasil.jangkar.poc.toPrecision(6)}</span>
+          </div>
+          <div class="row">
+            <span class="label">Pembatalan</span>
+            <span class="value num turun">{hasil.jangkar.p_invalid.toPrecision(6)}</span>
+          </div>
+        </div>
+      ) : (
+        <div class="stack" style="margin-top: var(--s3)">
+          {hasil.gagal.map((g, i) => (
+            <p key={i} class="hint" style="margin: 0">
+              {g}
+            </p>
+          ))}
+        </div>
+      )}
+
+      {hasil.penguat.length > 0 ? (
+        <div class="stack" style="margin-top: var(--s2)">
+          {hasil.penguat.map((p, i) => (
+            <p key={i} class="hint" style="margin: 0">
+              Penguat: {p}
+            </p>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+/**
+ * Satu baris metrik beserta keterangannya.
+ *
+ * Keterangan ikut karena angka seperti efficiency ratio tidak berarti apa apa
+ * tanpa tahu arah mana yang bagus.
+ */
+function BarisMetrik({ nama, nilai, ket }: { nama: string; nilai: string; ket: string }) {
+  return (
+    <div class="row" title={ket}>
+      <span class="label">{nama}</span>
+      <span class="value num">{nilai}</span>
+    </div>
   );
 }
 

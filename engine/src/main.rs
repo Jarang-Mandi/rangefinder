@@ -114,6 +114,7 @@ async fn main() -> Result<()> {
         nonce: Arc::new(rangefinder_engine::exec::nonce::NonceKeeper::new()),
         positions: Arc::new(tokio::sync::RwLock::new(Vec::new())),
         pending_action: Arc::new(tokio::sync::RwLock::new(None)),
+        bars: Arc::new(tokio::sync::RwLock::new(None)),
         notifier: Arc::new(tokio::sync::RwLock::new(
             rangefinder_engine::notify::Notifier::default(),
         )),

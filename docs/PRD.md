@@ -800,6 +800,42 @@ Itulah nilai yang diberikan alat ini. Bukan menebak arah, melainkan memastikan m
 
 ---
 
+### 5.9 Catatan implementasi mesin sinyal
+
+Seluruh detektor murni: masuk deret candle, keluar angka. Tidak ada yang menyentuh jaringan, dan tidak ada yang menyimpan keadaan. Itu disengaja, karena bagian inilah yang menentukan di mana uang ditaruh, dan bagian seperti itu harus bisa diuji ribuan kali tanpa rantai.
+
+**Bar datang dari chart gmgn, bukan dari sumber luar.** Alasannya sama dengan kalibrasi kurs di 4.3: angka yang dipakai untuk keputusan harus sama dengan yang dilihat user di layar. Sumber lain akan selalu sedikit berbeda, dan selisihnya muncul persis saat harga bergerak cepat, yaitu saat keputusannya paling penting. Deret penuh dikirim tiap tiga puluh detik lewat `chart_bars`, jauh lebih jarang daripada `chart_price`, karena isinya ratusan bar dan jawaban detektor tidak berubah dalam hitungan detik.
+
+**Data yang belum cukup mengembalikan kosong, bukan skor rendah.** Ini pembedaan yang berulang di seluruh modul. Skor rendah berarti sudah diperiksa dan tidak menarik. Kosong berarti belum bisa diperiksa. Menyamakan keduanya membuat token yang chartnya baru termuat terlihat seperti token yang buruk, dan itu menyembunyikan kandidat yang justru sedang dicari.
+
+**Beberapa penyesuaian terhadap rumus di 5.2, dan alasannya.**
+
+| Yang berubah | Alasan |
+| --- | --- |
+| Volume z score menjepit sumbangannya ke skor pada tiga simpangan | Tanpa penjepitan, satu lonjakan ekstrem mendominasi seluruh skor sehingga suku lain tidak berarti, dan token yang sedang tren bisa lolos hanya karena volumenya meledak |
+| Bar terakhir tidak ikut dalam rata rata pembanding volume | Kalau ikut, lonjakan besar menaikkan rata ratanya sendiri, sehingga skornya lebih kecil daripada yang seharusnya, persis pada kejadian yang paling ingin ditangkap |
+| Bar yang tutup sama dengan bukanya tidak dihitung dalam keseimbangan tape | Bar seperti itu tidak membawa arah sama sekali. Menganggapnya beli membuat deret yang paling seimbang justru terbaca berat sebelah |
+| Efficiency ratio mengembalikan kosong saat harga sama sekali tidak bergerak | Nilai nol berarti chop sempurna, dan harga yang diam bukan itu. Ia berarti datanya tidak berguna |
+| ATR memakai close bar sebelumnya, bukan hanya rentang bar | Mengabaikan celah antar bar meremehkan volatilitas persis saat harga melompat, yaitu saat ukuran itu paling dibutuhkan |
+
+**Detektor dump lalu basis mengembalikan hasil meski basisnya belum terbentuk.** Token yang masih mencetak low baru bisa dinilai, dan jawabannya adalah belum layak. Mengembalikannya sebagai kosong akan menyembunyikan token yang sedang jatuh, padahal itu justru yang perlu dilihat user supaya tidak masuk terlalu cepat.
+
+**Bobot dijaga berjumlah satu, dan ada ujinya.** Kalau ada yang menambah suku baru, ia harus mengurangi yang lain. Itu memaksa keputusan sadar alih alih penambahan diam diam yang menggeser seluruh skala skor.
+
+### 5.10 Penempatan sebagai keputusan beli dan jual
+
+Setiap saran penempatan wajib menyertakan alasannya, dan alasan itu selalu dalam bentuk yang sama: pada harga berapa saya bersedia membeli, dan pada harga berapa saya bersedia menjual. Angka tanpa alasan tidak membantu user belajar, dan user yang tidak belajar akan terus bergantung pada alat ini bahkan saat alatnya salah.
+
+**Batas ditarik masuk dari batas struktur, bukan ditaruh persis di atasnya.** Batas kanal adalah tempat harga berbalik, dan dasar basis adalah tempat penjual habis. Menaruh batas range persis di situ membuat posisi keluar range tepat saat harga mengujinya, dan pengujian ulang adalah hal yang normal terjadi. Kanal ditarik masuk sepersepuluh lebarnya, basis lima belas persen dari sisi bawah.
+
+**Batas bawah tidak pernah melewati level pembatalan.** Range yang melewatinya berarti bersedia terus membeli sesuatu yang anggapannya sudah terbukti salah.
+
+**Jangkar basis menang atas kanal.** Kalau detektor dump lalu basis lolos, jangkarnya yang dipakai, bukan kanal statistik dari detektor sideways. Alasannya, jangkar basis terbentuk dari perilaku sungguhan: penjual habis di satu harga, dan pembeli mempertahankannya. Kanal hanya ringkasan sebaran.
+
+**Konsentrasi ditampilkan sebagai perbandingan, bukan angka mutlak.** Yang berarti bagi user bukan nilai konsentrasinya, melainkan berapa kali lipat ia dibanding range yang lebih lebar. Itu yang menjelaskan kenapa range sempit menghasilkan lebih banyak fee dari volume yang sama.
+
+**Range satu sisi punya tempatnya sendiri.** Range yang seluruhnya di bawah harga hanya berisi token kutipan dan berperan sebagai tangga limit buy yang dibayar fee. Kalau harga tidak pernah turun ke sana, tidak ada yang terbeli dan tidak ada yang rugi. Engine menolak menyusunnya kalau batasnya menyentuh harga sekarang, karena saat itu ia bukan lagi satu sisi dan sebagian modal langsung berubah bentuk.
+
 ## 6. LP Execution Engine
 
 ### 6.1 Alur membuka posisi
@@ -1085,6 +1121,7 @@ Panel ke engine:
 | `unlock_wallet` | `{ passphrase }`, lewat HTTP bukan WebSocket | 1 |
 | `subscribe_token` | `{ address }` | 2 |
 | `chart_price` | `{ address, mcapUsd }`, market cap yang sedang ditampilkan chart. Inilah yang mengkalibrasi kurs ETH ke USD | 2 |
+| `chart_bars` | `{ address, bars[] }`, deret candle dari chart gmgn. Datang lebih jarang daripada `chart_price` karena isinya ratusan bar dan jawaban detektor tidak berubah dalam hitungan detik | 6 |
 | `select_pool` | `{ poolId }`, user memilih pool lain dari daftar | 2 |
 | `select_quote` | `{ quote }`, user berpindah ke pasangan token lawan yang lain. Tidak menyentuh jaringan, seluruh kelompok sudah ada di memori sejak token dimuat | 2 |
 | `set_range` | `{ lowerMcap, upperMcap }`, user menggeser garis. Batas dalam market cap USD karena itu satuan chart | 2 |
@@ -1114,6 +1151,7 @@ Engine ke panel:
 | `positions` | `{ positions[], owner, keluarRange, error, dimuatPada }`. Setiap posisi membawa versi protokol, PoolKey, tick, likuiditas, status in range, dan fee yang belum diklaim | 5 |
 | `notify` | `{ level, code, message, subject, at, ditahan }`. Berbeda dari `alert`: pesan ini melewati pendinginan, masuk riwayat, dan membawa petunjuk durasi serta suara. `alert` dipakai untuk kegagalan seketika pada aksi yang sedang dijalankan user | 5 |
 | `notify_history` | daftar kejadian terakhir, terbaru lebih dulu, paling banyak 50 | 5 |
+| `signals` | `{ address, barTerpakai, harga, sideways, basis, saran, konsentrasiDibandingLebar, dihitungPada }`. `sideways` dan `basis` kosong berarti datanya belum cukup, BUKAN berarti kondisinya tidak menarik | 6 |
 | `action_plan` | `{ tokenId, action, nama, gates[], gasEstimate, dryRun, menutup, siap, expiresAt, fee0, fee1 }`. Simulasi ditampilkan sebelum tombol konfirmasi aktif, sesuai 3.5 | 5 |
 | `token_state` | `{ address, meta, quotes[], pools[], selectedQuote, selectedPoolId, error }`. Setiap `quote` membawa `{ quote, quoteSymbol, quoteDecimals, canonical, pools[] }`. Dikirim dua kali saat memuat: sekali cepat dari kunci pool yang tersimpan, sekali lagi setelah pemindaian selesai kalau ada yang berubah. Lihat 4.3c | 2 |
 | `range_view` | `{ poolId, tickSpacing, ethUsd, current, lower, upper, widthPct, inRange, warnings[] }`. Tiap batas memuat `tick`, `priceWeth`, `priceUsd`, `mcapUsd`, dan `driftBps`, yaitu selisih akibat pembulatan ke grid tick | 2 |

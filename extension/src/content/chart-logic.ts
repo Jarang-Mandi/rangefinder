@@ -129,3 +129,37 @@ export function sideOfShape(
   if (lines.lower === id) return "lower";
   return null;
 }
+
+/**
+ * Baca seluruh deret bar yang sedang dimuat chart.
+ *
+ * KENAPA SELURUHNYA, BUKAN HANYA YANG TERAKHIR
+ * Detektor sinyal butuh jendela panjang, bawaannya 240 bar. Mengumpulkannya
+ * satu per satu dari laporan berkala berarti menunggu empat jam sebelum sinyal
+ * pertama bisa dihitung. Chart sudah memegang seluruh deret itu, jadi bacalah
+ * dari sana.
+ *
+ * Jalurnya `getSeries().data().m_bars` yang punya metode `each`. Ini struktur
+ * internal, bukan API publik, jadi kegagalannya diperlakukan sebagai keadaan
+ * normal dan mengembalikan array kosong.
+ */
+export function readAllBars(chart: unknown, maksimum = 600): LastBar[] {
+  try {
+    const c = chart as {
+      getSeries(): { data(): { m_bars: { each(f: (b: { value: number[] }) => boolean): void } } };
+    };
+    const m = c.getSeries().data().m_bars;
+
+    const out: LastBar[] = [];
+    m.each((b) => {
+      const parsed = parseBar(b.value);
+      if (parsed) out.push(parsed);
+      // `each` berhenti kalau penutupnya mengembalikan false. Batas ini menjaga
+      // supaya deret yang sangat panjang tidak membekukan halaman.
+      return out.length < maksimum;
+    });
+    return out;
+  } catch {
+    return [];
+  }
+}

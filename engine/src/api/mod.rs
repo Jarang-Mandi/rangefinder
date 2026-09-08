@@ -56,6 +56,13 @@ const PERKIRAAN_GAS_ETH: f64 = 0.0005;
 /// paling buruk sekalipun pada rantai berblok 100 ms.
 const DEADLINE_DETIK: u64 = 300;
 
+/// Deret candle beserta alamat token yang memilikinya.
+///
+/// Alamat ikut disimpan supaya deret milik token lama tidak terpakai untuk
+/// token baru saat user berpindah, dan itu kesalahan yang hasilnya terlihat
+/// masuk akal sehingga sulit disadari.
+pub type DeretBar = (String, Vec<crate::signals::bar::Bar>);
+
 #[derive(Clone)]
 pub struct AppState {
     pub cfg: Arc<Config>,
@@ -104,6 +111,11 @@ pub struct AppState {
     /// posisi: calldata yang bolak balik lewat panel bisa kembali dalam
     /// keadaan sudah diubah.
     pub pending_action: Arc<tokio::sync::RwLock<Option<crate::api::execute::AksiTersimpan>>>,
+    /// Deret candle terakhir dari chart, beserta alamat tokennya.
+    ///
+    /// Disimpan supaya detektor bisa dijalankan ulang dengan ambang yang
+    /// berbeda tanpa menunggu kiriman berikutnya dari halaman gmgn.
+    pub bars: Arc<tokio::sync::RwLock<Option<DeretBar>>>,
 }
 
 /// Keadaan token yang sedang aktif di panel.
@@ -1000,6 +1012,68 @@ impl AppState {
         let _ = self
             .events
             .send(protocol::ServerMessage::NotifyHistory { items: riwayat });
+    }
+
+    /// Terima deret bar dari chart gmgn, lalu hitung sinyalnya.
+    ///
+    /// KENAPA BAR DATANG DARI CHART
+    /// Angka yang dipakai untuk keputusan harus sama dengan yang dilihat user di
+    /// layar. Sumber lain akan selalu sedikit berbeda, dan selisih itu muncul
+    /// persis saat harga bergerak cepat, yaitu saat keputusannya paling penting.
+    pub async fn on_chart_bars(&self, address: String, bars: Vec<crate::signals::bar::Bar>) {
+        let bersih = crate::signals::bar::bersihkan(bars);
+        if bersih.is_empty() {
+            return;
+        }
+
+        let jumlah = bersih.len();
+        *self.bars.write().await = Some((address.clone(), bersih.clone()));
+
+        let sideways = crate::signals::sideways::ukur(&bersih, &crate::signals::sideways::Aturan::default());
+        let basis = crate::signals::dump_basis::cari(
+            &bersih,
+            &crate::signals::dump_basis::Aturan::default(),
+        );
+
+        let harga = bersih.last().map(|b| b.close).unwrap_or(0.0);
+
+        // Saran penempatan diambil dari detektor yang paling bisa dipercaya.
+        //
+        // Basis menang atas kanal kalau ia lolos, karena jangkarnya terbentuk
+        // dari perilaku sungguhan: penjual habis di satu harga, dan pembeli
+        // mempertahankannya. Kanal hanya ringkasan statistik.
+        let saran = match (&basis, &sideways) {
+            (Some(b), _) if b.lolos() => crate::signals::penempatan::dari_basis(
+                harga,
+                b.jangkar.l_basis,
+                b.jangkar.h_basis,
+                b.jangkar.poc,
+                b.jangkar.p_invalid,
+            ),
+            (_, Some(s)) if s.lolos() => {
+                crate::signals::penempatan::dari_kanal(harga, s.kanal_bawah, s.kanal_atas)
+            }
+            _ => None,
+        };
+
+        let dibanding = saran
+            .as_ref()
+            .and_then(|s| crate::signals::penempatan::dibanding_lebar(harga, s, 5.0));
+
+        let view = protocol::SignalsView {
+            address,
+            bar_terpakai: jumlah,
+            harga,
+            sideways,
+            basis,
+            saran,
+            konsentrasi_dibanding_lebar: dibanding,
+            dihitung_pada: chrono::Utc::now().to_rfc3339(),
+        };
+
+        let _ = self
+            .events
+            .send(protocol::ServerMessage::Signals(Box::new(view)));
     }
 
     /// Susun rencana sebuah aksi pada posisi, jalankan simulasinya, TIDAK kirim.

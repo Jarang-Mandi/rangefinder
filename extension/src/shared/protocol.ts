@@ -295,6 +295,88 @@ export interface RingkasanPnl {
   perkiraan: number;
 }
 
+/** Satu candle. Waktu dalam detik unix. */
+export interface Bar {
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+/** Hasil detektor sideways, PRD 5.2. */
+export interface SinyalSideways {
+  skor: number;
+  er: number;
+  volume_z: number;
+  containment: number;
+  bandwidth: number;
+  kontraksi: number;
+  tape: number;
+  /** Kosong berarti seluruh gate lolos. */
+  ditolak: string[];
+  kanal_bawah: number;
+  kanal_atas: number;
+}
+
+/** Jangkar harga dari detektor dump lalu basis. */
+export interface Jangkar {
+  l_basis: number;
+  h_basis: number;
+  poc: number;
+  p_invalid: number;
+}
+
+/** Hasil detektor dump lalu basis, PRD 5.2b. */
+export interface HasilBasis {
+  skor: number;
+  drawdown: number;
+  bar_turun: number;
+  usia_basis: number;
+  kemiringan_basis: number;
+  rasio_volume_hidup: number;
+  rasio_volume_mereda: number;
+  kontraksi_atr: number;
+  er_basis: number;
+  tape_basis: number;
+  /** Kosong berarti seluruh syarat terpenuhi. */
+  gagal: string[];
+  jangkar: Jangkar;
+  penguat: string[];
+}
+
+export type BentukRange = "dua_sisi" | "beli_turun" | "jual_naik";
+
+/**
+ * Saran penempatan beserta alasannya.
+ *
+ * Alasan selalu ikut, dan selalu dalam bentuk keputusan beli dan jual. Angka
+ * tanpa alasan tidak membantu user belajar, dan user yang tidak belajar akan
+ * terus bergantung pada alat ini bahkan saat alatnya salah.
+ */
+export interface SaranPenempatan {
+  bentuk: BentukRange;
+  bawah: number;
+  atas: number;
+  lebar_persen: number;
+  konsentrasi: number;
+  alasan: string[];
+  pembatalan: number | null;
+}
+
+export interface SignalsView {
+  address: string;
+  bar_terpakai: number;
+  harga: number;
+  /** Null berarti datanya belum cukup, BUKAN berarti tidak menarik. */
+  sideways: SinyalSideways | null;
+  basis: HasilBasis | null;
+  saran: SaranPenempatan | null;
+  konsentrasi_dibanding_lebar: number | null;
+  dihitung_pada: string;
+}
+
 /** Aksi yang bisa dijalankan pada sebuah posisi. */
 export type JenisAksi = "klaim_fee" | "tutup_posisi";
 
@@ -403,6 +485,7 @@ export type ServerMessage =
   | ({ type: "send_result" } & Partial<SendResultView>)
   | ({ type: "positions" } & Partial<PositionsView>)
   | ({ type: "action_plan" } & Partial<ActionPlanView>)
+  | ({ type: "signals" } & Partial<SignalsView>)
   | ({ type: "notify" } & Partial<Kejadian>)
   | { type: "notify_history"; items: Kejadian[] }
   | { type: "alert"; level: AlertLevel; code: string; message: string };
@@ -412,6 +495,7 @@ export type ClientMessage =
   | { type: "ping" }
   | { type: "subscribe_token"; address: string }
   | { type: "chart_price"; address: string; mcap_usd: number }
+  | { type: "chart_bars"; address: string; bars: Bar[] }
   | { type: "select_pool"; pool_id: string }
   | { type: "select_quote"; quote: string }
   | { type: "set_range"; lower_mcap: number; upper_mcap: number }
@@ -430,6 +514,10 @@ export function asRangeView(msg: unknown): RangeView | null {
   if (m.type !== "range_view") return null;
   const { type: _type, ...rest } = m;
   return rest as unknown as RangeView;
+}
+
+export function asSignals(msg: unknown): SignalsView | null {
+  return untag<SignalsView>(msg, "signals");
 }
 
 export function asActionPlan(msg: unknown): ActionPlanView | null {

@@ -44,3 +44,4 @@ setiap agent.
 | `008-eksekusi-v4.md` | Cara kerja V4 dibaca dari rantai, izin dua lapis, dan jebakan kebiasaan V3 |
 | `009-zap-dan-router-fork.md` | Zap satu sisi, bug perbandingan desimal, dan cara memulihkan struct fork |
 | `010-posisi-pnl-notifikasi.md` | Enumerasi posisi, fee sebenarnya, satuan PnL, dan aturan notifikasi |
+| `011-mesin-sinyal.md` | Detektor sinyal, pembedaan kosong dari skor rendah, dan koreksi rumus PRD |

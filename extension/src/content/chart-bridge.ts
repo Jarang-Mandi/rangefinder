@@ -26,6 +26,7 @@ import {
   REQUIRED_CHART_METHODS,
   capabilityTier,
   methodsPresent,
+  readAllBars,
   readLastBar,
   sideOfShape,
   tokenFromPath,
@@ -258,9 +259,28 @@ function startPriceReporting() {
   };
   kirim();
   priceTimer = window.setInterval(kirim, 1_000);
+
+  // Deret penuh dikirim jauh lebih jarang. Isinya ratusan bar, dan detektor
+  // sinyal tidak berubah jawabannya dalam hitungan detik. Mengirimnya tiap
+  // detik hanya membebani jalur pesan tanpa menambah apa pun.
+  const kirimDeret = () => {
+    if (!api) return;
+    const bars = readAllBars(api.activeChart());
+    if (bars.length > 0) {
+      post({ kind: "chart_bars", token: currentToken, bars });
+    }
+  };
+  kirimDeret();
+  barsTimer = window.setInterval(kirimDeret, 30_000);
 }
 
+let barsTimer: number | null = null;
+
 function stopPriceReporting() {
+  if (barsTimer !== null) {
+    window.clearInterval(barsTimer);
+    barsTimer = null;
+  }
   if (priceTimer !== null) {
     window.clearInterval(priceTimer);
     priceTimer = null;

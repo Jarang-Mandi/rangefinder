@@ -60,6 +60,15 @@ pub enum ClientMessage {
     /// pernah dari panel.
     ApproveToken { token: String },
 
+    /// Deret candle dari chart gmgn, dipakai seluruh detektor sinyal.
+    ///
+    /// Datang lebih jarang daripada `chart_price` karena isinya ratusan bar
+    /// dan jawaban detektor tidak berubah dalam hitungan detik.
+    ChartBars {
+        address: String,
+        bars: Vec<crate::signals::bar::Bar>,
+    },
+
     /// Susun rencana sebuah aksi pada posisi. Tidak mengirim apa pun.
     PlanAction {
         token_id: String,
@@ -125,6 +134,9 @@ pub enum ServerMessage {
 
     /// Riwayat notifikasi, terbaru lebih dulu.
     NotifyHistory { items: Vec<crate::notify::Kejadian> },
+
+    /// Hasil seluruh detektor sinyal beserta saran penempatannya.
+    Signals(Box<SignalsView>),
 
     /// Rencana aksi pada posisi beserta hasil pemeriksaannya.
     ActionPlan(Box<crate::api::execute::ActionPlanView>),
@@ -210,6 +222,24 @@ pub struct PositionsView {
     /// Kosong kalau pemuatannya berhasil.
     pub error: Option<String>,
     pub dimuat_pada: String,
+}
+
+/// Hasil detektor sinyal untuk satu token.
+#[derive(Debug, Clone, Serialize)]
+pub struct SignalsView {
+    pub address: String,
+    /// Berapa bar yang benar benar dipakai setelah dibersihkan.
+    pub bar_terpakai: usize,
+    pub harga: f64,
+    /// Kosong berarti datanya belum cukup untuk jendela yang diminta, BUKAN
+    /// berarti kondisinya tidak menarik. Dua hal itu sangat berbeda.
+    pub sideways: Option<crate::signals::sideways::Sinyal>,
+    pub basis: Option<crate::signals::dump_basis::Hasil>,
+    /// Saran penempatan, kalau ada detektor yang lolos.
+    pub saran: Option<crate::signals::penempatan::Saran>,
+    /// Berapa kali lipat konsentrasinya dibanding range lima kali lebih lebar.
+    pub konsentrasi_dibanding_lebar: Option<f64>,
+    pub dihitung_pada: String,
 }
 
 pub const PROTOCOL_VERSION: u32 = 1;
