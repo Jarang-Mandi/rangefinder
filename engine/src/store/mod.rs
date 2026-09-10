@@ -20,7 +20,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use redb::{Database, ReadableDatabase, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use serde::{de::DeserializeOwned, Serialize};
 
 /// Pengaturan dan penghitung ringan. Kunci bebas, nilai JSON.
@@ -80,6 +80,47 @@ impl Store {
         tx.commit()?;
         Ok(existed)
     }
+
+    /// Baca satu namespace dari satu snapshot redb, tanpa menyembunyikan JSON rusak.
+    pub fn prefix<T: DeserializeOwned>(&self, prefix: &str) -> Result<Vec<(String, T)>> {
+        let tx = self.db.begin_read()?;
+        let table = tx.open_table(SETTINGS)?;
+        let mut out = Vec::new();
+        for item in table.range(prefix..)? {
+            let (key, value) = item?;
+            if !key.value().starts_with(prefix) {
+                break;
+            }
+            out.push((
+                key.value().to_owned(),
+                serde_json::from_str(value.value())
+                    .with_context(|| format!("catatan {} tidak valid", key.value()))?,
+            ));
+        }
+        Ok(out)
+    }
+
+    /// Read-modify-write dalam satu transaksi, termasuk validasi sebelum commit.
+    pub fn update<T: DeserializeOwned + Serialize>(
+        &self,
+        key: &str,
+        change: impl FnOnce(Option<T>) -> Result<T>,
+    ) -> Result<T> {
+        let tx = self.db.begin_write()?;
+        let updated;
+        {
+            let mut table = tx.open_table(SETTINGS)?;
+            let previous = table
+                .get(key)?
+                .map(|raw| serde_json::from_str(raw.value()))
+                .transpose()?;
+            updated = change(previous)?;
+            let json = serde_json::to_string(&updated)?;
+            table.insert(key, json.as_str())?;
+        }
+        tx.commit()?;
+        Ok(updated)
+    }
 }
 
 #[cfg(test)]
@@ -93,7 +134,8 @@ mod tests {
     }
 
     fn dir_sementara(nama: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("rangefinder-store-{nama}-{}", std::process::id()));
+        let d =
+            std::env::temp_dir().join(format!("rangefinder-store-{nama}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d

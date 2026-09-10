@@ -77,9 +77,7 @@ pub const JENDELA_TIDAK_LAYAK: u64 = 100;
 /// di atas endpoint jenis pertama, dan itu harus dikatakan apa adanya.
 pub fn lebar_dibatasi(e: &impl std::fmt::Display) -> bool {
     let teks = e.to_string().to_lowercase();
-    teks.contains("block range")
-        || teks.contains("range should work")
-        || teks.contains("free tier")
+    teks.contains("block range") || teks.contains("range should work") || teks.contains("free tier")
 }
 
 /// Benar kalau kegagalannya karena laju dibatasi.

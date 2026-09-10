@@ -85,7 +85,8 @@ pub async fn run(repo_root: &Path, token_arg: &str, nominal_arg: Option<&str>) -
     let lebar = spacing * LEBAR_SPACING;
     let (tick_lower, tick_upper) = (tengah - lebar, tengah + lebar);
 
-    let porsi = zap::porsi_token0_bps(sqrt_p, tick_lower, tick_upper).map_err(anyhow::Error::msg)?;
+    let porsi =
+        zap::porsi_token0_bps(sqrt_p, tick_lower, tick_upper).map_err(anyhow::Error::msg)?;
     println!("  range     {tick_lower} sampai {tick_upper}");
     println!(
         "  rasio     token0 {:.1}%, token1 {:.1}%",
@@ -170,13 +171,20 @@ pub async fn run(repo_root: &Path, token_arg: &str, nominal_arg: Option<&str>) -
     // sendiri murni, jadi ia bisa diuji tanpa jaringan sama sekali.
     let hasil = {
         let rt = tokio::runtime::Handle::current();
-        zap::selesaikan(sqrt_p, tick_lower, tick_upper, modal, SisiSumber::Token0, |x| {
-            let p = &provider;
-            let k = key.clone();
-            tokio::task::block_in_place(|| {
-                rt.block_on(quote::kutip_exact_in(p, quoter, &k, true, x))
-            })
-        })
+        zap::selesaikan(
+            sqrt_p,
+            tick_lower,
+            tick_upper,
+            modal,
+            SisiSumber::Token0,
+            |x| {
+                let p = &provider;
+                let k = key.clone();
+                tokio::task::block_in_place(|| {
+                    rt.block_on(quote::kutip_exact_in(p, quoter, &k, true, x))
+                })
+            },
+        )
     };
 
     match hasil {

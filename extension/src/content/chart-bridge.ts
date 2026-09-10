@@ -29,11 +29,14 @@ import {
   readAllBars,
   readLastBar,
   sideOfShape,
-  tokenFromPath,
+  symbolMatchesToken,
 } from "./chart-logic";
+import { drawOwnedPair, waitDataReady } from "../shared/chart-session";
+import { chartCommand, robinhoodToken } from "../shared/chart-messages";
 
 const CHANNEL = "rangefinder";
 const READY_TIMEOUT_MS = 15_000;
+const RETRY_DELAY_MS = 2_000;
 const POLL_MS = 50;
 
 const COLOR_UPPER = "#2E9E63";
@@ -67,22 +70,27 @@ interface TradingViewApi {
 const lines: Partial<Record<Side, string>> = {};
 let api: TradingViewApi | null = null;
 let currentToken: string | null = null;
+let generation = 0;
+let linesChart: ChartApi | null = null;
+let drawingHandler: ((id: string, type: string) => void) | null = null;
+let retryTimer: number | null = null;
 
 function post(payload: Record<string, unknown>) {
-  window.postMessage({ channel: CHANNEL, direction: "from-page", ...payload }, "*");
+  if (currentToken !== tokenFromUrl()) return;
+  window.postMessage({ ...payload, token: currentToken, channel: CHANNEL, direction: "from-page" }, location.origin);
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Alamat token dari URL. `null` kalau halaman ini bukan halaman token. */
 function tokenFromUrl(): string | null {
-  return tokenFromPath(location.pathname);
+  return robinhoodToken(location.href);
 }
 
-async function waitForApi(): Promise<TradingViewApi | null> {
+async function waitForApi(ticket: number, token: string): Promise<TradingViewApi | null> {
   const deadline = Date.now() + READY_TIMEOUT_MS;
 
-  while (Date.now() < deadline) {
+  while (ticket === generation && Date.now() < deadline) {
     const frame = document.querySelector<HTMLIFrameElement>(IFRAME_SELECTOR);
     const candidate = frame?.contentWindow as
       | (Window & { tradingViewApi?: TradingViewApi })
@@ -90,17 +98,14 @@ async function waitForApi(): Promise<TradingViewApi | null> {
 
     if (candidate?.tradingViewApi) {
       const found = candidate.tradingViewApi;
-      try {
-        // dataReady memanggil balik segera kalau data sudah ada.
-        await new Promise<void>((resolve) => {
-          const settled = found.activeChart().dataReady(() => resolve());
-          if (settled) resolve();
-        });
-      } catch {
-        // Chart ada tapi belum siap penuh. Tetap lanjut, probe akan melaporkan
-        // method mana yang hilang.
-      }
-      return found;
+      const ready = await waitDataReady(cb => found.activeChart().dataReady(cb), deadline - Date.now());
+      if (!ready || ticket !== generation) return null;
+
+      // GMGN mengganti URL lebih dulu, lalu memakai API chart lama selama
+      // beberapa ratus milidetik. Jangan pernah memberi data token lama label
+      // alamat baru. Tunggu sampai simbol API memuat alamat yang sedang aktif.
+      const symbol = safe(() => found.activeChart().symbol());
+      if (symbolMatchesToken(symbol, token)) return found;
     }
     await sleep(POLL_MS);
   }
@@ -157,12 +162,13 @@ let permintaanTerakhir = 0;
 function drawLines(upperPrice: number, lowerPrice: number) {
   permintaanTerakhir += 1;
   const punyaku = permintaanTerakhir;
+  const ticket = generation;
   antrian = antrian
     .then(() => {
       // Permintaan yang sudah disusul permintaan lain dilewati. Menggambarnya
       // hanya untuk langsung ditimpa berarti dua kali kerja dan satu kedipan.
-      if (punyaku !== permintaanTerakhir) return;
-      return gambarSekarang(upperPrice, lowerPrice);
+      if (punyaku !== permintaanTerakhir || ticket !== generation) return;
+      return gambarSekarang(upperPrice, lowerPrice, punyaku, ticket);
     })
     .catch(() => {
       // Chart bisa hilang di tengah jalan saat user berpindah halaman.
@@ -171,56 +177,45 @@ function drawLines(upperPrice: number, lowerPrice: number) {
   return antrian;
 }
 
-async function gambarSekarang(upperPrice: number, lowerPrice: number) {
+async function gambarSekarang(upperPrice: number, lowerPrice: number, request: number, ticket: number) {
   if (!api) return;
-  const chart = api.activeChart();
-  clearLines();
-
+  const source = api;
+  const chart = source.activeChart();
+  const token = currentToken;
+  clearLines(false);
+  const current = () => ticket === generation && request === permintaanTerakhir && api === source && token === tokenFromUrl();
   const time = chart.getVisibleRange().to;
-  lines.upper = await chart.createShape(
-    { time, price: upperPrice },
-    {
-      shape: "horizontal_line",
-      disableSave: true,
-      overrides: {
-        linecolor: COLOR_UPPER,
-        textcolor: COLOR_UPPER,
-        linewidth: 2,
-        showPrice: true,
-      },
-    },
-  );
-  lines.lower = await chart.createShape(
-    { time, price: lowerPrice },
-    {
-      shape: "horizontal_line",
-      disableSave: true,
-      overrides: {
-        linecolor: COLOR_LOWER,
-        textcolor: COLOR_LOWER,
-        linewidth: 2,
-        showPrice: true,
-      },
-    },
-  );
-
+  const pair = await drawOwnedPair(side => chart.createShape(
+    { time, price: side === "upper" ? upperPrice : lowerPrice },
+    { shape: "horizontal_line", disableSave: true, overrides: {
+      linecolor: side === "upper" ? COLOR_UPPER : COLOR_LOWER,
+      textcolor: side === "upper" ? COLOR_UPPER : COLOR_LOWER,
+      linewidth: 2, showPrice: true,
+    } },
+  ), id => chart.removeEntity(id), current);
+  if (!pair) return;
+  if (!current()) {
+    for (const id of Object.values(pair)) { try { chart.removeEntity(id); } catch { /* Iframe hilang. */ } }
+    return;
+  }
+  linesChart = chart;
+  Object.assign(lines, pair);
   post({ kind: "lines_drawn", upperPrice, lowerPrice });
 }
 
-function clearLines() {
-  if (!api) return;
-  const chart = api.activeChart();
+function clearLines(cancelPending = true) {
+  if (cancelPending) {
+    permintaanTerakhir += 1;
+    antrian = Promise.resolve();
+  }
+  const chart = linesChart;
   for (const side of ["upper", "lower"] as Side[]) {
     const id = lines[side];
     if (!id) continue;
-    // Hanya id milik kita. Lihat invarian di kepala berkas.
-    try {
-      chart.removeEntity(id);
-    } catch {
-      // Shape mungkin sudah dihapus user. Itu bukan error.
-    }
+    try { chart?.removeEntity(id); } catch { /* Shape atau iframe sudah hilang. */ }
     delete lines[side];
   }
+  linesChart = null;
 }
 
 function sideOf(id: string): Side | null {
@@ -244,6 +239,18 @@ function onDrawingEvent(id: string, type: string) {
 }
 
 async function attach() {
+  const ticket = ++generation;
+  if (retryTimer !== null) {
+    window.clearTimeout(retryTimer);
+    retryTimer = null;
+  }
+  stopPriceReporting();
+  clearLines();
+  if (api && drawingHandler) {
+    try { api.unsubscribe("drawing_event", drawingHandler); } catch { /* API sudah dilepas. */ }
+  }
+  drawingHandler = null;
+  api = null;
   const token = tokenFromUrl();
   currentToken = token;
 
@@ -252,16 +259,31 @@ async function attach() {
     return;
   }
 
-  api = await waitForApi();
+  const found = await waitForApi(ticket, token);
+  if (ticket !== generation || token !== tokenFromUrl()) return;
+  api = found;
   if (!api) {
     probe(null);
+    // Pada profil browser baru, bundle chart GMGN kadang baru memasang
+    // tradingViewApi setelah batas tunggu pertama. Satu kegagalan bukan keadaan
+    // terminal: coba lagi selama halaman masih menunjuk token dan generasi yang
+    // sama. Timer tunggal ini juga mencegah loop attach yang bertumpuk.
+    if (ticket === generation && token === tokenFromUrl()) {
+      retryTimer = window.setTimeout(() => {
+        retryTimer = null;
+        if (ticket === generation && token === tokenFromUrl()) void attach();
+      }, RETRY_DELAY_MS);
+    }
     return;
   }
 
   probe(api.activeChart());
 
   try {
-    api.subscribe("drawing_event", onDrawingEvent);
+    drawingHandler = (id, type) => {
+      if (ticket === generation && token === tokenFromUrl()) onDrawingEvent(id, type);
+    };
+    api.subscribe("drawing_event", drawingHandler);
   } catch {
     post({ kind: "chart_capabilities", tier: 2, methodsPresent: [], note: "drawing_event tidak tersedia" });
   }
@@ -331,9 +353,6 @@ function watchNavigation() {
   const check = () => {
     if (location.href === last) return;
     last = location.href;
-    stopPriceReporting();
-    clearLines();
-    api = null;
     void attach();
   };
 
@@ -350,9 +369,10 @@ function watchNavigation() {
 }
 
 window.addEventListener("message", (event) => {
-  if (event.source !== window) return;
+  if (event.source !== window || event.origin !== location.origin) return;
   const data = event.data as Record<string, unknown> | null;
   if (!data || data.channel !== CHANNEL || data.direction !== "to-page") return;
+  if (!chartCommand(data, location.href)) return;
 
   switch (data.kind) {
     case "draw_lines":

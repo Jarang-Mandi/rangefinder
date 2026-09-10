@@ -54,6 +54,15 @@ impl NonceKeeper {
     /// tinggi, itu berarti ada transaksi kita yang belum terlihat node, dan
     /// cadangan lokal yang menang.
     pub async fn reserve<P: Provider>(&self, provider: &P, address: Address) -> Result<Reservasi> {
+        self.reserve_with_floor(provider, address, 0).await
+    }
+
+    pub async fn reserve_with_floor<P: Provider>(
+        &self,
+        provider: &P,
+        address: Address,
+        floor: u64,
+    ) -> Result<Reservasi> {
         let mut guard = self.berikutnya.lock().await;
 
         let dari_rantai = provider
@@ -70,9 +79,11 @@ impl NonceKeeper {
         let nonce = match lokal {
             Some(n) if n > dari_rantai => n,
             _ => dari_rantai,
-        };
+        }
+        .max(floor);
 
-        *guard = Some((address, nonce + 1));
+        let berikutnya = nonce.checked_add(1).context("nonce melampaui batas u64")?;
+        *guard = Some((address, berikutnya));
         Ok(Reservasi { nonce, address })
     }
 
@@ -106,6 +117,7 @@ impl NonceKeeper {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy::{providers::ProviderBuilder, transports::mock::Asserter};
 
     fn alamat(b: u8) -> Address {
         Address::from([b; 20])
@@ -182,6 +194,28 @@ mod tests {
         let k = NonceKeeper::new();
         *k.berikutnya.lock().await = Some((alamat(6), 12));
         k.reset().await;
+        assert_eq!(*k.berikutnya.lock().await, None);
+    }
+
+    #[tokio::test]
+    async fn lantai_persisten_mengalahkan_nonce_rpc_dan_lokal() {
+        let rpc = Asserter::new();
+        rpc.push_success(&2u64);
+        let provider = ProviderBuilder::new().connect_mocked_client(rpc);
+        let k = NonceKeeper::new();
+        *k.berikutnya.lock().await = Some((alamat(7), 4));
+        let reservasi = k.reserve_with_floor(&provider, alamat(7), 9).await.unwrap();
+        assert_eq!(reservasi.nonce, 9);
+        assert_eq!(*k.berikutnya.lock().await, Some((alamat(7), 10)));
+    }
+
+    #[tokio::test]
+    async fn nonce_maksimum_ditolak_tanpa_merusak_keadaan_lokal() {
+        let rpc = Asserter::new();
+        rpc.push_success(&u64::MAX);
+        let provider = ProviderBuilder::new().connect_mocked_client(rpc);
+        let k = NonceKeeper::new();
+        assert!(k.reserve(&provider, alamat(8)).await.is_err());
         assert_eq!(*k.berikutnya.lock().await, None);
     }
 }

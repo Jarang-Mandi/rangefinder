@@ -26,9 +26,29 @@ use crate::exec::send::SendOutcome;
 /// dengan tenang, dan terlalu pendek untuk berubah jauh.
 pub const RENCANA_KEDALUWARSA_DETIK: i64 = 180;
 
+#[derive(Clone)]
+pub struct QuoteTask {
+    pub deposit: super::deposit::Deposit,
+    pub request_id: String,
+    pub revision: u64,
+    /// Hanya engine yang mengisi hasil zap yang sudah diterima wallet.
+    pub budget_override: Option<(U256, U256)>,
+}
+
 /// Rencana yang tersimpan beserta konteks yang dibutuhkan untuk mengirimnya.
 pub struct RencanaTersimpan {
+    pub position_usd: f64,
+    pub hook: Option<Address>,
+    pub quote: QuoteTask,
+    pub budget: (U256, U256),
+    pub zap_view: Option<ZapView>,
+    pub plan_id: String,
+    pub revision: u64,
+    pub allowances: Vec<crate::exec::plan::LangkahIzin>,
     pub plan: OpenPlan,
+    /// Vektor fitur dan versi kalibrasi yang menyusun prediksi pada rencana.
+    /// Baru dipersistenkan setelah receipt open lolos verifikasi penuh.
+    pub learning: crate::learning::Draft,
     /// Calldata swap zap beserta nilainya, kalau zap diperlukan.
     ///
     /// Disimpan di engine dengan alasan yang sama dengan calldata mint:
@@ -46,6 +66,32 @@ pub struct RencanaTersimpan {
 }
 
 impl RencanaTersimpan {
+    pub fn journal_context(
+        &self,
+        operation: crate::exec::journal::Operation,
+    ) -> crate::exec::journal::Context {
+        crate::exec::journal::Context {
+            operation,
+            plan_id: self.plan_id.clone(),
+            flow_id: self.quote.request_id.clone(),
+            pool_id: Some(self.plan.pool_id.clone()),
+            position_id: None,
+            token0: Some(self.token0),
+            token1: Some(self.token1),
+            deployment_usd: matches!(operation, crate::exec::journal::Operation::Open)
+                .then_some(self.position_usd),
+            close_basis: None,
+        }
+    }
+    pub fn periksa(&self, id: &str, intent: &super::intent::Intent) -> Result<(), String> {
+        if id != self.plan_id || !intent.current(self.revision) {
+            return Err("rencana berubah, susun dan periksa ulang sebelum menyetujui".into());
+        }
+        if self.kedaluwarsa() {
+            return Err("rencana sudah kedaluwarsa, susun ulang".into());
+        }
+        Ok(())
+    }
     pub fn kedaluwarsa(&self) -> bool {
         (chrono::Utc::now() - self.disusun_pada).num_seconds() > RENCANA_KEDALUWARSA_DETIK
     }
@@ -82,6 +128,9 @@ pub struct ZapView {
 /// Ringkasan rencana untuk panel, beserta status izin tiap token.
 #[derive(Debug, Clone, Serialize)]
 pub struct OpenPlanView {
+    pub deposit: super::deposit::Deposit,
+    pub plan_id: String,
+    pub request_id: String,
     #[serde(flatten)]
     pub plan: OpenPlan,
     /// Langkah izin yang masih harus dikerjakan, berurutan. Kosong berarti
@@ -135,24 +184,108 @@ pub struct SetoranView {
 
 /// Aksi pada posisi yang sudah disusun dan menunggu persetujuan.
 pub struct AksiTersimpan {
+    pub journal_context: crate::exec::journal::Context,
+    pub plan_id: String,
+    pub position_id: String,
+    pub revision: u64,
+    pub request_id: String,
+    pub action: crate::exec::aksi::JenisAksi,
+    pub input: crate::exec::aksi::ActionInput,
+    pub siap: bool,
     pub token_id: String,
+    pub versi: crate::pools::PoolVersion,
     pub calldata: alloy::primitives::Bytes,
     /// Kontrak tujuan, dipilih menurut versi posisinya.
     pub tujuan: Address,
+    /// ETH asli yang ikut sebagai `msg.value` pada aksi V4.
+    pub value: U256,
+    /// Hook hanya diperiksa untuk aksi yang memasukkan modal.
+    pub hook: Option<Address>,
+    /// Izin yang masih kurang. Urutannya mengikat seperti rencana open.
+    pub allowances: Vec<crate::exec::plan::LangkahIzin>,
+    pub amount0: U256,
+    pub amount1: U256,
+    pub harapan: HarapanAksi,
     pub menutup: bool,
     pub nama: &'static str,
     pub disusun_pada: chrono::DateTime<chrono::Utc>,
+}
+
+/// Hitung token yang diterima dari perubahan saldo wallet.
+///
+/// Gas ditambahkan kembali hanya pada sisi ETH asli. Tanpa harga gas receipt,
+/// penerimaan ETH tidak dapat dipisahkan dari biaya transaksi dan hasilnya
+/// harus tetap tidak diketahui.
+pub fn received_from_balances(
+    before: (U256, U256),
+    after: (U256, U256),
+    token0: Address,
+    token1: Address,
+    gas_wei: Option<U256>,
+) -> Option<(U256, U256)> {
+    let one = |before: U256, after: U256, native: bool| {
+        let after = if native {
+            after.checked_add(gas_wei?)?
+        } else {
+            after
+        };
+        after.checked_sub(before)
+    };
+    Some((
+        one(before.0, after.0, token0.is_zero())?,
+        one(before.1, after.1, token1.is_zero())?,
+    ))
 }
 
 impl AksiTersimpan {
     pub fn kedaluwarsa(&self) -> bool {
         (chrono::Utc::now() - self.disusun_pada).num_seconds() > RENCANA_KEDALUWARSA_DETIK
     }
+
+    pub fn periksa(&self, id: &str, intent: &super::intent::Intent) -> Result<(), String> {
+        if id != self.plan_id || !intent.action_current(self.revision) {
+            return Err("rencana aksi berubah, susun dan periksa ulang".into());
+        }
+        if self.kedaluwarsa() {
+            return Err("rencana aksi sudah kedaluwarsa, susun ulang".into());
+        }
+        Ok(())
+    }
+}
+
+/// Keadaan yang harus dibuktikan lagi setelah receipt sukses.
+pub enum HarapanAksi {
+    TidakAda,
+    Tambah {
+        sebelum: crate::positions::Posisi,
+        minimum_tambahan: u128,
+    },
+    RebalanceV3 {
+        token_lama: U256,
+        permintaan: crate::exec::calldata::MintRequest,
+        expected_liquidity: u128,
+    },
+    RebalanceV4 {
+        token_lama: U256,
+        permintaan: crate::exec::v4::calldata::MintV4Request,
+    },
+}
+
+/// Jumlah aksi dalam satuan yang bisa dibaca user.
+#[derive(Debug, Clone, Serialize)]
+pub struct ActionAmountView {
+    pub symbol0: String,
+    pub amount0: String,
+    pub symbol1: String,
+    pub amount1: String,
 }
 
 /// Rencana aksi beserta hasil pemeriksaannya, untuk ditampilkan panel.
 #[derive(Debug, Clone, Serialize)]
 pub struct ActionPlanView {
+    pub plan_id: String,
+    pub position_id: String,
+    pub request_id: String,
     pub token_id: String,
     pub action: crate::exec::aksi::JenisAksi,
     pub nama: &'static str,
@@ -165,8 +298,15 @@ pub struct ActionPlanView {
     pub siap: bool,
     pub expires_at: String,
     /// Fee yang akan diambil, dalam satuan terkecil.
-    pub fee0: String,
-    pub fee1: String,
+    pub fee0: Option<String>,
+    pub fee1: Option<String>,
+    /// Langkah izin yang harus selesai sebelum simulasi dapat lolos.
+    pub allowances: Vec<crate::exec::plan::LangkahIzin>,
+    /// Jumlah maksimum yang dapat masuk ke posisi dalam satuan manusiawi.
+    pub amounts: Option<ActionAmountView>,
+    /// Range baru untuk rebalance. Kosong pada aksi lain.
+    pub tick_lower_baru: Option<i32>,
+    pub tick_upper_baru: Option<i32>,
 }
 
 /// Hasil satu pengiriman, apa pun jenisnya.
@@ -199,59 +339,13 @@ pub async fn saldo_dua_token<P: Provider>(
     token0: Address,
     token1: Address,
 ) -> Result<(U256, U256), String> {
-    use crate::exec::abi_write::IERC20Write;
-
-    // ETH asli dibaca terpisah, dan hanya kalau memang ikut.
-    let saldo_native = if token0.is_zero() || token1.is_zero() {
-        Some(
-            provider
-                .get_balance(pemilik)
-                .await
-                .map_err(|e| format!("gagal membaca saldo ETH: {e}"))?,
-        )
-    } else {
-        None
-    };
-
-    let mut calls = Vec::new();
-    let mut ikut: Vec<Address> = Vec::new();
-    for t in [token0, token1] {
-        if t.is_zero() {
-            continue;
-        }
-        calls.push(crate::chain::multicall::encode(
-            t,
-            &IERC20Write::balanceOfCall { account: pemilik },
-        ));
-        ikut.push(t);
-    }
-
-    let hasil = if calls.is_empty() {
-        Vec::new()
-    } else {
-        crate::chain::multicall::batch_call(provider, multicall, calls)
-            .await
-            .map_err(|e| format!("gagal membaca saldo: {e}"))?
-    };
-
-    let mut per_token: std::collections::HashMap<Address, U256> = Default::default();
-    for (i, t) in ikut.into_iter().enumerate() {
-        let v = crate::chain::multicall::decode::<IERC20Write::balanceOfCall>(
-            hasil.get(i).and_then(|x| x.as_ref()),
-        )
-        .ok_or_else(|| format!("{t} tidak menjawab balanceOf()"))?;
-        per_token.insert(t, v);
-    }
-
-    let ambil = |t: Address| -> U256 {
-        if t.is_zero() {
-            saldo_native.unwrap_or(U256::ZERO)
-        } else {
-            per_token.get(&t).copied().unwrap_or(U256::ZERO)
-        }
-    };
-
-    Ok((ambil(token0), ambil(token1)))
+    let (a, b) =
+        crate::pools::saldo_dua_dengan_multicall(provider, multicall, pemilik, token0, token1)
+            .await;
+    Ok((
+        a.ok_or_else(|| format!("saldo {token0} tidak terbaca"))?,
+        b.ok_or_else(|| format!("saldo {token1} tidak terbaca"))?,
+    ))
 }
 /// Ubah nominal USD menjadi jumlah token, memakai kurs yang dikalibrasi chart.
 ///
@@ -333,6 +427,9 @@ pub fn susun_permintaan(
     available1: U256,
     recipient: Address,
     position_usd: f64,
+    daily_spent_usd: f64,
+    open_positions: u32,
+    is_new_pool: bool,
     eth_balance: f64,
     eth_needed: f64,
     deadline_detik: u64,
@@ -344,17 +441,11 @@ pub fn susun_permintaan(
         available0,
         available1,
         recipient,
-        deadline: U256::from(
-            chrono::Utc::now().timestamp() as u64 + deadline_detik,
-        ),
+        deadline: U256::from(chrono::Utc::now().timestamp() as u64 + deadline_detik),
         position_usd,
-        // Penghitung harian dan jumlah posisi terbuka menyusul di fase 5, saat
-        // posisi benar benar tercatat. Sampai itu ada, keduanya nol, dan gate
-        // G6 hanya menegakkan batas per posisi. Ini dicatat supaya tidak
-        // terlihat seperti sudah selesai.
-        daily_spent_usd: 0.0,
-        open_positions: 0,
-        is_new_pool: false,
+        daily_spent_usd,
+        open_positions,
+        is_new_pool,
         eth_balance,
         eth_needed,
     }
@@ -376,6 +467,30 @@ mod tests {
             cfg.min_eth_reserve > 0.0,
             "cadangan ETH wajib bukan nol, kalau tidak wallet bisa kehabisan gas"
         );
+    }
+
+    #[test]
+    fn delta_saldo_eth_menambahkan_kembali_gas_receipt() {
+        let before = (U256::from(1_000), U256::from(20));
+        // Menerima 100 ETH-unit tetapi membayar 30 gas-unit: saldo terlihat naik 70.
+        let after = (U256::from(1_070), U256::from(27));
+        let received = received_from_balances(
+            before,
+            after,
+            Address::ZERO,
+            Address::repeat_byte(1),
+            Some(U256::from(30)),
+        )
+        .unwrap();
+        assert_eq!(received, (U256::from(100), U256::from(7)));
+        assert!(received_from_balances(
+            before,
+            after,
+            Address::ZERO,
+            Address::repeat_byte(1),
+            None
+        )
+        .is_none());
     }
 
     #[test]
@@ -414,7 +529,10 @@ mod tests {
         assert!(usd_ke_satuan_terkecil(0.0, 1.0, 18).is_none());
         assert!(usd_ke_satuan_terkecil(-5.0, 1.0, 18).is_none());
         assert!(usd_ke_satuan_terkecil(f64::NAN, 1.0, 18).is_none());
-        assert!(usd_ke_satuan_terkecil(100.0, 0.0, 18).is_none(), "harga nol");
+        assert!(
+            usd_ke_satuan_terkecil(100.0, 0.0, 18).is_none(),
+            "harga nol"
+        );
         assert!(usd_ke_satuan_terkecil(100.0, f64::INFINITY, 18).is_none());
     }
 
@@ -447,7 +565,18 @@ mod tests {
     #[test]
     fn rencana_kedaluwarsa_setelah_batas() {
         let plan = RencanaTersimpan {
+            position_usd: 100.0,
+            hook: None,
+            quote: quote_uji(),
+            budget: (U256::ZERO, U256::ZERO),
+            zap_view: None,
+            plan_id: "uji".into(),
+            revision: 0,
+            allowances: Vec::new(),
             plan: contoh_plan(),
+            learning: crate::learning::Draft {
+                feature: fitur_uji(),
+            },
             zap_calldata: None,
             versi: crate::pools::PoolVersion::V3,
             token0: Address::ZERO,
@@ -463,7 +592,18 @@ mod tests {
     #[test]
     fn rencana_baru_belum_kedaluwarsa() {
         let plan = RencanaTersimpan {
+            position_usd: 100.0,
+            hook: None,
+            quote: quote_uji(),
+            budget: (U256::ZERO, U256::ZERO),
+            zap_view: None,
+            plan_id: "uji".into(),
+            revision: 0,
+            allowances: Vec::new(),
             plan: contoh_plan(),
+            learning: crate::learning::Draft {
+                feature: fitur_uji(),
+            },
             zap_calldata: None,
             versi: crate::pools::PoolVersion::V3,
             token0: Address::ZERO,
@@ -473,6 +613,49 @@ mod tests {
             disusun_pada: chrono::Utc::now(),
         };
         assert!(!plan.kedaluwarsa());
+    }
+
+    fn quote_uji() -> QuoteTask {
+        QuoteTask {
+            deposit: super::super::deposit::Deposit {
+                side: super::super::deposit::Side::Quote,
+                amount: "1".into(),
+                zap: false,
+            },
+            request_id: "uji".into(),
+            revision: 0,
+            budget_override: None,
+        }
+    }
+
+    fn fitur_uji() -> crate::learning::FeatureVector {
+        crate::learning::FeatureVector {
+            token: "0xtoken".into(),
+            pool_id: "0xpool".into(),
+            regime: crate::learning::Regime::Unknown,
+            sideways_score: None,
+            efficiency_ratio: None,
+            volume_z: None,
+            containment: None,
+            bandwidth: None,
+            contraction: None,
+            tape_balance: None,
+            range_width_atr: None,
+            liquidity_share_bps: None,
+            fee_tier: 3000,
+            protocol_version: "v3".into(),
+            token_age_hours: None,
+            holder_count: None,
+            top10_holder_percent: None,
+            poc_distance_atr: None,
+            predicted_fee_apr_raw: None,
+            predicted_hours_in_range_raw: None,
+            predicted_fee_apr: None,
+            predicted_hours_in_range: None,
+            il_break_even_hours: None,
+            position_value_quote: None,
+            calibration_version: "baseline-v1-unknown".into(),
+        }
     }
 
     fn contoh_plan() -> OpenPlan {

@@ -17,15 +17,16 @@
 //!   seluruh komentar di berkas itu, padahal komentarnya memuat peringatan
 //!   penting tentang UniversalRouter yang merupakan fork.
 
-mod dryrun;
+mod calibration;
 mod depth;
+mod dryrun;
+mod golden;
 mod optimizer;
 mod pairs;
 mod positions;
 mod scan;
 mod v4probe;
 mod zap;
-mod golden;
 
 use std::path::{Path, PathBuf};
 
@@ -110,7 +111,9 @@ fn main() -> Result<()> {
                 std::process::exit(2);
             }
             let nominal = args.get(2).cloned();
-            let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
             let ok = rt.block_on(zap::run(&root, &token, nominal.as_deref()))?;
             finish(ok)
         }
@@ -138,8 +141,9 @@ fn main() -> Result<()> {
             let ok = rt.block_on(golden::capture(&root, jumlah))?;
             finish(ok)
         }
+        "calibration" => finish(calibration::run(&args[1..])?),
         other => {
-            eprintln!("perintah `{other}` tidak dikenal. Yang ada: verify, docs-check, golden, dryrun, pairs");
+            eprintln!("perintah `{other}` tidak dikenal. Yang ada: verify, docs-check, golden, dryrun, pairs, calibration");
             std::process::exit(2);
         }
     }
@@ -173,8 +177,14 @@ async fn verify_chain(root: &Path, pin: bool) -> Result<bool> {
     let registry = Registry::load_from(&path)?;
     let cfg = Config::load().context("gagal memuat config engine untuk mengambil URL RPC")?;
 
-    println!("  chain    {} (id {})", registry.chain.name, registry.chain.id);
-    println!("  rpc      {}", cfg.rpc.http.first().cloned().unwrap_or_default());
+    println!(
+        "  chain    {} (id {})",
+        registry.chain.name, registry.chain.id
+    );
+    println!(
+        "  rpc      {}",
+        cfg.rpc.http.first().cloned().unwrap_or_default()
+    );
     println!("  berkas   {}", path.display());
     println!();
 
@@ -249,7 +259,10 @@ async fn verify_chain(root: &Path, pin: bool) -> Result<bool> {
         let jumlah = pin_hashes(&path, &pins)?;
         println!("  {jumlah} code_hash ditulis ke chain.toml");
     } else if !pins.is_empty() {
-        println!("  jalankan ulang dengan --pin untuk mengunci {} hash", pins.len());
+        println!(
+            "  jalankan ulang dengan --pin untuk mengunci {} hash",
+            pins.len()
+        );
     }
 
     // Alamat tanpa kode adalah kegagalan: artinya alamat di chain.toml salah,

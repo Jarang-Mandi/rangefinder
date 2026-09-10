@@ -70,7 +70,9 @@ pub enum ZapError {
     TickTerbalik { lower: i32, upper: i32 },
     #[error("tick di luar jangkauan Uniswap: {0}")]
     TickDiLuarJangkauan(String),
-    #[error("harga sekarang berada di luar range, zap tidak diperlukan karena posisi ini satu sisi")]
+    #[error(
+        "harga sekarang berada di luar range, zap tidak diperlukan karena posisi ini satu sisi"
+    )]
     RangeSatuSisi,
     #[error("kutipan swap gagal: {0}")]
     KutipanGagal(String),
@@ -202,10 +204,8 @@ where
         // Yang benar adalah membandingkan likuiditas yang bisa dibentuk tiap
         // sisi seorang diri. Sisi yang menghasilkan lebih sedikit adalah yang
         // mengikat, dan itu perbandingan tanpa satuan sehingga aman.
-        let l0 = liquidity_math::liquidity_for_amount0(sqrt_price_x96, sqrt_b, punya0)
-            .unwrap_or(0);
-        let l1 = liquidity_math::liquidity_for_amount1(sqrt_a, sqrt_price_x96, punya1)
-            .unwrap_or(0);
+        let l0 = liquidity_math::liquidity_for_amount0(sqrt_price_x96, sqrt_b, punya0).unwrap_or(0);
+        let l1 = liquidity_math::liquidity_for_amount1(sqrt_a, sqrt_price_x96, punya1).unwrap_or(0);
 
         // Token1 mengikat berarti kita butuh lebih banyak token1, jadi tukar
         // lebih banyak token0. Kalau sumbernya token1, arahnya berkebalikan.
@@ -221,7 +221,10 @@ where
     }
 
     let hasil = terbaik.ok_or(ZapError::ModalNol)?;
-    debug_assert!(hasil.tukar <= modal, "zap tidak boleh menukar lebih dari modal");
+    debug_assert!(
+        hasil.tukar <= modal,
+        "zap tidak boleh menukar lebih dari modal"
+    );
     Ok(hasil)
 }
 
@@ -287,10 +290,11 @@ mod tests {
     ///
     /// Cukup untuk menguji penyelesainya, karena yang diuji di sini adalah
     /// pencarian titiknya, bukan model pasarnya.
-    fn kutipan_datar(harga_pembilang: u64, harga_penyebut: u64) -> impl FnMut(U256) -> Result<U256, String> {
-        move |x: U256| {
-            Ok(x * U256::from(harga_pembilang) / U256::from(harga_penyebut))
-        }
+    fn kutipan_datar(
+        harga_pembilang: u64,
+        harga_penyebut: u64,
+    ) -> impl FnMut(U256) -> Result<U256, String> {
+        move |x: U256| Ok(x * U256::from(harga_pembilang) / U256::from(harga_penyebut))
     }
 
     /// Kutipan dengan dampak harga, meniru bentuk kurva sungguhan.
@@ -403,8 +407,15 @@ mod tests {
         // benar mendekati separuh modal.
         let sqrt_p = sqrt_di_tick(0);
         let modal = U256::from(1_000_000u64);
-        let hasil = selesaikan(sqrt_p, -600, 600, modal, SisiSumber::Token0, kutipan_datar(1, 1))
-            .unwrap();
+        let hasil = selesaikan(
+            sqrt_p,
+            -600,
+            600,
+            modal,
+            SisiSumber::Token0,
+            kutipan_datar(1, 1),
+        )
+        .unwrap();
 
         let separuh = modal / U256::from(2u8);
         let selisih = if hasil.tukar > separuh {
@@ -427,9 +438,20 @@ mod tests {
         let sqrt_p = sqrt_di_tick(0);
         let modal = U256::from(12_345u64);
         for (a, b) in [(1u64, 1u64), (1, 1000), (1000, 1)] {
-            let hasil =
-                selesaikan(sqrt_p, -60, 60, modal, SisiSumber::Token0, kutipan_datar(a, b)).unwrap();
-            assert!(hasil.tukar <= modal, "menukar {} dari modal {modal}", hasil.tukar);
+            let hasil = selesaikan(
+                sqrt_p,
+                -60,
+                60,
+                modal,
+                SisiSumber::Token0,
+                kutipan_datar(a, b),
+            )
+            .unwrap();
+            assert!(
+                hasil.tukar <= modal,
+                "menukar {} dari modal {modal}",
+                hasil.tukar
+            );
         }
     }
 
@@ -467,8 +489,15 @@ mod tests {
     fn modal_nol_ditolak() {
         let sqrt_p = sqrt_di_tick(0);
         assert_eq!(
-            selesaikan(sqrt_p, -60, 60, U256::ZERO, SisiSumber::Token0, kutipan_datar(1, 1))
-                .unwrap_err(),
+            selesaikan(
+                sqrt_p,
+                -60,
+                60,
+                U256::ZERO,
+                SisiSumber::Token0,
+                kutipan_datar(1, 1)
+            )
+            .unwrap_err(),
             ZapError::ModalNol
         );
     }
@@ -477,8 +506,15 @@ mod tests {
     fn tick_terbalik_ditolak() {
         let sqrt_p = sqrt_di_tick(0);
         assert!(matches!(
-            selesaikan(sqrt_p, 60, -60, U256::from(1u8), SisiSumber::Token0, kutipan_datar(1, 1))
-                .unwrap_err(),
+            selesaikan(
+                sqrt_p,
+                60,
+                -60,
+                U256::from(1u8),
+                SisiSumber::Token0,
+                kutipan_datar(1, 1)
+            )
+            .unwrap_err(),
             ZapError::TickTerbalik { .. }
         ));
     }
@@ -506,8 +542,15 @@ mod tests {
     fn sumber_token1_bekerja_juga() {
         let sqrt_p = sqrt_di_tick(0);
         let modal = U256::from(1_000_000u64);
-        let hasil = selesaikan(sqrt_p, -600, 600, modal, SisiSumber::Token1, kutipan_datar(1, 1))
-            .unwrap();
+        let hasil = selesaikan(
+            sqrt_p,
+            -600,
+            600,
+            modal,
+            SisiSumber::Token1,
+            kutipan_datar(1, 1),
+        )
+        .unwrap();
         assert!(hasil.tukar <= modal);
         assert!(hasil.liquidity > 0);
     }
@@ -524,7 +567,10 @@ mod tests {
 
     #[test]
     fn porsi_token0_penuh_di_bawah_range() {
-        assert_eq!(porsi_token0_bps(sqrt_di_tick(-1000), 0, 600).unwrap(), 10_000);
+        assert_eq!(
+            porsi_token0_bps(sqrt_di_tick(-1000), 0, 600).unwrap(),
+            10_000
+        );
     }
 
     #[test]
@@ -538,8 +584,15 @@ mod tests {
         // jadi zap seharusnya menukar sedikit saja.
         let sqrt_p = sqrt_di_tick(-580);
         let modal = U256::from(1_000_000u64);
-        let hasil = selesaikan(sqrt_p, -600, 600, modal, SisiSumber::Token0, kutipan_datar(1, 1))
-            .unwrap();
+        let hasil = selesaikan(
+            sqrt_p,
+            -600,
+            600,
+            modal,
+            SisiSumber::Token0,
+            kutipan_datar(1, 1),
+        )
+        .unwrap();
         assert!(
             hasil.tukar < modal / U256::from(4u8),
             "menukar {} padahal posisinya hampir seluruhnya token0",
@@ -551,8 +604,15 @@ mod tests {
     fn range_condong_ke_bawah_butuh_lebih_banyak_token1() {
         let sqrt_p = sqrt_di_tick(580);
         let modal = U256::from(1_000_000u64);
-        let hasil = selesaikan(sqrt_p, -600, 600, modal, SisiSumber::Token0, kutipan_datar(1, 1))
-            .unwrap();
+        let hasil = selesaikan(
+            sqrt_p,
+            -600,
+            600,
+            modal,
+            SisiSumber::Token0,
+            kutipan_datar(1, 1),
+        )
+        .unwrap();
         assert!(
             hasil.tukar > modal / U256::from(2u8),
             "menukar {} padahal posisinya hampir seluruhnya token1",

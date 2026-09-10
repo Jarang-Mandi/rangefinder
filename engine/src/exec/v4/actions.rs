@@ -90,6 +90,29 @@ impl MintPosition {
     }
 }
 
+/// Parameter `INCREASE_LIQUIDITY` untuk NFT V4 yang sudah ada.
+pub fn increase_liquidity(
+    token_id: U256,
+    liquidity: u128,
+    amount0_max: u128,
+    amount1_max: u128,
+    hook_data: Bytes,
+) -> Aksi {
+    Aksi {
+        kode: kode::INCREASE_LIQUIDITY,
+        params: Bytes::from(
+            (
+                token_id,
+                U256::from(liquidity),
+                amount0_max,
+                amount1_max,
+                hook_data,
+            )
+                .abi_encode_params(),
+        ),
+    }
+}
+
 /// Parameter `SETTLE_PAIR`: dua currency yang harus dibayar penuh.
 pub fn settle_pair(currency0: Address, currency1: Address) -> Aksi {
     Aksi {

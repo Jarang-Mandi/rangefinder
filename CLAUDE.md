@@ -8,9 +8,49 @@ digeser diinjeksi ke chart TradingView milik gmgn.ai.
 > `docs/PRD.md` menjelaskan apa dan kenapa. Berkas ini menjelaskan bagaimana,
 > beserta hal hal yang gampang dirusak kalau tidak tahu.
 
-## Keadaan sekarang, 9 September 2026
+## Keadaan sekarang, 10 September 2026
 
-**Fase 0 sampai 6 selesai. Fase 7, yaitu self improvement, belum dimulai.**
+Audit integrasi dan pekerjaan tertinggal di `docs/PERBAIKAN.md` sudah ditutup
+pada kode dan pengujian lokal. Protokol sekarang versi 3. Quote membawa aset
+sumber, jumlah desimal, pilihan Zap, dan request ID. Persetujuan membawa plan
+ID, approval membawa step ID, dan hasil positions membawa versi kalibrasi.
+Engine serta ekstensi harus dibangun dan dimuat ulang bersama. Hasil async lama
+dibatasi generasi permintaan; pergantian input membatalkan rencana lama.
+
+Identitas posisi berbentuk chain:manager:token_id. Pemantauan engine berjalan
+tiap 30 detik, termasuk ketika panel tertutup. Jurnal `tx:v1` ditulis setelah
+signing dan sebelum broadcast, lalu receipt direkonsiliasi tanpa signer sampai
+20 konfirmasi. Koneksi putus mempertahankan hash dan nonce. Klaim dan close
+memakai event manager atau delta saldo aktual. Histori posisi tertutup tetap
+ada setelah NFT dibakar. Posisi V3 eksternal merekonstruksi lot setoran, collect,
+dan decrease dari log. V4 eksternal memakai batas jumlah dari calldata bertipe
+dan tetap ditandai perkiraan karena eventnya tidak membawa jumlah aktual. Nilai
+gas atau slippage yang tidak dapat dikonversi tidak diisi nol.
+
+Tambah likuiditas dan rebalance tersedia untuk V3 serta V4 melalui alur
+rencana, approval, simulasi, klik eksplisit, dan verifikasi. Rebalance V3
+menjalankan decrease, collect, burn, lalu mint dalam satu multicall. V4
+menjalankan burn, take, mint, lalu settle dalam satu `modifyLiquidities`.
+
+Gate risiko R1 membuktikan transfer penuh pada calldata LP yang persis akan
+dikirim. R2 melakukan `eth_call` jual kecil lewat SwapRouter02 V3 atau
+UniversalRouter V4 dengan kutipan dan allowance nyata. Zap juga disimulasikan
+dengan calldata, value, router, dan alamat pengirim yang persis sama sebelum
+signing. Pengukuran hook menghitung pool, umur, TVL USD, serta pemilik LP aktif
+unik. Lima kriteria yang lengkap membuat allowlist otomatis berumur 24 jam;
+kode dan empat slot proxy tetap dibaca ulang sebelum modal masuk.
+
+`learning.rs` mencatat vektor fitur pada open terverifikasi dan hasil PnL pada
+close. Monitor mengakumulasi waktu di dalam range. Kalibrasi dipisahkan per
+rezim, butuh 30 hasil lengkap, dan menjadi penantang selama 20 hasil baru.
+Bobot, ambang sinyal, faktor APR, dan faktor waktu punya batas keras. Tab PnL
+memfilter hasil berdasarkan versi. `cargo xtask calibration` menyediakan
+status, kalibrasi manual, replay hasil, replay candle historis, dan rollback.
+
+Bridge chart mengikat attach dan createShape ke generasi navigasi. Hasil shape
+lama dibersihkan pada chart pemiliknya, antrean halaman baru tidak menunggu
+shape iframe lama, dan dataReady dibatasi 15 detik. Perintah gambar membawa
+token dan divalidasi lagi terhadap URL tujuan oleh relay serta bridge.
 
 Setelah fase 6 ditutup, seluruh pekerjaan berikutnya adalah perbaikan yang
 datang dari user memakai panelnya sendiri. Itu tercatat di PRD 6.15, dan
@@ -29,16 +69,21 @@ paling ramai di rantai, dan menilai hook terhadap kriteria adopsi.
 secara bawaan, dan mematikannya adalah keputusan sadar user. Jangan pernah
 mematikannya atas inisiatif sendiri.
 
-### Yang belum dikerjakan
+### Batas pembuktian saat ini
 
-| Hal | Keterangan |
-| --- | --- |
-| Fase 7 | Self improvement, belum dimulai sama sekali |
-| Tambah likuiditas dan rebalance satu langkah | Sekarang harus tutup posisi lalu buka range baru, dua transaksi |
-| Uji transfer tax dan honeypot | PRD 5.4 butir 1 dan 2, belum ada. Label `Hindari` sekarang hanya dari hook |
-| TVL dan jumlah LP unik untuk allowlist hook | Dua dari lima kriteria adopsi belum bisa diukur, jadi tidak ada hook yang lolos otomatis |
-| Handle geser di atas histogram, tombol zoom | Ada di acuan MMT Finance, belum ditiru |
-| Toggle Zap mematikan zap di engine | Sekarang toggle hanya mengubah tampilan dan memberi peringatan |
+Transaksi dengan dana nyata belum pernah dijalankan. `execution.dry_run` tetap
+menyala sampai user sendiri mematikannya. Deteksi upgrade hook membaca empat
+slot proxy standar dan tidak dapat membuktikan pola proxy nonstandar yang tidak
+menaruh alamat implementasi atau admin di slot tersebut. Data holder serta umur
+token belum tersedia pada semua sumber; vektor self-improvement menyimpannya
+sebagai `null`, bukan nol, sampai ada bukti.
+
+Histogram sekarang memiliki handle batas bawah/atas, keyboard satu tick spacing
+(Shift sepuluh spacing), serta zoom 1x sampai 8x dan reset. `Histogram.tsx`
+memakai geometri harga logaritmis di `shared/histogram.ts`. Pembulatan batas
+tetap dilakukan engine. Fixture terisolasi dapat dijalankan dengan
+`node extension/scripts/preview-histogram.mjs`; interaksi browser diperiksa
+oleh `extension/fixtures/check-histogram.cjs` melalui Playwright CLI.
 
 ### Lima hal yang berulang kali menyesatkan
 
@@ -151,6 +196,7 @@ engine/                 biner `rangefinder`, plus pustaka `rangefinder_engine`
   src/pools/            penemuan pool V3 dan V4, penyaringan, pemeringkatan
     abi.rs              ikatan ABI baca saja. Tidak ada alamat di sini
   src/range/            kalibrasi kurs dari chart, tiga satuan, snap tick
+  src/learning.rs       fitur/hasil, kalibrasi per rezim, penantang, replay
   src/math/tick_math.rs        TickMath bilangan bulat, nilai untuk rantai
   src/math/liquidity_math.rs   LiquidityAmounts bilangan bulat
   src/exec/             jalur tulis. Satu satunya modul yang memindahkan dana
@@ -161,6 +207,9 @@ engine/                 biner `rangefinder`, plus pustaka `rangefinder_engine`
     limits.rs           gate G6, pembatas nilai dan slippage
     verify.rs           gate G7, baca ulang posisi lalu bandingkan
     pipeline.rs         perakitan seluruh gate jadi satu alur membuka posisi
+  src/positions/        posisi V3/V4 dan rekonstruksi histori eksternal
+  src/pnl/              akuntansi aktual dan histori posisi tertutup
+  src/risk/             hook, allowlist bytecode, transfer tax, jual kecil
   src/store/            redb, penyimpanan lokal
   src/wallet/           manajemen wallet
     keystore.rs         Argon2id plus AES-256-GCM
@@ -171,7 +220,7 @@ engine/                 biner `rangefinder`, plus pustaka `rangefinder_engine`
     routes.rs           handler HTTP
     ws.rs               WebSocket ke panel
 
-xtask/                  verify, docs-check, golden, dryrun, pairs, v4probe, zap, positions
+xtask/                  verify, docs-check, golden, dryrun, pairs, v4probe, zap, positions, calibration
   src/golden.rs         pengambil golden vector dari transaksi sungguhan
   src/dryrun.rs         jalankan pipeline penuh terhadap pool sungguhan
 extension/              ekstensi Chrome MV3
@@ -206,7 +255,7 @@ tersandung:
 | Desimal kutipan tidak pernah ditebak | `pools::kenali_quote` | Lawan yang tidak dikenal dibaca on chain, dan kalau gagal kelompoknya dibuang. Menebak 18 pada USDG menggeser harga sepuluh triliun kali |
 | Satu permintaan berat pada satu waktu | `pools::pindai_dan_gabung` | Dua getLogs berbarengan membuat yang kedua kena 429 lalu backoff, dan totalnya lima kali lebih lambat daripada berurutan |
 | Chain id diperiksa sebelum menandatangani | `exec/send.rs::send_calldata` | Tanda tangan untuk chain id yang salah bisa diputar ulang di rantai lain, dan tetap sah selamanya |
-| Nonce dilepas kalau pengiriman gagal, TIDAK dilepas kalau hanya receiptnya belum datang | `exec/nonce.rs` | Nonce yang bocor membuat transaksi berikutnya menggantung. Melepas nonce yang sudah terpakai membuat dua transaksi bertabrakan |
+| Transaksi yang sudah ditandatangani masuk jurnal sebelum broadcast dan nonce tetap ditahan saat hasil transport tidak pasti | `exec/journal.rs`, `exec/send.rs`, `exec/nonce.rs` | Melepas nonce setelah koneksi putus dapat membuat dua transaksi sah bertabrakan. Rekonsiliasi receipt atau bukti nonce pengganti yang menentukan akhirnya |
 | Receipt sukses belum berarti berhasil | `exec/send.rs` dan `exec/verify.rs` | G7 membaca ulang posisinya dari rantai. Transaksi bisa sukses sambil menghasilkan posisi yang berbeda dari niat kita |
 | Rencana disimpan di engine, tidak bolak balik lewat panel | `api/mod.rs::pending_plan` | Rencana yang kembali dari panel bisa saja sudah diubah, dan bagian yang paling menarik untuk diubah justru calldata-nya |
 | Rencana dikeluarkan dari slot sebelum dikirim | `api/mod.rs::kirim_open` | Rencana yang masih tersimpan setelah dikirim bisa disetujui dua kali, dan dua persetujuan berarti dua posisi |
@@ -247,6 +296,11 @@ tersandung:
 | Hook yang bisa diupgrade ditolak mutlak | `risk::hook`, `risk::persetujuan` | Kode yang diperiksa hari ini bukan kode yang akan berjalan besok. Penolakannya ditegakkan di engine, bukan hanya di panel |
 | Gagal membaca slot proxy sama dengan bisa diupgrade | `risk::hook::susun` | Yang belum terbukti aman bukan berarti aman |
 | Hitungan adopsi sebagian adalah batas bawah | `risk::hook::susun` | Sudah melewati ambang berarti pasti lolos. Belum melewati berarti belum tahu, bukan tidak. Menyimpulkan `tidak` akan menolak hook yang layak tanpa pernah terlihat |
+| LP unik adalah pemilik NFT aktif saat ini | `risk::hook::ukur_adopsi` | Salt event dipetakan ke token ID lalu `ownerOf` dibaca ulang. NFT terbakar tidak boleh tetap dihitung sebagai LP |
+| R1 dan R2 memakai jalur kontrak nyata | `risk/token.rs` | Metadata pajak pihak ketiga tidak membuktikan transfer wallet ke manager atau kemampuan menjual lewat router yang dipakai |
+| Zap disimulasikan utuh sebelum signing | `api/mod.rs::kirim_zap` | Kutipan saja tidak membuktikan allowance, hook, transfer, `msg.value`, serta minimum keluaran pada calldata gabungan |
+| Kalibrasi dipisah per rezim dan tidak langsung aktif | `learning.rs` | Tiga puluh hasil membentuk penantang. Dua puluh hasil berikutnya membandingkan penantang dengan juara sebelum promosi |
+| Rollback kalibrasi tidak menghapus histori | `learning.rs::rollback` | Menghapus versi lama membuat hasil sebelum dan sesudah perubahan tidak dapat dibandingkan lagi |
 | Batas pita dinamai menurut harga, bukan tick | `pools::distribusi` | Pada pool yang memecoinnya token1, tick lebih besar berarti harga lebih rendah. Histogram yang terbalik tetap terlihat masuk akal |
 | Harga sekarang selalu tercakup satu pita | `pools::distribusi::rangkai` | Pool yang ticknya hanya di satu sisi pernah menghasilkan histogram tanpa pita aktif sama sekali |
 | Pita penutup dipotong di batas tampilan | `pools::distribusi` | Satu kata bitmap bisa mencakup ratusan persen. Batang terpanjang karena lebar, bukan karena padat, menyesatkan justru di bagian yang paling dibaca |
@@ -300,20 +354,28 @@ bytecode yang tidak cocok dengan yang dipin.
 | 2 | Injeksi chart dan matematika satuan | **selesai**. Penemuan pool, kalibrasi kurs dari chart, konversi tiga satuan, snap tick beserta laporan drift, lingkaran penuh panel ke chart ke engine, dan uji integrasi terhadap snapshot gmgn |
 | 3 | Eksekusi V3 | **selesai**. Gate G0 sampai G7 terangkai dan terbukti jalan terhadap pool sungguhan lewat `cargo xtask dryrun`: versi protokol, pembatas nilai, builder calldata, golden vector, simulasi, asersi invarian, izin ERC20, pengiriman beserta penjaga chain id dan nonce, serta verifikasi pasca kirim. Jalur panel lengkap: `quote_range`, `approve_token`, `open_position`. Yang belum pernah terjadi: satu pengiriman sungguhan, karena `dry_run` menyala secara bawaan dan mematikannya adalah keputusan user |
 | 4 | Eksekusi V4 dan zap | **selesai**. ABI V4 dibuktikan ada di bytecode terpasang lewat `cargo xtask v4probe`, encoder aksi menghasilkan byte identik dengan transaksi V4 sungguhan sepanjang 868 byte, izin dua lapis lewat Permit2, gate G0 sampai G7 terangkai. Zap satu sisi memakai kutipan V4Quoter dan penyelesai bagi dua, dan encoder UniversalRouter fork membangun ulang transaksi swap sungguhan 1124 byte byte per byte termasuk field `minHopPriceX36`. `cargo xtask dryrun` dan `cargo xtask zap` hijau terhadap pool nyata |
-| 5 | Positions, PnL, notifikasi | **selesai**. Posisi V3 lewat ERC721Enumerable dan V4 lewat pemindaian Transfer, karena V4 tidak punya enumerasi. Fee dibaca dari pertumbuhan fee, bukan `tokensOwed`. PnL memisahkan fee, impermanent loss, gas, dan slippage, dinyatakan dalam token kutipan. Toast diinjeksi ke halaman gmgn dengan pendinginan dan riwayat, dan content script menyambung sendiri ke engine supaya kabar tetap sampai saat panel tertutup. Terbukti terhadap wallet sungguhan lewat `cargo xtask positions`. Klaim fee dan tutup posisi bisa dijalankan dari kartu, dengan simulasi ditampilkan sebelum tombol konfirmasi aktif. Yang belum: tambah likuiditas dan rebalance dalam satu langkah |
-| 6 | Signals dan doktrin penempatan | **selesai**. Detektor sideways dan detektor dump lalu basis, keduanya murni dan diuji tanpa rantai, ditambah doktrin penempatan yang selalu menyertakan alasannya. Optimizer fee tier terbukti lewat `cargo xtask optimizer`. Pemindaian banyak token berjalan dari log rantai, bukan API gmgn, dan menghasilkan daftar berlabel di tab Signals lewat `cargo xtask scan`. Gate hook PRD 5.4 terpasang: tiga dari lima kriteria adopsi terukur, hook yang bisa diupgrade ditolak mutlak, dan sisanya lewat persetujuan sadar user yang dicatat |
-| 6b | Perbaikan dari pemakaian | **selesai**. Distribusi likuiditas untuk V3 dan V4, statistik pool, setoran dua sisi beserta saldo wallet, perkiraan gas, Settings sebagai tab tersendiri, dan penyuntingan RPC. Seluruh keputusannya tercatat di PRD 6.15 || 7 | Self improvement | belum |
+| 5 | Positions, PnL, notifikasi | **selesai**. Posisi V3 lewat ERC721Enumerable dan V4 lewat pemindaian Transfer. Fee dibaca dari pertumbuhan fee. PnL memisahkan fee, IL, gas, dan slippage, serta mempertahankan `null` untuk komponen yang belum terbukti. Histori eksternal V3 direkonstruksi dari event; V4 memakai batas calldata sebagai perkiraan. Klaim, close, tambah likuiditas, dan rebalance tersedia lewat rencana dan klik eksplisit |
+| 6 | Signals dan doktrin penempatan | **selesai**. Detektor sideways serta dump lalu basis, doktrin penempatan, optimizer fee tier, dan scan berlabel tersedia. Gate hook mengukur kelima kriteria on chain dan dapat membuat allowlist otomatis 24 jam. Transfer tax jalur LP dan jual kecil dibuktikan melalui simulasi kontrak nyata |
+| 6b | Perbaikan dari pemakaian | **selesai**. Distribusi likuiditas V3/V4, histogram interaktif, statistik pool, setoran dua sisi, saldo wallet, perkiraan gas, Settings, snapshot konsisten, isolasi tab, dan Zap satu sisi terhubung dari panel sampai engine |
+| 7 | Self improvement | **selesai**. Vektor fitur dan hasil tersimpan per posisi, kalibrasi per rezim memakai minimum 30 hasil, penantang 20 hasil, batas keras, filter PnL per versi, replay hasil/candle, serta rollback satu perintah |
 
 ### Bukti fase 1 selesai
 
 Diverifikasi langsung, bukan diasumsikan:
 
 ```
-cargo test               68 lolos, 0 gagal
-cargo clippy             bersih
-cargo xtask verify       HIJAU, registry 17 dari 17 cocok, dokumen lengkap
-npm test  (extension)    17 lolos, uji terhadap snapshot gmgn
+cargo test --workspace   511 lolos, 1 uji jaringan diabaikan, 3 uji xtask lolos
+cargo clippy             bersih dengan warnings sebagai error
+cargo xtask docs-check   dokumen dan kontrak pesan sinkron
+npm test  (extension)    39 lolos, typecheck dan build bersih
 ```
+
+Bundle ekstensi juga dimuat sebagai ekstensi unpacked pada Chromium dan diuji
+di dua tab token GMGN nyata. Masing masing tab mencapai capability tier 1.
+Navigasi SPA menunggu sampai `activeChart().symbol()` cocok dengan token baru,
+sehingga harga token lama tidak pernah dikirim memakai alamat baru. Dua garis
+dibuat pada chart berisi candle lalu dibersihkan kembali tanpa menghapus shape
+lain.
 
 Engine dijalankan sungguhan terhadap Robinhood Chain: RPC sehat, gate G1 lolos
 17 dari 17, server terikat 127.0.0.1:8787. Endpoint diuji lewat HTTP: `/v1/ping`

@@ -13,7 +13,7 @@
  *   panel yang punya siklus hidup jelas.
  */
 
-const GMGN_TOKEN_URL = /^https:\/\/gmgn\.ai\/[a-z0-9]+\/token\//;
+import { chartMessage, robinhoodToken } from "../shared/chart-messages";
 
 chrome.runtime.onInstalled.addListener(() => {
   // Klik ikon ekstensi membuka side panel, bukan popup.
@@ -31,14 +31,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const m = message as Record<string, unknown>;
 
   if (m.source === "gmgn-chart") {
+    if (sender.id !== chrome.runtime.id || sender.frameId !== 0 || sender.tab?.id === undefined) return false;
+    const payload = chartMessage(m, sender.url ?? "");
+    if (!payload || (payload.kind === "token_page" && !sender.tab.active)) return false;
     chrome.runtime
-      .sendMessage({ target: "sidepanel", tabId: sender.tab?.id, ...m })
+      .sendMessage({ ...payload, source: "gmgn-chart", target: "sidepanel", tabId: sender.tab.id })
       .catch(() => {});
     return false;
   }
 
   // Panel meminta navigasi ke halaman token tertentu. Lihat PRD 3.3.
   if (m.target === "navigate-gmgn" && typeof m.url === "string") {
+    if (sender.tab || sender.id !== chrome.runtime.id || !robinhoodToken(m.url)) return false;
     void navigateToToken(m.url).then((tabId) => sendResponse({ tabId }));
     return true;
   }
@@ -72,9 +76,16 @@ async function navigateToToken(url: string): Promise<number | undefined> {
  */
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status !== "complete") return;
-  if (!tab.url || !GMGN_TOKEN_URL.test(tab.url)) return;
+  if (!tab.active || !tab.url || !robinhoodToken(tab.url)) return;
 
   chrome.runtime
     .sendMessage({ target: "sidepanel", kind: "token_page", url: tab.url, tabId })
     .catch(() => {});
+});
+
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+  void chrome.tabs.get(tabId).then(tab => {
+    if (!tab.url || !robinhoodToken(tab.url)) return;
+    return chrome.runtime.sendMessage({ target: "sidepanel", kind: "token_page", url: tab.url, tabId });
+  }).catch(() => {});
 });

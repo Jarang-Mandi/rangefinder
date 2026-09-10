@@ -15,26 +15,31 @@
  */
 
 import { mulaiNotifikasi } from "./notifikasi";
+import { chartCommand, chartMessage } from "../shared/chart-messages";
 
 const CHANNEL = "rangefinder";
 
 window.addEventListener("message", (event) => {
   if (event.source !== window) return;
+  if (event.origin !== location.origin) return;
   const data = event.data as Record<string, unknown> | null;
   if (!data || data.channel !== CHANNEL || data.direction !== "from-page") return;
 
-  const { channel: _c, direction: _d, ...payload } = data;
-  chrome.runtime.sendMessage({ source: "gmgn-chart", ...payload }).catch(() => {
+  const payload = chartMessage(data, location.href);
+  if (!payload) return;
+  chrome.runtime.sendMessage({ ...payload, source: "gmgn-chart" }).catch(() => {
     // Service worker sedang tidur atau panel tertutup. Bukan kondisi error.
   });
 });
 
-chrome.runtime.onMessage.addListener((message: unknown) => {
+chrome.runtime.onMessage.addListener((message: unknown, sender) => {
+  if (sender.id !== chrome.runtime.id || sender.tab) return;
   const m = message as Record<string, unknown> | null;
   if (!m || m.target !== "gmgn-chart") return;
 
-  const { target: _t, ...payload } = m;
-  window.postMessage({ channel: CHANNEL, direction: "to-page", ...payload }, "*");
+  const payload = chartCommand(m, location.href);
+  if (!payload) return;
+  window.postMessage({ ...payload, channel: CHANNEL, direction: "to-page" }, location.origin);
 });
 
 // Notifikasi menyambung sendiri ke engine, tidak lewat panel. Alasannya ada di

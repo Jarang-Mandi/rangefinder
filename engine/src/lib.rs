@@ -13,6 +13,7 @@ pub mod chain;
 pub mod config;
 pub mod error;
 pub mod exec;
+pub mod learning;
 pub mod math;
 pub mod notify;
 pub mod pnl;

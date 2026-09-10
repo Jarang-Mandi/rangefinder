@@ -6,7 +6,7 @@ Product Requirements Document
 | --- | --- |
 | Versi | 0.1 (draft untuk review) |
 | Tanggal | 5 September 2026 |
-| Status | Belum ada kode. Dokumen ini adalah kontrak sebelum implementasi. |
+| Status | Implementasi aktif. Audit integrasi dan pekerjaan tertinggal dilacak di `docs/PERBAIKAN.md`. |
 | Repo | `D:\Rangefinder` |
 
 ## Keputusan yang sudah terkunci
@@ -353,12 +353,21 @@ document_idle
   -> tunggu iframe dengan id berpola /^tradingview_/ muncul (MutationObserver, timeout 15 detik)
   -> tunggu iframe.contentWindow.tradingViewApi terisi (poll 50 ms, timeout 15 detik)
   -> tunggu activeChart().dataReady(cb) memanggil balik
+  -> cocokkan alamat pada activeChart().symbol() dengan token URL
   -> probe kapabilitas, kirim laporan ke side panel
   -> gambar garis
   -> subscribe('drawing_event')
 ```
 
 Probe kapabilitas memeriksa keberadaan setiap method yang dipakai, lalu mengirim hasilnya ke panel sebagai status chip. Jika satu method hilang karena gmgn mengganti versi Charting Library, panel menampilkan mode degradasi yang aktif, bukan gagal diam diam.
+
+Jika batas tunggu habis, bridge melaporkan tingkat 3 lalu mencoba attach lagi
+dengan satu timer selama token dan generasinya belum berubah. Ini diperlukan
+karena profil browser baru pernah menerima `tradingViewApi` lebih dari 15 detik
+sesudah `document_idle`. Pada navigasi SPA, GMGN juga mengganti URL sebelum API
+chart berpindah. Bridge tidak mengirim `token_page`, harga, atau candle sampai
+alamat pada simbol chart cocok dengan URL, sehingga data token lama tidak bisa
+diberi label token baru.
 
 ### 4.2 Menggambar dan membaca garis
 
@@ -677,8 +686,17 @@ Kelompok kedua dari simulasi on chain, mahal tapi wajib sebelum modal masuk:
 
    Karena itu ujinya adalah simulasi terhadap **jalur persis yang akan dipakai saat mint**, yaitu dari wallet ke PositionManager lalu ke pool. Ukur selisih antara jumlah yang dikirim dan jumlah yang benar benar diterima pool. Selisih nol berarti jalur itu dikecualikan dari pajak dan token boleh di-LP. Selisih bukan nol adalah blokir keras, karena matematika concentrated liquidity mengasumsikan transfer tepat, dan posisi bisa berakhir tidak bisa ditutup dengan benar.
 
-   Hasil uji disimpan di `tokens.tax_verified_at` beserta nilainya, dan diuji ulang jika sudah lebih tua dari 24 jam, karena kontrak dengan owner aktif bisa mengubah daftar pengecualian kapan saja.
-2. **Uji honeypot.** Simulasikan jual kecil lewat router. Jika revert, token ditolak.
+   Implementasi menyimpan bukti pada namespace
+   `risk/token:v1:<chain>:<pool>:<token>`. Gate R1 tidak memakai angka metadata:
+   ia menerima hanya jika G4 dan G5 pada calldata LP yang persis akan dikirim
+   sama sama lolos. Uniswap core menolak penyelesaian ketika jumlah yang diterima
+   kurang dari delta yang diminta. Bukti diuji ulang pada setiap penyusunan
+   rencana, sehingga tidak pernah mengandalkan cache berumur 24 jam.
+2. **Uji honeypot.** R2 mengutip dan mensimulasikan jual sekitar 0,10 USD lewat
+   router sebenarnya dari alamat wallet. V3 memakai QuoterV2 dan SwapRouter02;
+   V4 memakai V4Quoter dan UniversalRouter fork Robinhood. Allowance aktual,
+   `msg.value`, batas slippage, dan seluruh transfer dijalankan dalam `eth_call`.
+   Revert, keluaran nol, allowance kurang, atau kegagalan RPC adalah blokir.
 3. **Uji hook V4 dengan allowlist berbasis adopsi.** Baca alamat hook dari PoolKey. Hook nol berarti aman.
 
    Keputusan user: hook yang sudah ramai dipakai orang boleh langsung masuk allowlist. Supaya itu bisa dijalankan mesin dan bukan tebakan, adopsi diukur, bukan dikira kira. Sebuah hook masuk allowlist otomatis jika memenuhi seluruh syarat berikut, dihitung dari data on chain:
@@ -696,19 +714,21 @@ Kelompok kedua dari simulasi on chain, mahal tapi wajib sebelum modal masuk:
    Hook yang belum lolos tetap bisa dipakai user secara manual lewat pilihan sadar per pool, yang menampilkan peringatan dan mencatat persetujuannya. Yang otomatis hanya penolakan bawaannya.
 4. **Uji likuiditas terkunci.** Verifikasi bahwa pool bukan pool palsu yang bisa dikuras kreator.
 
-**Keadaan pengukuran butir 3 per 8 September 2026.** Tiga dari lima syarat sudah
-terukur di `risk::hook`: jumlah pool dari event `Initialize`, umur dari blok
-`Initialize` paling awal, dan bisa tidaknya diupgrade dari slot proxy EIP-1967
-beserta EIP-1822. Dua sisanya belum: TVL menuntut distribusi likuiditas per
-pool, dan jumlah LP unik menuntut penelusuran setiap tokenId PositionManager
-sampai ke pemiliknya.
+**Keadaan pengukuran butir 3 per 10 September 2026.** Kelima syarat sudah
+terukur di `risk::hook`. Pool dan umur berasal dari event `Initialize` yang
+di-dedup menurut poolId. Setelah sejarah Initialize lengkap, event
+`ModifyLiquidity` PositionManager memetakan salt ke token ID; `ownerOf` dibaca
+ulang lewat Multicall agar posisi terbakar tidak dihitung dan alamat pemilik
+aktif dapat didedup. TVL dibentuk dari distribusi likuiditas tiap pool pada
+jendela harga yang sama, USDG dinilai langsung, dan ETH/WETH dikonversi dengan
+pool V3 WETH/USDG berlikuiditas aktif terkuat.
 
-Yang belum terukur TIDAK dibulatkan menjadi lolos. Akibatnya tidak ada hook
-yang bisa lolos otomatis untuk sekarang, dan itu memang sesuai permintaan
-bagian ini bahwa seluruh syarat harus terpenuhi. Jalan keluarnya adalah
-persetujuan sadar per hook yang sudah disebutkan di atas, dan itulah yang
-terpasang: `approve_hook` mencatat persetujuan beserta penilaian saat itu,
-supaya keputusannya bisa ditinjau ulang dengan angka yang user lihat waktu itu.
+Pemindaian yang belum sampai deploy block menghasilkan batas bawah, bukan
+kesimpulan palsu. Batas bawah yang sudah melewati ambang boleh membuktikan
+lolos; angka di bawah ambang tetap `belum_terukur` sampai sejarah lengkap.
+Hook yang memenuhi kelima syarat dicatat otomatis selama 24 jam. Setiap modal
+masuk tetap membaca ulang code hash dan empat slot proxy. Hook lain memakai
+`approve_hook`, yang mencatat penilaian dan hash bytecode yang dilihat user.
 
 Satu satunya syarat yang tidak bisa dilewati persetujuan adalah kemampuan
 upgrade, dan penolakannya ditegakkan di engine, bukan hanya di panel. Panel
@@ -933,10 +953,13 @@ Panel tidak pernah tahu protokol mana yang dipakai. Ia menerima daftar langkah i
 
 ### 6.4 Gate validasi berlapis
 
-Ini permintaan eksplisit: V3 dan V4 sekaligus, tapi bug tidak boleh terjadi. Tujuh lapis, setiap transaksi wajib melewati semuanya, tidak ada jalan pintas.
+Ini permintaan eksplisit: V3 dan V4 sekaligus, tapi bug tidak boleh terjadi.
+Gate utama G0 sampai G7 ditambah dua gate token R1 dan R2. Setiap transaksi
+modal masuk wajib melewati gate yang berlaku, tanpa jalan pintas.
 
 | Lapis | Nama | Isi |
 | --- | --- | --- |
+| G0 | Versi protokol | Pool V3 hanya masuk builder V3 dan pool V4 hanya masuk builder V4. Kontrak tujuan, izin, simulasi, serta verifikasi dipilih bersama. |
 | G1 | Verifikasi registry saat start | Setiap alamat kontrak di konfigurasi dicek `eth_getCode`, hash bytecode dibandingkan dengan nilai yang dipin di repo. Beda berarti engine menolak jalan. |
 | G2 | Builder calldata bertipe | Semua struct dibangun lewat tipe Rust dari ABI, bukan string. Unit test per fungsi. |
 | G3 | Golden vector | Calldata hasil builder dibandingkan byte per byte dengan calldata dari transaksi yang benar benar berhasil di rantai. Wajib untuk V3 mint, V4 mint, dan setiap jalur router. Perbedaan sekecil apa pun menggagalkan build. |
@@ -959,6 +982,8 @@ saat dana bergerak.
 | G5 | Asersi invarian | Hasil simulasi diperiksa: tokenId tercipta, delta likuiditas sesuai, jumlah token dalam batas slippage, tidak ada token tersisa di kontrak, tick akhir sama dengan yang diminta. |
 | G6 | Pembatas nilai | Mode dry run untuk semua fitur baru. Batas nominal per transaksi dan per hari. Posisi pertama pada pool baru dibatasi ke ukuran kecil yang bisa diatur. |
 | G7 | Verifikasi pasca kirim | Setelah receipt, engine membaca ulang posisi on chain dan membandingkan dengan yang diharapkan. Selisih memicu alarm dan menghentikan otomasi. |
+| R1 | Transfer penuh jalur LP | Keberhasilan G4 dan G5 pada calldata LP membuktikan manager dan pool menerima jumlah penuh. Transfer tax yang memotong jalur ini memblokir modal masuk. |
+| R2 | Jual kecil | Quoter menentukan minimum keluaran, lalu router V3/V4 menjalankan jual kecil lewat `eth_call` dari wallet dengan allowance sebenarnya. Revert dan hasil nol memblokir modal masuk. |
 
 Tambahan uji diferensial: jalur V3 dan V4 diberi input range yang sama, lalu jumlah token yang mereka hitung dibandingkan satu sama lain dan dengan quoter resmi. Ketiganya harus cocok dalam toleransi satu wei per basis. Ini menangkap kesalahan konversi tick dan pembulatan yang lolos dari unit test biasa.
 
@@ -1005,6 +1030,11 @@ Kutipan yang menjawab nol diperlakukan sebagai kegagalan, bukan sebagai jawaban.
 Konsekuensinya harga bisa bergerak di antara kedua transaksi. Yang menahan itu adalah `amountOutMinimum`, dan kalau pergerakannya melewati batas slippage, swapnya gagal tanpa memindahkan apa pun alih alih menghasilkan posisi timpang.
 
 Setelah swap berhasil, panel membuang rencana lama supaya jumlahnya dihitung ulang dari saldo yang baru. Menyusun posisi dari angka sebelum swap akan meleset persis sebesar hasil swapnya.
+
+Sebelum signing, engine juga menjalankan calldata Zap yang persis sama lewat
+`eth_call` dengan router, pengirim, calldata, dan `msg.value` yang akan dipakai.
+Ini membuktikan allowance, transfer, hook, serta `amountOutMinimum` bersama.
+Estimasi gas pada pintu kirim mengulang simulasi karena state dapat berubah.
 
 **Ambang kelayakan.** Zap hanya ditawarkan kalau modal yang akan menganggur melebihi satu persen. Di bawah itu, biaya gas dan slippage sebuah swap lebih besar daripada perbaikannya.
 
@@ -1299,6 +1329,14 @@ tergambar tetap sama, dan tidak pernah menggabung pita yang memuat harga
 sekarang. Engine tetap mengirim data lengkap, karena meringkas di sana berarti
 membuang informasi yang tidak bisa dikembalikan.
 
+Histogram memiliki sumbu harga logaritmis, handle bawah merah dan atas hijau.
+Drag mengirim perubahan melalui `set_range` saat dilepas, lalu engine melakukan
+snap tick. Tombol panah mengubah satu tick spacing, Shift sepuluh spacing.
+Zoom 1x, 2x, 4x, 8x beserta reset hanya mengubah jendela gambar, tidak mengubah
+range atau mengarang likuiditas di luar data yang sudah dibaca. Setiap commit
+range membatalkan rencana setoran lama. Pengujian browser fixture memakai
+komponen produksi pada lebar 320, 360, dan 480 piksel.
+
 **Preset range menandai dirinya dari lebar yang sebenarnya berlaku**, bukan dari
 tombol mana yang terakhir ditekan. Engine membulatkan batas ke grid tick,
 sehingga lebarnya bisa bergeser sedikit, dan menandai tombol menurut ingatan
@@ -1418,7 +1456,7 @@ Engine Rust  127.0.0.1:8787
   exec        builder calldata V3, V4, router_rbh, gate validasi, simulasi, kirim
   pnl         cost basis, fee, IL, gas, slippage
   wallet      keystore terenkripsi, Windows Credential Manager
-  store       SQLite lewat sqlx
+  store       redb lokal dengan pembaruan atomik
 ```
 
 Alasan pembagian: browser memegang sesi gmgn dan chart, sehingga semua yang butuh identitas gmgn tinggal di browser. Engine memegang kunci, matematika, dan kecepatan, sehingga tidak pernah bergantung pada tab yang bisa ditutup user.
@@ -1443,12 +1481,15 @@ pesan mulai ada. `cargo xtask docs-check` memeriksa satu arah: setiap pesan yang
 sudah ada di kode wajib tercantum di sini. Sebaliknya tidak diwajibkan, karena
 rencana boleh mendahului implementasi.
 
+Versi protokol saat ini 3. Nama field di kabel memakai snake_case. Engine dan
+ekstensi harus dimuat ulang bersama ketika kontrak ini berubah.
+
 Panel ke engine:
 
 | Pesan | Isi | Fase |
 | --- | --- | --- |
 | `get_status` | tanpa isi, minta kiriman status terbaru sekarang juga | 1 |
-| `ping` | denyut, sekaligus memundurkan kunci otomatis | 1 |
+| `ping` | denyut koneksi saja. Tidak memperpanjang waktu buka wallet karena tab notifikasi pasif juga mengirimnya | 1 |
 | `unlock_wallet` | `{ passphrase }`, lewat HTTP bukan WebSocket | 1 |
 | `subscribe_token` | `{ address }` | 2 |
 | `chart_price` | `{ address, mcapUsd }`, market cap yang sedang ditampilkan chart. Inilah yang mengkalibrasi kurs ETH ke USD | 2 |
@@ -1457,18 +1498,20 @@ Panel ke engine:
 | `select_quote` | `{ quote }`, user berpindah ke pasangan token lawan yang lain. Tidak menyentuh jaringan, seluruh kelompok sudah ada di memori sejak token dimuat | 2 |
 | `set_range` | `{ lowerMcap, upperMcap }`, user menggeser garis. Batas dalam market cap USD karena itu satuan chart | 2 |
 | `set_full_range` | tanpa isi. Pasang range selebar yang diizinkan protokol. Pesan tersendiri, bukan `set_range` dengan angka raksasa: market cap dikali sepuluh pangkat empat puluh menghasilkan harga yang tidak lagi bisa diubah menjadi tick, dan engine menolaknya tanpa ada yang berubah di layar. Batas sebenarnya hanya diketahui engine, karena ia bergantung pada tick spacing pool | 6 |
-| `quote_range` | `{ sizeUsd }`. Susun rencana pada pool dan range yang sedang aktif, jalankan seluruh gate, TIDAK mengirim apa pun. Pool dan tick tidak ikut dikirim panel: keduanya sudah ada di engine, dan menerimanya dari panel berarti menerima parameter transaksi dari luar | 3 |
-| `approve_token` | `{ token }`. Kerjakan langkah izin PERTAMA yang masih kurang untuk token itu. Pada V3 satu langkah sudah cukup, pada V4 ada dua karena izinnya lewat Permit2, jadi pesannya dikirim dua kali. Jumlah dan spender datang dari engine, bukan dari panel | 3 |
-| `swap_zap` | tanpa isi. Menjalankan swap zap dari rencana terakhir lewat UniversalRouter. Transaksi terpisah dari membuka posisi, lihat 6.7 | 4 |
-| `open_position` | tanpa isi. Menyetujui rencana terakhir yang tersimpan di engine. Rencana tidak pernah bolak balik lewat panel, karena bagian yang paling menarik untuk diubah justru calldata-nya | 3 |
+| `invalidate_plan` | tanpa isi, membatalkan rencana saat setoran sedang disunting | 3 |
+| `quote_range` | `{ deposit: { side, amount, zap }, request_id }`. `side` bernilai `meme` atau `quote`, `amount` string desimal token sumber. Engine membaca ulang pool, menghitung sisi pasangan, serta membatasi dana pada anggaran tersebut. Tidak mengirim transaksi | 3 |
+| `approve_token` | `{ plan_id, step_id }`. Setujui langkah izin pertama dalam rencana itu. Token, spender, dan jumlah diambil dari langkah tersimpan, termasuk izin UniversalRouter. Setiap klik paling banyak satu transaksi | 3 |
+| `swap_zap` | `{ plan_id }`. Jalankan swap zap dari rencana itu. Setelah receipt sukses, engine menyusun preview mint dari sisa modal dan hasil swap terukur; mint tetap memerlukan persetujuan terpisah | 4 |
+| `open_position` | `{ plan_id }`. Setujui rencana tersimpan yang ID, revisi, serta masa berlakunya masih cocok. Rencana dikeluarkan sebelum pengiriman. Calldata tetap hanya berada di engine | 3 |
 | `rebalance` | `{ positionId, tickLower, tickUpper }` | 3 |
 | `claim` | `{ positionId, swapToEth }` | 3 |
 | `close` | `{ positionId, swapToEth }` | 3 |
 | `get_positions` | tanpa isi. Muat ulang posisi LP wallet dari rantai. Menyentuh jaringan, jadi jawabannya datang belakangan sebagai `positions` | 5 |
+| `get_transactions` | tanpa isi. Baca jurnal transaksi lokal untuk wallet aktif. Tidak membutuhkan signer dan tidak menyiarkan ulang transaksi | 5 |
 | `get_notifications` | tanpa isi. Minta riwayat notifikasi terakhir | 5 |
-| `plan_action` | `{ tokenId, action }` dengan `action` bernilai `klaim_fee` atau `tutup_posisi`. Menyusun dan menyimulasikan aksi, TIDAK mengirim apa pun | 5 |
-| `execute_action` | tanpa isi. Menyetujui aksi terakhir yang tersimpan di engine | 5 |
-| `approve_hook` | `{ hook }`. Catat persetujuan sadar user atas sebuah hook V4 yang belum lolos kriteria adopsi 5.4. Engine menilai ulang hooknya sendiri sebelum mencatat, karena penilaian yang datang dari panel bisa saja sudah diubah, dan bagian yang paling menarik untuk diubah justru kesimpulan bisa diupgrade atau tidaknya. Hook yang masih bisa diupgrade ditolak di sini juga | 6 |
+| `plan_action` | `{ position_id, request_id, action, input }`. Identitas posisi adalah chain:manager:token_id. `input` membawa amount0/amount1 untuk tambah likuiditas; rebalance memakai range aktif yang terlihat di chart. Engine membaca ulang posisi dan kepemilikannya sebelum menyusun dan menyimulasikan aksi | 5 |
+| `execute_action` | `{ plan_id }`. Setujui ID aksi yang ditampilkan. Rencana lama, kedaluwarsa, atau belum lolos gate ditolak | 5 |
+| `approve_hook` | `{ hook }`. Catat persetujuan sadar user atas sebuah hook V4 yang belum lolos kriteria adopsi 5.4. Engine menilai ulang hooknya sendiri sebelum mencatat, karena penilaian yang datang dari panel bisa saja sudah diubah, dan bagian yang paling menarik untuk diubah justru kesimpulan bisa diupgrade atau tidaknya. Hook yang masih bisa diupgrade ditolak di sini juga. Penilaian menyimpan code_hash; quote, approval token, zap, dan mint memeriksa ulang kode serta slot proxy. Pencabutan membatalkan revisi rencana, dan hasil penilaian lama tidak boleh menghidupkan kembali persetujuan | 6 |
 | `forget_hook` | `{ hook }`. Cabut persetujuan sebuah hook | 6 |
 | `set_rpc` | `{ http[] }`. Tulis daftar endpoint RPC baru ke config.toml. HANYA menulis: endpoint yang sedang dipakai tidak ditukar saat engine berjalan, karena permintaan yang sudah berangkat ke satu RPC tidak boleh ditunggu jawabannya dari yang lain. Panel diberi tahu bahwa engine perlu dijalankan ulang | 6 |
 | `get_depth` | tanpa isi. Minta distribusi likuiditas pool yang sedang aktif. Terpisah dari `range_view` dengan sengaja: distribusi butuh dua perjalanan ke rantai sedangkan `range_view` dikirim ulang setiap geseran garis, dan menggabungkannya membuat garis terasa berat persis saat digeser | 6 |
@@ -1481,16 +1524,17 @@ Engine ke panel:
 | `hello` | `{ engineVersion, protocolVersion }`, dikirim sekali saat tersambung | 1 |
 | `engine_status` | `{ engineVersion, uptimeSecs, chain, wallet, registry, canExecute, blockedReasons[], rpcHttp[] }`. `rpcHttp` sudah tersunting kuncinya oleh `chain::endpoint` saat endpointnya dibuat, bukan saat ditampilkan | 1 |
 | `pong` | balasan denyut | 1 |
-| `open_plan` | rencana lengkap beserta hasil tiap gate, `setor` berisi jumlah tiap sisi yang sudah berdesimal beserta nilainya dalam kutipan, `aprEstimasi` memakai modal yang benar benar disetor sehingga pengenceran oleh modal sendiri ikut terhitung, `version` bernilai `v3` atau `v4`, daftar langkah izin yang masih kurang, `zap` kalau modal perlu ditukar lebih dulu, dan kapan rencananya kedaluwarsa. Setiap langkah izin membawa `{ jenis, token, needed, current, label }`, dan bentuknya seragam untuk kedua protokol | 3 |
-| `send_result` | `{ kind, txHash, nonce, gasLimit, status, blockNumber, gasUsed, tokenId, verification, sentAt }`. `kind` bernilai `approve`, `zap`, `open`, atau `action`. `status` bernilai `sukses`, `revert`, atau `menggantung` | 3 |
+| `open_plan` | `{ plan_id, request_id, deposit, ... }`, seluruh gate termasuk R1/R2, setor, APR yang sudah memakai versi kalibrasi aktif, gas_biaya, gas_gwei, version, zap, expires_at. Langkah izin membawa `{ step_id, jenis, token, spender, needed, current, label }`. Panel hanya menerima request_id miliknya. TVL tidak terbaca ditampilkan kosong, bukan nol | 3 |
+| `send_result` | `{ kind, tx_hash, nonce, gas_limit, status, block_number, gas_used, gas_cost_wei, minted_amounts, token_id, verification, sent_at }`. Gas berasal dari gasUsed dan effectiveGasPrice receipt; null jika belum diketahui. minted_amounts berisi amount0/amount1 aktual dari event manager V3, null jika belum dibuktikan. `kind`: `approve`, `zap`, `open`, `action`. `status`: `sukses`, `revert`, `menggantung` | 3 |
 | `alert` | `{ level, code, message, positionId }` | 1 |
-| `positions` | `{ positions[], owner, keluarRange, error, dimuatPada }`. Setiap posisi membawa versi protokol, PoolKey, tick, likuiditas, status in range, dan fee yang belum diklaim | 5 |
+| `positions` | `{ positions[], tertutup[], owner, keluar_range, ringkasan, learning, error, dimuat_pada }`. Posisi membawa position_id berisi chain:manager:token_id. `fee0`, `fee1`, fee PnL, gas, slippage, dan net bernilai null jika buktinya belum tersedia. `tertutup[]` direkonstruksi dari jurnal close. `learning` membawa position_versions, daftar kalibrasi, jumlah hasil, dan ringkasan per versi untuk filter PnL. Pemuatan berkala tiap 30 detik tetap berjalan ketika panel tertutup | 5 |
+| `transactions` | `{ owner, items[], error }`. Tiap item memuat operasi, hash, plan/flow/position ID, nonce, gas, jumlah diterima, status, dan finalitas. Request lengkap serta calldata tidak keluar dari engine; detail error transport disunting karena dapat memuat URL RPC berkunci | 5 |
 | `notify` | `{ level, code, message, subject, at, ditahan }`. Berbeda dari `alert`: pesan ini melewati pendinginan, masuk riwayat, dan membawa petunjuk durasi serta suara. `alert` dipakai untuk kegagalan seketika pada aksi yang sedang dijalankan user | 5 |
 | `notify_history` | daftar kejadian terakhir, terbaru lebih dulu, paling banyak 50 | 5 |
 | `depth` | `{ poolId, tickSekarang, hargaSekarang, tickSpacing, pita[], quoteAdalahToken1, error }`. Setiap pita membawa batas tick, batas harga, likuiditas, modal yang tertanam dalam token kutipan, dan penanda apakah harga sekarang ada di dalamnya. Batas harga selalu terurut naik apa pun sisi mana memecoinnya berada, karena panel tidak boleh mengulang perhitungan arah itu sendiri. Lihat 6.14 | 6 |
-| `scan_results` | `{ rows[], hooks[], jendelaPindaiMenit, jendelaVolumeMenit, volumeJendelaPendek, modalAcuan, totalSwap, dipindaiPada, error }`. Setiap baris membawa simbol, pasangan beserta penanda apakah alamat kutipannya dikenal, market cap, volume, modal yang dibutuhkan, hasil fee sepanjang jendela, proyeksi APR, rasio efisiensi, umur, daftar risiko, satu label aksi, dan alasannya. Jendela ikut di dalam pesan, tidak disimpulkan panel: angka hasil dan proyeksi keduanya bergantung padanya, dan jendelanya bisa menyempit sendiri kalau RPC menolak. `hooks[]` memuat penilaian adopsi 5.4 untuk setiap hook yang muncul di hasil, supaya baris yang ditolak bisa menjelaskan diri sendiri | 6 |
+| `scan_results` | `{ rows[], hooks[], adopsi_lengkap, jendelaPindaiMenit, jendelaVolumeMenit, volumeJendelaPendek, modalAcuan, totalSwap, dipindaiPada, error }`. Setiap baris membawa simbol, pasangan, market cap, volume, kedalaman, hasil jendela, APR, efisiensi, umur, risiko, label, dan alasan. `hooks[]` membawa code_hash, jumlah pool, umur, TVL USD, LP unik aktif, lima status kriteria, serta lolos_otomatis. `adopsi_lengkap` benar setelah sejarah Initialize dan ModifyLiquidity selesai | 6 |
 | `signals` | `{ address, barTerpakai, harga, sideways, basis, saran, konsentrasiDibandingLebar, dihitungPada }`. `sideways` dan `basis` kosong berarti datanya belum cukup, BUKAN berarti kondisinya tidak menarik | 6 |
-| `action_plan` | `{ tokenId, action, nama, gates[], gasEstimate, dryRun, menutup, siap, expiresAt, fee0, fee1 }`. Simulasi ditampilkan sebelum tombol konfirmasi aktif, sesuai 3.5 | 5 |
+| `action_plan` | `{ plan_id, position_id, request_id, token_id, action, nama, gates[], gas_estimate, dry_run, menutup, siap, expires_at, fee0, fee1, allowances[], amounts, tick_lower_baru, tick_upper_baru }`. Tambah dan rebalance memakai R1; tambah modal baru juga memakai R2. Simulasi ditampilkan sebelum tombol konfirmasi aktif | 5 |
 | `token_state` | `{ address, meta, quotes[], pools[], selectedQuote, selectedPoolId, saldo, error }`. `saldo` memuat saldo wallet untuk kedua sisi pasangan terpilih beserta saldo token gas, dan bernilai kosong kalau wallet belum dibuka, yang berbeda dari saldo nol. Setiap pool membawa `stats` berisi volume, TVL, dan proyeksi APR kalau sudah terukur. Setiap `quote` membawa `{ quote, quoteSymbol, quoteDecimals, canonical, pools[] }`. Dikirim dua kali saat memuat: sekali cepat dari kunci pool yang tersimpan, sekali lagi setelah pemindaian selesai kalau ada yang berubah. Lihat 4.3c | 2 |
 | `range_view` | `{ poolId, tickSpacing, ethUsd, current, lower, upper, widthPct, inRange, warnings[] }`. Tiap batas memuat `tick`, `priceWeth`, `priceUsd`, `mcapUsd`, dan `driftBps`, yaitu selisih akibat pembulatan ke grid tick | 2 |
 | `price_tick` | `{ address, priceUsd, priceWeth, mcapUsd }` | 2 |
@@ -1499,26 +1543,58 @@ Engine ke panel:
 | `position_update` | `{ positionId, inRange, pricePct, feesUsd, netPnlUsd }` | 5 |
 | `signal_list` | `{ items[] }` | 6 |
 
-Content script ke engine, lewat service worker:
+Content script ke panel, lewat service worker. Identitas token dan URL
+divalidasi oleh relay dan service worker; tab ID berasal dari sender Chrome.
+Side panel memeriksa ulang tab aktif lewat `chrome.tabs.query` dan memakai
+nomor revisi agar hasil query navigasi lama tidak mengganti token baru:
 
 ```
-chart_capabilities { tier, methodsPresent[] }
-chart_line_moved   { side, price }
-gmgn_response      { requestId, status, body }
+token_page         { token, url, chain }
+chart_price        { token, url, chain, bar }
+chart_bars         { token, url, chain, bars[] }
+chart_line_moved   { token, url, chain, side, price }
 ```
 
-Engine ke content script:
+Panel ke content script melalui chrome.tabs.sendMessage, lalu ke MAIN world.
+Relay dan bridge memeriksa token terhadap URL tab sebelum menjalankan perintah:
 
 ```
-draw_lines         { upperPrice, lowerPrice }
-set_line_price     { side, price }
-clear_lines        { }
-gmgn_request       { requestId, path, method, body }
+draw_lines         { token, upperPrice, lowerPrice }
+clear_lines        { token }
+probe              { token }
 ```
 
-Semua pesan `quote_range` yang menghasilkan `range_quote` menyimpan `quoteId` beserta seluruh asumsi. `open_position` hanya menerima `quoteId` yang belum kedaluwarsa, default 20 detik. Ini mencegah eksekusi memakai angka yang sudah basi.
+Attach chart memakai generasi navigasi. `dataReady` dibatasi 15 detik.
+Pembuatan garis yang selesai setelah pindah token dibersihkan dari chart
+pemiliknya, dan tidak boleh mengirim hasil beridentitas token baru. Target
+`set_line_price`, `gmgn_request`, serta `gmgn_response` belum terhubung ke
+jalur runtime. `chart_capabilities` masih laporan lokal bridge.
+
+Setiap `quote_range` menghasilkan `open_plan` dengan plan_id baru dan seluruh asumsi tersimpan di engine. Approval, swap, dan mint hanya menerima ID yang masih berlaku, maksimal 180 detik. Pergantian token, pool, range, atau input setoran membatalkannya lebih awal.
 
 ### 7.4 Model data
+
+Implementasi redb saat ini menyimpan catatan posisi dengan kunci
+`pnl:v2:<chain>:<manager>:<token_id>` dan cache NFT dengan
+`posisi_v4:v2:<chain>:<manager>:<owner>`. Jurnal transaksi memakai
+`tx:v1:<chain>:<owner>:<tx_hash>`, ditulis setelah signing dan sebelum
+broadcast. Receipt diperiksa ulang sampai 20 konfirmasi; nonce yang sudah mined
+oleh hash lain ditandai `replaced`. Kunci lama tidak dihapus atau
+dipasangkan ke manager secara spekulatif. Self-improvement memakai namespace
+berikut dalam tabel JSON yang sama:
+
+```
+learning:v1:position:<position_id>       fitur, versi, waktu in-range, hasil
+learning:v1:calibration:<version>        faktor, bobot, ambang, hasil bayangan
+learning:v1:active:<regime>              versi juara yang dipakai
+learning:v1:challenger:<regime>          versi penantang yang dinilai
+learning:v1:trained:<regime>             jumlah hasil pada latihan terakhir
+risk/token:v1:<chain>:<pool>:<token>     bukti R1 dan R2 terakhir
+risk/hook-disetujui/<hook>               sumber allowlist dan code hash
+```
+
+Skema konseptual berikut tetap menjelaskan relasi datanya. Pada implementasi
+redb, kolom berada di nilai JSON dan identitas tabel berada di prefiks kunci.
 
 ```
 tokens           address, symbol, name, decimals, total_supply, created_at,
@@ -1543,10 +1619,16 @@ signals          id, token_address, ts, features_json, score, label,
                  outcome_fee_apr_6h, outcome_realized_vol_6h, outcome_label
 
 settings         key, value_json
-calibrations     id, created_at, weights_json, thresholds_json, active
+calibrations     id, regime, parent_id, created_at, weights_json,
+                 thresholds_json, status, training_positions,
+                 shadow_positions, shadow_wins, challenger_error,
+                 champion_error
 ```
 
-Tabel `quotes` dan `signals` ada khusus untuk loop self improvement di bagian 12. Tanpa menyimpan prediksi beserta hasilnya, kalibrasi ulang tidak mungkin dilakukan.
+`learning:v1:position` menyatukan quote, fitur sinyal, identitas posisi, dan
+hasil close agar pasangannya tidak dapat tertukar. Field sumber yang belum
+tersedia, misalnya metrik holder, tetap null. Tanpa menyimpan prediksi beserta
+hasilnya, kalibrasi ulang tidak mungkin dilakukan.
 
 ### 7.5 Ketahanan data
 
@@ -1804,7 +1886,14 @@ Diminta sebagai kewajiban, jadi dirancang sejak awal, bukan ditempel belakangan.
 
 ### 12.1 Apa yang direkam
 
-Setiap kali posisi dibuka, engine menyimpan vektor fitur lengkap: skor sideways beserta seluruh komponennya, lebar range dalam satuan ATR, porsi likuiditas kita, fee tier, versi protokol, umur token, metrik holder, jarak harga ke POC, prediksi fee APR, prediksi jam bertahan, dan jam impas IL. Setiap kali posisi ditutup, engine menyimpan hasilnya: fee terealisasi, IL, gas, slippage, net, dan durasi di dalam range.
+Setiap kali open lolos verifikasi pasca kirim, engine menyimpan skor sideways
+beserta komponennya, rezim, lebar range dalam ATR, porsi likuiditas aktif, fee
+tier, versi protokol, jarak ke POC, prediksi fee APR mentah dan terkoreksi,
+prediksi jam in-range, jam impas IL, serta versi kalibrasi. Umur token dan
+metrik holder ikut dalam skema tetapi tetap null ketika sumbernya belum
+memberi bukti. Setiap pemuatan posisi mengakumulasi waktu in-range. Setelah
+close final, rekaman dipasangkan dengan fee terealisasi, IL, gas, slippage,
+net, waktu in-range, dan total durasi.
 
 ### 12.2 Bagaimana kalibrasi berjalan
 
@@ -1812,7 +1901,9 @@ Setiap 30 posisi tertutup, atau saat diminta manual, engine menjalankan kalibras
 
 1. Regresi prediksi terhadap hasil, untuk mengukur bias sistematis pada proyeksi fee dan proyeksi waktu bertahan. Bias yang konsisten dikoreksi dengan faktor penyesuaian, bukan dengan mengubah rumus.
 2. Model klasifikasi ringan atas vektor fitur terhadap hasil net positif, untuk menemukan fitur mana yang benar benar memprediksi.
-3. Penyetelan bobot pada rumus skor di 5.2 dan ambang pada gate di 5.4, dalam batas yang sudah ditentukan.
+3. Penyetelan bobot dan ambang detektor 5.2 dalam batas keras. Gate keamanan
+   R1/R2 dan minimum allowlist hook 5.4 tidak boleh dilonggarkan oleh hasil
+   trading; keputusan ini dicatat di DECISIONS 0009.
 
 ### 12.3 Pengaman
 
@@ -1823,6 +1914,28 @@ Loop yang menyetel dirinya sendiri bisa menyetel dirinya ke arah yang salah. Kar
 - Skema penantang: kalibrasi baru berjalan berdampingan sebagai bayangan selama 20 posisi. Kalibrasi lama tetap yang mengambil keputusan. Penantang baru menggantikan juara jika unggul secara konsisten.
 - Semua versi kalibrasi tersimpan di tabel `calibrations` dan bisa dikembalikan dengan satu perintah.
 - Tab PnL bisa memfilter berdasarkan versi kalibrasi, sehingga efeknya terlihat, bukan sekadar diklaim.
+
+Implementasi memakai median rasio aktual terhadap prediksi untuk faktor APR
+dan waktu agar satu outlier memecoin tidak menguasai hasil. Bobot klasifikasi
+dibandingkan antara hasil net positif dan nonpositif lalu dinormalisasi kembali
+ke satu. Versi baru tidak mengubah keputusan sampai 20 hasil setelah waktu
+pembuatannya selesai; promosi butuh sedikitnya 12 kemenangan dan jumlah galat
+lebih kecil dari juara.
+
+Operasi manual menggunakan satu perintah lokal dan basis data yang sama:
+
+```
+cargo xtask calibration status
+cargo xtask calibration train [regime]
+cargo xtask calibration replay [version]
+cargo xtask calibration replay-bars <bars.json> [version]
+cargo xtask calibration rollback <version>
+```
+
+`replay` mengevaluasi prediksi terhadap hasil posisi tersimpan. `replay-bars`
+menjalankan ulang detektor setiap 30 candle setelah jendela 240 candle tersedia,
+lalu membandingkan prediksi waktu bertahan dengan sentuhan batas pertama pada
+candle berikutnya. Keduanya hanya membaca dan tidak dapat mempromosikan versi.
 
 ---
 

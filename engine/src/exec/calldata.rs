@@ -156,6 +156,47 @@ pub fn mint(req: &MintRequest, tick_spacing: i32) -> Result<Bytes, CalldataError
     .into())
 }
 
+/// Calldata untuk menambah likuiditas ke NFT V3 yang sudah ada.
+pub fn increase_liquidity(
+    token_id: U256,
+    amount0_desired: U256,
+    amount1_desired: U256,
+    amount0_min: U256,
+    amount1_min: U256,
+    deadline: U256,
+) -> Result<Bytes, CalldataError> {
+    if amount0_desired.is_zero() && amount1_desired.is_zero() {
+        return Err(CalldataError::NothingToDeposit);
+    }
+    if amount0_min > amount0_desired {
+        return Err(CalldataError::MinAboveDesired {
+            min: amount0_min,
+            desired: amount0_desired,
+        });
+    }
+    if amount1_min > amount1_desired {
+        return Err(CalldataError::MinAboveDesired {
+            min: amount1_min,
+            desired: amount1_desired,
+        });
+    }
+    if deadline.is_zero() {
+        return Err(CalldataError::ZeroDeadline);
+    }
+    Ok(Npm::increaseLiquidityCall {
+        params: Npm::IncreaseLiquidityParams {
+            tokenId: token_id,
+            amount0Desired: amount0_desired,
+            amount1Desired: amount1_desired,
+            amount0Min: amount0_min,
+            amount1Min: amount1_min,
+            deadline,
+        },
+    }
+    .abi_encode()
+    .into())
+}
+
 /// Calldata untuk `decreaseLiquidity`.
 pub fn decrease_liquidity(
     token_id: U256,
@@ -229,6 +270,33 @@ pub fn close_position(
     ])
 }
 
+/// Tutup NFT lama dan buka NFT baru dalam satu transaksi V3.
+///
+/// Semua subpanggilan berada di `multicall`, sehingga kegagalan mint baru
+/// mengembalikan seluruh penarikan posisi lama.
+pub fn rebalance_position(
+    old_token_id: U256,
+    old_liquidity: u128,
+    amount0_min_ditarik: U256,
+    amount1_min_ditarik: U256,
+    new_position: &MintRequest,
+    tick_spacing: i32,
+) -> Result<Bytes, CalldataError> {
+    let mint_new = mint(new_position, tick_spacing)?;
+    Ok(multicall(vec![
+        decrease_liquidity(
+            old_token_id,
+            old_liquidity,
+            amount0_min_ditarik,
+            amount1_min_ditarik,
+            new_position.deadline,
+        ),
+        collect(old_token_id, new_position.recipient),
+        burn(old_token_id),
+        mint_new,
+    ]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,7 +349,10 @@ mod tests {
     #[test]
     fn selector_fungsi_lain_sesuai() {
         assert_eq!(&burn(U256::from(1u8))[..4], &[0x42, 0x96, 0x6c, 0x68]);
-        assert_eq!(&collect(U256::from(1u8), dompet())[..4], &[0xfc, 0x6f, 0x78, 0x65]);
+        assert_eq!(
+            &collect(U256::from(1u8), dompet())[..4],
+            &[0xfc, 0x6f, 0x78, 0x65]
+        );
         assert_eq!(
             &decrease_liquidity(U256::from(1u8), 1, U256::ZERO, U256::ZERO, U256::from(1u8))[..4],
             &[0x0c, 0x49, 0xcc, 0xbe]
@@ -293,10 +364,7 @@ mod tests {
     fn urutan_token_salah_ditolak() {
         let mut req = permintaan();
         std::mem::swap(&mut req.token0, &mut req.token1);
-        assert!(matches!(
-            mint(&req, 60),
-            Err(CalldataError::TokenOrder(_))
-        ));
+        assert!(matches!(mint(&req, 60), Err(CalldataError::TokenOrder(_))));
 
         // Token yang sama juga tidak sah.
         req.token1 = req.token0;
@@ -307,7 +375,10 @@ mod tests {
     fn tick_terbalik_ditolak() {
         let mut req = permintaan();
         std::mem::swap(&mut req.tick_lower, &mut req.tick_upper);
-        assert!(matches!(mint(&req, 60), Err(CalldataError::TickOrder { .. })));
+        assert!(matches!(
+            mint(&req, 60),
+            Err(CalldataError::TickOrder { .. })
+        ));
     }
 
     #[test]
@@ -340,7 +411,10 @@ mod tests {
         req.amount1_desired = U256::ZERO;
         req.amount0_min = U256::ZERO;
         req.amount1_min = U256::ZERO;
-        assert!(matches!(mint(&req, 60), Err(CalldataError::NothingToDeposit)));
+        assert!(matches!(
+            mint(&req, 60),
+            Err(CalldataError::NothingToDeposit)
+        ));
     }
 
     #[test]
@@ -387,5 +461,40 @@ mod tests {
         assert!(hex.contains("0c49ccbe"), "decreaseLiquidity harus ada");
         assert!(hex.contains("fc6f7865"), "collect harus ada");
         assert!(hex.contains("42966c68"), "burn harus ada");
+    }
+
+    #[test]
+    fn tambah_likuiditas_memakai_selector_resmi() {
+        let data = increase_liquidity(
+            U256::from(42u8),
+            U256::from(10u8),
+            U256::from(20u8),
+            U256::from(9u8),
+            U256::from(18u8),
+            U256::from(1u8),
+        )
+        .unwrap();
+        assert_eq!(&data[..4], &[0x21, 0x9f, 0x5d, 0x17]);
+    }
+
+    #[test]
+    fn rebalance_v3_atomik_memuat_empat_subpanggilan() {
+        use alloy::sol_types::SolCall;
+
+        let data = rebalance_position(
+            U256::from(42u8),
+            100,
+            U256::from(9u8),
+            U256::from(18u8),
+            &permintaan(),
+            60,
+        )
+        .unwrap();
+        let decoded = Npm::multicallCall::abi_decode(&data).unwrap();
+        assert_eq!(decoded.data.len(), 4);
+        assert_eq!(&decoded.data[0][..4], &[0x0c, 0x49, 0xcc, 0xbe]);
+        assert_eq!(&decoded.data[1][..4], &[0xfc, 0x6f, 0x78, 0x65]);
+        assert_eq!(&decoded.data[2][..4], &[0x42, 0x96, 0x6c, 0x68]);
+        assert_eq!(&decoded.data[3][..4], &[0x88, 0x31, 0x64, 0x56]);
     }
 }

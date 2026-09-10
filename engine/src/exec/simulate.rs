@@ -26,6 +26,88 @@ pub struct SimulatedMint {
     pub amount1: U256,
 }
 
+/// Hasil simulasi aksi V3 yang menambah atau memindahkan likuiditas.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SimulatedLiquidityChange {
+    pub liquidity: u128,
+    pub amount0: U256,
+    pub amount1: U256,
+}
+
+/// Dekode nilai kembali aksi modal V3.
+///
+/// Rebalance dibungkus `multicall`, sehingga hasil `mint` berada pada elemen
+/// terakhir. Dekoder menolak bentuk lain alih alih menganggap `eth_call`
+/// sukses sudah cukup.
+pub fn decode_v3_liquidity_action(
+    action: crate::exec::aksi::JenisAksi,
+    output: &[u8],
+) -> Result<SimulatedLiquidityChange, String> {
+    let decoded = match action {
+        crate::exec::aksi::JenisAksi::TambahLikuiditas => {
+            let value =
+                Npm::increaseLiquidityCall::abi_decode_returns(output).map_err(|error| {
+                    format!("hasil increaseLiquidity tidak dapat didekode: {error}")
+                })?;
+            SimulatedLiquidityChange {
+                liquidity: value.liquidity,
+                amount0: value.amount0,
+                amount1: value.amount1,
+            }
+        }
+        crate::exec::aksi::JenisAksi::Rebalance => {
+            let values = Npm::multicallCall::abi_decode_returns(output).map_err(|error| {
+                format!("hasil multicall rebalance tidak dapat didekode: {error}")
+            })?;
+            let mint = values.last().ok_or("hasil multicall rebalance kosong")?;
+            let value = Npm::mintCall::abi_decode_returns(mint)
+                .map_err(|error| format!("hasil mint rebalance tidak dapat didekode: {error}"))?;
+            SimulatedLiquidityChange {
+                liquidity: value.liquidity,
+                amount0: value.amount0,
+                amount1: value.amount1,
+            }
+        }
+        _ => return Err("aksi ini tidak menghasilkan perubahan likuiditas V3".into()),
+    };
+    Ok(decoded)
+}
+
+pub fn check_liquidity_action(
+    simulated: &SimulatedLiquidityChange,
+    minimum_liquidity: u128,
+    max_amount0: U256,
+    max_amount1: U256,
+) -> Result<(), Vec<String>> {
+    let mut errors = Vec::new();
+    if simulated.liquidity < minimum_liquidity || simulated.liquidity == 0 {
+        errors.push(format!(
+            "likuiditas simulasi {} di bawah minimum {}",
+            simulated.liquidity, minimum_liquidity
+        ));
+    }
+    if simulated.amount0 > max_amount0 {
+        errors.push(format!(
+            "token0 terpakai {} melebihi batas {}",
+            simulated.amount0, max_amount0
+        ));
+    }
+    if simulated.amount1 > max_amount1 {
+        errors.push(format!(
+            "token1 terpakai {} melebihi batas {}",
+            simulated.amount1, max_amount1
+        ));
+    }
+    if simulated.amount0.is_zero() && simulated.amount1.is_zero() {
+        errors.push("simulasi tidak memakai token apa pun".into());
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
 /// Apa yang kita harapkan terjadi. Dibandingkan dengan hasil simulasi di G5.
 #[derive(Debug, Clone)]
 pub struct MintExpectation {
@@ -190,6 +272,7 @@ pub fn check_mint_invariants(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy::sol_types::SolCall;
 
     fn sim(liquidity: u128, a0: u64, a1: u64) -> SimulatedMint {
         SimulatedMint {
@@ -206,6 +289,47 @@ mod tests {
             max_amount0: U256::from(1_000u32),
             max_amount1: U256::from(2_000u32),
         }
+    }
+
+    #[test]
+    fn hasil_increase_v3_didekode_dan_dibatasi() {
+        let output =
+            Npm::increaseLiquidityCall::abi_encode_returns(&Npm::increaseLiquidityReturn {
+                liquidity: 1_250u128,
+                amount0: U256::from(90u8),
+                amount1: U256::from(180u16),
+            });
+        let result =
+            decode_v3_liquidity_action(crate::exec::aksi::JenisAksi::TambahLikuiditas, &output)
+                .unwrap();
+        assert_eq!(result.liquidity, 1_250);
+        assert!(
+            check_liquidity_action(&result, 1_200, U256::from(100u8), U256::from(200u16),).is_ok()
+        );
+        assert!(
+            check_liquidity_action(&result, 1_300, U256::from(80u8), U256::from(200u16),).is_err()
+        );
+    }
+
+    #[test]
+    fn hasil_mint_terakhir_dari_multicall_rebalance_didekode() {
+        let mint = Bytes::from(Npm::mintCall::abi_encode_returns(&Npm::mintReturn {
+            tokenId: U256::from(77u8),
+            liquidity: 2_500u128,
+            amount0: U256::from(300u16),
+            amount1: U256::from(400u16),
+        }));
+        let output = Npm::multicallCall::abi_encode_returns(&vec![
+            Bytes::new(),
+            Bytes::new(),
+            Bytes::new(),
+            mint,
+        ]);
+        let result =
+            decode_v3_liquidity_action(crate::exec::aksi::JenisAksi::Rebalance, &output).unwrap();
+        assert_eq!(result.liquidity, 2_500);
+        assert_eq!(result.amount0, U256::from(300u16));
+        assert_eq!(result.amount1, U256::from(400u16));
     }
 
     #[test]
@@ -247,7 +371,9 @@ mod tests {
     #[test]
     fn setoran_kosong_ditolak() {
         let e = check_mint_invariants(&sim(5_000, 0, 0), &harapan()).unwrap_err();
-        assert!(e.iter().any(|m| m.contains("tidak ada token yang tersetor")));
+        assert!(e
+            .iter()
+            .any(|m| m.contains("tidak ada token yang tersetor")));
     }
 
     #[test]
@@ -266,7 +392,10 @@ mod tests {
     #[test]
     fn revert_uniswap_diterjemahkan() {
         let stf = jelaskan_revert("execution reverted: STF");
-        assert!(stf.contains("approval"), "pesan STF harus menyebut approval");
+        assert!(
+            stf.contains("approval"),
+            "pesan STF harus menyebut approval"
+        );
 
         let slippage = jelaskan_revert("execution reverted: Price slippage check");
         assert!(slippage.contains("slippage"));

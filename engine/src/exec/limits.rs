@@ -98,7 +98,10 @@ pub fn check(cfg: &LimitsConfig, ctx: &LimitContext) -> Result<(), Vec<String>> 
 /// Dipakai saat menyusun `amount0Min` dan `amount1Min`. Nilai minimum inilah
 /// yang membuat kontrak menolak transaksi kalau harga bergerak terlalu jauh
 /// antara kutipan dan eksekusi.
-pub fn apply_slippage(amount: alloy::primitives::U256, max_slippage_bps: u32) -> alloy::primitives::U256 {
+pub fn apply_slippage(
+    amount: alloy::primitives::U256,
+    max_slippage_bps: u32,
+) -> alloy::primitives::U256 {
     use alloy::primitives::U256;
     let bps = U256::from(10_000u32);
     let potongan = U256::from(max_slippage_bps.min(10_000));
@@ -146,14 +149,20 @@ mod tests {
 
     #[test]
     fn batas_per_posisi_ditegakkan_saat_dinyalakan() {
-        let cfg = LimitsConfig { max_position_usd: Some(50.0), ..Default::default() };
+        let cfg = LimitsConfig {
+            max_position_usd: Some(50.0),
+            ..Default::default()
+        };
         let e = check(&cfg, &konteks()).unwrap_err();
         assert!(e.iter().any(|m| m.contains("batas per posisi")));
     }
 
     #[test]
     fn batas_harian_menghitung_posisi_yang_akan_dibuka() {
-        let cfg = LimitsConfig { max_daily_deploy_usd: Some(150.0), ..Default::default() };
+        let cfg = LimitsConfig {
+            max_daily_deploy_usd: Some(150.0),
+            ..Default::default()
+        };
         let mut ctx = konteks();
         ctx.daily_spent_usd = 100.0;
         // 100 sudah terpakai ditambah 100 yang diminta melebihi 150.
@@ -167,7 +176,10 @@ mod tests {
 
     #[test]
     fn batas_jumlah_posisi_memakai_lebih_besar_sama() {
-        let cfg = LimitsConfig { max_open_positions: Some(3), ..Default::default() };
+        let cfg = LimitsConfig {
+            max_open_positions: Some(3),
+            ..Default::default()
+        };
         let mut ctx = konteks();
         ctx.open_positions = 3;
         // Sudah tiga berarti membuka yang keempat, jadi ditolak.
@@ -178,7 +190,10 @@ mod tests {
 
     #[test]
     fn batas_pool_baru_hanya_berlaku_untuk_pool_baru() {
-        let cfg = LimitsConfig { new_pool_first_size_usd: Some(10.0), ..Default::default() };
+        let cfg = LimitsConfig {
+            new_pool_first_size_usd: Some(10.0),
+            ..Default::default()
+        };
         let mut ctx = konteks();
 
         ctx.is_new_pool = false;

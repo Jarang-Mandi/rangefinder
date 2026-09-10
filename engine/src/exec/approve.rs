@@ -54,14 +54,8 @@ pub async fn check_allowances<P: Provider>(
     needed1: U256,
 ) -> Result<Vec<AllowanceNeed>, String> {
     let calls = vec![
-        crate::chain::multicall::encode(
-            token0,
-            &IERC20Write::allowanceCall { owner, spender },
-        ),
-        crate::chain::multicall::encode(
-            token1,
-            &IERC20Write::allowanceCall { owner, spender },
-        ),
+        crate::chain::multicall::encode(token0, &IERC20Write::allowanceCall { owner, spender }),
+        crate::chain::multicall::encode(token1, &IERC20Write::allowanceCall { owner, spender }),
     ];
 
     let hasil = crate::chain::multicall::batch_call(provider, multicall, calls)
@@ -69,7 +63,10 @@ pub async fn check_allowances<P: Provider>(
         .map_err(|e| format!("gagal membaca allowance: {e}"))?;
 
     let mut out = Vec::with_capacity(2);
-    for (i, (token, needed)) in [(token0, needed0), (token1, needed1)].into_iter().enumerate() {
+    for (i, (token, needed)) in [(token0, needed0), (token1, needed1)]
+        .into_iter()
+        .enumerate()
+    {
         // Kegagalan membaca TIDAK diubah jadi nol. Nol berarti izin habis dan
         // memicu approve yang tidak perlu, sedangkan kegagalan berarti kita
         // tidak tahu, dan itu harus dikatakan. Lihat memory/003.
@@ -94,13 +91,7 @@ pub async fn check_allowances<P: Provider>(
 /// ia harus jadi keputusan sadar dengan catatan alasannya, bukan argumen
 /// bawaan yang mudah terpanggil.
 pub fn approve_calldata(spender: Address, amount: U256) -> Bytes {
-    Bytes::from(
-        IERC20Write::approveCall {
-            spender,
-            amount,
-        }
-        .abi_encode(),
-    )
+    Bytes::from(IERC20Write::approveCall { spender, amount }.abi_encode())
 }
 
 /// Sebagian token menolak mengubah allowance bukan nol menjadi bukan nol.

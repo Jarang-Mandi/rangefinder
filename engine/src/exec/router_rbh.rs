@@ -175,11 +175,7 @@ pub fn swap_exact_in(req: &SwapExactIn) -> Result<Bytes, RouterError> {
 
     let (bayar, terima) = req.sisi();
 
-    let aksi_bytes = vec![
-        aksi::SWAP_EXACT_IN_SINGLE,
-        aksi::SETTLE_ALL,
-        aksi::TAKE_ALL,
-    ];
+    let aksi_bytes = vec![aksi::SWAP_EXACT_IN_SINGLE, aksi::SETTLE_ALL, aksi::TAKE_ALL];
     let params: Vec<Bytes> = vec![
         req.params_swap(),
         // SETTLE_ALL: currency yang dibayarkan beserta batas atasnya.
@@ -200,29 +196,39 @@ pub fn swap_exact_in(req: &SwapExactIn) -> Result<Bytes, RouterError> {
     ))
 }
 
+use alloy::primitives::address;
+
+/// Parameter apa adanya dari transaksi
+/// 0xf15c5f65d6f0372698805158351bf8c13de3578692a721a06094a365449fcd86.
+fn swap_asli() -> SwapExactIn {
+    SwapExactIn {
+        pool: KunciPool {
+            currency0: Address::ZERO,
+            currency1: address!("7fdcc669014afa2c33df27a96169f900b17f737d"),
+            fee: 0,
+            tick_spacing: 200,
+            hooks: address!("e5e702641ea86f4ae6cc3cdaed2b886f976be044"),
+        },
+        zero_for_one: true,
+        amount_in: 70_000_000_000_000_008,
+        amount_out_minimum: 285_364_610_143_729_065_835_706,
+        deadline: U256::from(1_788_789_936u64),
+    }
+}
+
+pub(crate) fn golden_matches() -> Result<(), String> {
+    if hex::encode(swap_exact_in(&swap_asli()).map_err(|e| e.to_string())?)
+        == include_str!("../../fixtures/golden/swap-f15c5f65.hex").trim()
+    {
+        Ok(())
+    } else {
+        Err("calldata berbeda dari transaksi acuan".into())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy::primitives::address;
-
-    /// Parameter apa adanya dari transaksi
-    /// 0xf15c5f65d6f0372698805158351bf8c13de3578692a721a06094a365449fcd86.
-    fn swap_asli() -> SwapExactIn {
-        SwapExactIn {
-            pool: KunciPool {
-                currency0: Address::ZERO,
-                currency1: address!("7fdcc669014afa2c33df27a96169f900b17f737d"),
-                fee: 0,
-                tick_spacing: 200,
-                hooks: address!("e5e702641ea86f4ae6cc3cdaed2b886f976be044"),
-            },
-            zero_for_one: true,
-            amount_in: 70_000_000_000_000_008,
-            amount_out_minimum: 285_364_610_143_729_065_835_706,
-            deadline: U256::from(1_788_789_936u64),
-        }
-    }
-
     #[test]
     fn calldata_sama_persis_dengan_transaksi_swap_sungguhan() {
         // Ini pembuktian terpenting di modul ini. Kalau posisi `minHopPriceX36`
@@ -236,7 +242,11 @@ mod tests {
 
         let hasil = swap_exact_in(&swap_asli()).unwrap();
         assert_eq!(hex::encode(&hasil), asli);
-        assert_eq!(hasil.len(), 1124, "panjang harus sama dengan transaksi asli");
+        assert_eq!(
+            hasil.len(),
+            1124,
+            "panjang harus sama dengan transaksi asli"
+        );
     }
 
     #[test]
@@ -285,10 +295,7 @@ mod tests {
     fn urutan_currency_terbalik_ditolak() {
         let mut r = swap_asli();
         std::mem::swap(&mut r.pool.currency0, &mut r.pool.currency1);
-        assert_eq!(
-            r.validate().unwrap_err(),
-            RouterError::UrutanCurrencySalah
-        );
+        assert_eq!(r.validate().unwrap_err(), RouterError::UrutanCurrencySalah);
     }
 
     #[test]
@@ -301,10 +308,7 @@ mod tests {
     #[test]
     fn membayar_eth_asli_mengirim_nilai() {
         // ETH asli tidak ditarik lewat izin, ia harus ikut sebagai msg.value.
-        assert_eq!(
-            swap_asli().value(),
-            U256::from(70_000_000_000_000_008u64)
-        );
+        assert_eq!(swap_asli().value(), U256::from(70_000_000_000_000_008u64));
     }
 
     #[test]

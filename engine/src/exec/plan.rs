@@ -31,6 +31,8 @@ use super::pipeline::{OpenPlan, OpenRequest};
 /// Bentuknya seragam untuk V3 dan V4 supaya panel tidak perlu tahu protokolnya.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct LangkahIzin {
+    pub step_id: String,
+    pub spender: String,
     /// Salah satu dari `erc20_ke_position_manager`, `erc20_ke_permit2`, atau
     /// `permit2_ke_position_manager`.
     pub jenis: &'static str,
@@ -134,6 +136,8 @@ pub async fn izin_yang_kurang<P: Provider>(
                 .into_iter()
                 .filter(|i| i.insufficient)
                 .map(|i| LangkahIzin {
+                    step_id: String::new(),
+                    spender: alamat.position_manager_v3.to_string(),
                     jenis: "erc20_ke_position_manager",
                     label: format!("Beri izin {} ke position manager", ringkas(&i.token)),
                     token: i.token,
@@ -163,6 +167,13 @@ pub async fn izin_yang_kurang<P: Provider>(
                 .into_iter()
                 .flat_map(|i| i.langkah_kurang)
                 .map(|l| LangkahIzin {
+                    step_id: String::new(),
+                    spender: if l.jenis == "erc20_ke_permit2" {
+                        alamat.permit2
+                    } else {
+                        alamat.position_manager_v4
+                    }
+                    .to_string(),
                     jenis: l.jenis,
                     label: match l.jenis {
                         "erc20_ke_permit2" => {
@@ -184,9 +195,8 @@ pub async fn izin_yang_kurang<P: Provider>(
 
 /// Langkah izin Permit2 untuk sebuah spender selain PositionManager.
 ///
-/// Dipakai zap: swap berjalan lewat UniversalRouter, dan router itu menarik
-/// token lewat Permit2 juga. Izin ke PositionManager tidak berlaku untuknya,
-/// dan melewatkan ini membuat swap revert setelah gas terbakar.
+/// Dipakai UniversalRouter untuk zap dan uji jual kecil. Router menarik token
+/// lewat Permit2, jadi izin ke PositionManager tidak berlaku untuknya.
 ///
 /// ETH asli dilewati karena ia ikut sebagai `msg.value`, bukan ditarik.
 #[allow(clippy::too_many_arguments)]
@@ -222,17 +232,70 @@ pub async fn izin_permit2_untuk<P: Provider>(
         .into_iter()
         .flat_map(|i| i.langkah_kurang)
         .map(|l| LangkahIzin {
+            step_id: String::new(),
+            spender: if l.jenis == "erc20_ke_permit2" {
+                alamat.permit2
+            } else {
+                spender
+            }
+            .to_string(),
             jenis: l.jenis,
             label: match l.jenis {
                 "erc20_ke_permit2" => {
-                    format!("Izinkan Permit2 memakai {} untuk zap", ringkas(&l.token))
+                    format!(
+                        "Izinkan Permit2 memakai {} untuk {nama_spender}",
+                        ringkas(&l.token)
+                    )
                 }
-                _ => format!("Izinkan {nama_spender} lewat Permit2 untuk zap"),
+                _ => format!("Izinkan {nama_spender} lewat Permit2"),
             },
             token: l.token,
             needed: l.needed,
             current: l.current,
         })
+        .collect())
+}
+
+/// Langkah izin ERC20 langsung untuk spender selain PositionManager.
+/// Dipakai simulasi jual kecil V3 melalui SwapRouter02.
+pub async fn izin_erc20_untuk<P: Provider>(
+    provider: &P,
+    alamat: &AlamatEksekusi,
+    pemilik: Address,
+    spender: Address,
+    nama_spender: &str,
+    token: Address,
+    jumlah: U256,
+) -> Result<Vec<LangkahIzin>, String> {
+    if token.is_zero() || jumlah.is_zero() {
+        return Ok(Vec::new());
+    }
+    let mut izin = super::approve::check_allowances(
+        provider,
+        alamat.multicall,
+        pemilik,
+        spender,
+        token,
+        jumlah,
+        token,
+        U256::ZERO,
+    )
+    .await?;
+    let i = izin.remove(0);
+    Ok(i.insufficient
+        .then(|| LangkahIzin {
+            step_id: String::new(),
+            spender: spender.to_string(),
+            jenis: "erc20_ke_router",
+            label: format!(
+                "Izinkan {nama_spender} memakai {} untuk uji jual kecil",
+                ringkas(&i.token)
+            ),
+            token: i.token,
+            needed: i.needed,
+            current: i.current,
+        })
+        .into_iter()
         .collect())
 }
 

@@ -313,8 +313,16 @@ mod tests {
         // Batas kanal adalah tempat harga berbalik. Menaruh batas range persis
         // di situ membuat posisi keluar range tepat saat harga menyentuhnya.
         let s = dari_kanal(100.0, 90.0, 110.0).unwrap();
-        assert!(s.bawah > 90.0, "batas bawah {} harus di atas dasar kanal", s.bawah);
-        assert!(s.atas < 110.0, "batas atas {} harus di bawah puncak kanal", s.atas);
+        assert!(
+            s.bawah > 90.0,
+            "batas bawah {} harus di atas dasar kanal",
+            s.bawah
+        );
+        assert!(
+            s.atas < 110.0,
+            "batas atas {} harus di bawah puncak kanal",
+            s.atas
+        );
         assert_eq!(s.bentuk, Bentuk::DuaSisi);
     }
 
@@ -386,7 +394,10 @@ mod tests {
     fn perbandingan_terhadap_range_lebar() {
         let s = dari_kanal(100.0, 90.0, 110.0).unwrap();
         let kali = dibanding_lebar(100.0, &s, 5.0).unwrap();
-        assert!(kali > 1.0, "range sempit harus lebih terkonsentrasi, dapat {kali}");
+        assert!(
+            kali > 1.0,
+            "range sempit harus lebih terkonsentrasi, dapat {kali}"
+        );
         assert!(
             hampir(kali, 5.0, 0.5),
             "lima kali lebih sempit kira kira lima kali lebih terkonsentrasi, dapat {kali}"

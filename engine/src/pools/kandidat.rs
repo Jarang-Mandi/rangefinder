@@ -140,7 +140,7 @@ pub struct BarisScan {
     pub symbol: String,
     pub quote: String,
     pub quote_symbol: String,
-    /// Benar kalau alamat kutipan itu benar benar ada di registry.
+    /// Benar untuk ETH native atau alamat kutipan yang ada di registry.
     ///
     /// KENAPA INI HARUS DIBAWA SAMPAI KE TAMPILAN
     /// Simbol ditentukan penerbit token, jadi siapa pun bisa menerbitkan token
@@ -575,9 +575,11 @@ pub async fn perkaya<P: Provider>(
 
     let jendela_detik = match &panjang {
         Some(v) => v.jendela_detik(registry.chain.block_time_ms),
-        None => hasil.sampai_blok.saturating_sub(hasil.dari_blok) as f64
-            * registry.chain.block_time_ms as f64
-            / 1_000.0,
+        None => {
+            hasil.sampai_blok.saturating_sub(hasil.dari_blok) as f64
+                * registry.chain.block_time_ms as f64
+                / 1_000.0
+        }
     };
     let volume_jendela_pendek = panjang.is_none();
 
@@ -692,11 +694,9 @@ async fn baca_keadaan<P: Provider>(
         ) else {
             continue;
         };
-        let Some(likuiditas) =
-            crate::chain::multicall::decode::<super::abi::IStateView::getLiquidityCall>(
-                hasil.get(dasar + 1).and_then(|x| x.as_ref()),
-            )
-        else {
+        let Some(likuiditas) = crate::chain::multicall::decode::<
+            super::abi::IStateView::getLiquidityCall,
+        >(hasil.get(dasar + 1).and_then(|x| x.as_ref())) else {
             continue;
         };
         let sqrt = U256::from(slot0.sqrtPriceX96);
@@ -769,18 +769,13 @@ fn susun_baris(
     let m_meme = meta.get(&alamat_meme.to_lowercase());
     let m_quote = meta.get(&alamat_quote.to_lowercase());
 
-    // Kutipan dianggap dikenal hanya kalau ALAMATNYA ada di registry. Simbol
+    // Kutipan dikenal lewat alamat native atau ALAMAT di registry. Simbol
     // tidak pernah cukup: ia ditentukan penerbit token, bukan oleh siapa pun
     // yang bisa dipercaya.
-    let quote_dikenal = memecoin.is_some()
-        && registry
-            .tokens
-            .values()
-            .any(|e| e.address.eq_ignore_ascii_case(&alamat_quote));
+    let quote_dikenal = memecoin.is_some() && super::scan::kutipan_dikenal(&alamat_quote, registry);
 
-    let simbol = |m: Option<&super::TokenMeta>| {
-        m.map(|x| x.symbol.clone()).unwrap_or_else(|| "?".into())
-    };
+    let simbol =
+        |m: Option<&super::TokenMeta>| m.map(|x| x.symbol.clone()).unwrap_or_else(|| "?".into());
 
     // ARAH DIBALIK KALAU MEMECOIN ADA DI TOKEN1
     // Tick naik berarti token0 menguat terhadap token1. Pada pool yang
@@ -846,7 +841,10 @@ fn susun_baris(
         _ => (None, None, None, None),
     };
 
-    let terukur = (!k.dynamic_fee).then_some(()).and(volume_quote).zip(kedalaman_quote);
+    let terukur = (!k.dynamic_fee)
+        .then_some(())
+        .and(volume_quote)
+        .zip(kedalaman_quote);
     let hasil_jendela = terukur.and_then(|(v, d)| hasil_per_jendela(v, k.fee, d));
     let fee_apr = terukur.and_then(|(v, d)| proyeksi_apr(v, k.fee, d, jendela_detik));
 
@@ -898,6 +896,78 @@ fn susun_baris(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn pool_native_memiliki_metadata_satuan_dan_volume_scan() {
+        use alloy::sol_types::SolValue;
+        let registry =
+            Registry::load_from(&Registry::default_path(&crate::config::repo_root())).unwrap();
+        let rpc = alloy::transports::mock::Asserter::new();
+        rpc.push_success(&crate::chain::multicall::respons_uji(vec![
+            Some(U256::from(18).abi_encode().into()),
+            Some(
+                (U256::from(100_000) * U256::from(10u64.pow(18)))
+                    .abi_encode()
+                    .into(),
+            ),
+            Some("MEME".to_string().abi_encode().into()),
+        ]));
+        let provider = alloy::providers::ProviderBuilder::new().connect_mocked_client(rpc);
+        let token = Address::repeat_byte(0x11);
+        // Native di awal dan akhir tidak menggeser indeks respons ERC20.
+        let metadata = super::super::token_meta_batch(
+            &provider,
+            &registry,
+            &[Address::ZERO, token, Address::ZERO],
+        )
+        .await
+        .unwrap();
+        assert_eq!(metadata[0].as_ref().unwrap().symbol, "ETH");
+        assert_eq!(metadata[1].as_ref().unwrap().symbol, "MEME");
+        assert_eq!(metadata[2].as_ref().unwrap().decimals, 18);
+        let meta = metadata
+            .into_iter()
+            .flatten()
+            .map(|m| (m.address.to_lowercase(), m))
+            .collect();
+        let mut candidate = kandidat_uji();
+        candidate.token0 = super::super::ZERO_ADDRESS.into();
+        candidate.token1 = token.to_string();
+        candidate.volume = "1000000000000000000".into();
+        let pool = PoolInfo {
+            version: PoolVersion::V4,
+            id: candidate.pool_id.clone(),
+            token0: candidate.token0.clone(),
+            token1: candidate.token1.clone(),
+            fee: candidate.fee,
+            dynamic_fee: false,
+            tick_spacing: candidate.tick_spacing,
+            hooks: None,
+            sqrt_price_x96: crate::math::tick_math::get_sqrt_ratio_at_tick(0)
+                .unwrap()
+                .to_string(),
+            tick: 0,
+            liquidity: "1000000000000000000".into(),
+            raw_price: 1.0,
+            stats: None,
+        };
+        let row = susun_baris(
+            &candidate,
+            &pool,
+            None,
+            &Konteks {
+                registry: &registry,
+                meta: &meta,
+                jendela_detik: 200.0,
+                sampai_blok: 200,
+                allowlist_hook: &[],
+            },
+        );
+        assert!(row.quote_dikenal);
+        assert_eq!(row.quote_symbol, "ETH");
+        assert_eq!(row.harga, Some(1.0));
+        assert_eq!(row.volume, Some(1.0));
+    }
+
     /// Harga satu banding satu dengan skala yang sama, supaya uji kedalaman
     /// menguji geometrinya saja, bukan konversi desimalnya.
     const SATUAN_UJI: Satuan = Satuan {
@@ -931,8 +1001,13 @@ mod tests {
     fn risiko_menghalangi_pembukaan() {
         // Label `Hindari` harus benar benar menghalangi, bukan sekadar menandai.
         // PRD 3.4 menyebutnya sebagai baris yang tidak bisa diklik untuk LP.
-        let (label, alasan) =
-            tentukan_label(100, Some(0.1), Some(0.0), true, &["hooknya asing".to_string()]);
+        let (label, alasan) = tentukan_label(
+            100,
+            Some(0.1),
+            Some(0.0),
+            true,
+            &["hooknya asing".to_string()],
+        );
         assert_eq!(label, Label::Hindari);
         assert!(!label.boleh_dibuka());
         assert!(alasan.contains("hooknya asing"), "alasan harus ikut");
@@ -963,7 +1038,10 @@ mod tests {
         // kelurusan jalan, bukan panjangnya, dan dua tick selalu lurus.
         let (label, alasan) = tentukan_label(100, Some(1.0), Some(0.04), true, &[]);
         assert_eq!(label, Label::LpSideways);
-        assert!(alasan.contains("0.04"), "perpindahan harus disebut: {alasan}");
+        assert!(
+            alasan.contains("0.04"),
+            "perpindahan harus disebut: {alasan}"
+        );
     }
 
     #[test]
@@ -1036,7 +1114,10 @@ mod tests {
         // yang kedua sisinya token asing, dan label itu tidak berarti apa apa.
         let (label, alasan) = tentukan_label(500, Some(0.05), Some(5.0), false, &[]);
         assert_eq!(label, Label::Pantau);
-        assert!(alasan.contains("kutipan"), "alasan harus menyebutnya: {alasan}");
+        assert!(
+            alasan.contains("kutipan"),
+            "alasan harus menyebutnya: {alasan}"
+        );
     }
 
     #[test]
@@ -1046,7 +1127,10 @@ mod tests {
         // itu akan langsung tertinggal.
         let (label, alasan) = tentukan_label(500, Some(0.52), Some(1888.1), true, &[]);
         assert_eq!(label, Label::Pantau);
-        assert!(alasan.contains("tertinggal"), "alasan harus jelas: {alasan}");
+        assert!(
+            alasan.contains("tertinggal"),
+            "alasan harus jelas: {alasan}"
+        );
 
         // Tepat di bawah ambang masih boleh diberi arah.
         let (label, _) = tentukan_label(
@@ -1092,9 +1176,11 @@ mod tests {
         // sama. Mengukur modal pada pita yang lebih sempit daripada range yang
         // sesungguhnya dibutuhkan membuat proyeksi hasilnya terlihat besar.
         let sempit = kedalaman_rentang(0, -100, 100, 1_000_000_000, true, SATUAN_UJI).unwrap();
-        let lebar =
-            kedalaman_rentang(0, -1_000, 1_000, 1_000_000_000, true, SATUAN_UJI).unwrap();
-        assert!(lebar > sempit, "lebar {lebar} harus di atas sempit {sempit}");
+        let lebar = kedalaman_rentang(0, -1_000, 1_000, 1_000_000_000, true, SATUAN_UJI).unwrap();
+        assert!(
+            lebar > sempit,
+            "lebar {lebar} harus di atas sempit {sempit}"
+        );
     }
 
     #[test]

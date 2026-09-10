@@ -10,7 +10,7 @@
  *   tidak mengizinkan memasang header pada koneksi WebSocket.
  */
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 3;
 export const WS_SUBPROTOCOL = "rangefinder";
 export const DEFAULT_ENGINE_ORIGIN = "http://127.0.0.1:8787";
 
@@ -80,7 +80,7 @@ export interface PoolStats {
   /** Null berarti belum bisa diukur, bukan nol. Pool V3 belum terukur. */
   volume: number | null;
   jendela_menit: number | null;
-  tvl: number;
+  tvl: number | null;
   apr: number | null;
 }
 
@@ -143,7 +143,7 @@ export interface QuoteGroup {
 export interface SaldoPasangan {
   memecoin: number;
   quote: number;
-  gas: number;
+  gas: number | null;
 }
 
 export interface TokenState {
@@ -235,6 +235,8 @@ export interface GateResult {
  * kosong, dan engine yang memutuskan langkah mana yang dikerjakan.
  */
 export interface LangkahIzin {
+  step_id: string;
+  spender: string;
   /** `erc20_ke_position_manager`, `erc20_ke_permit2`, atau `permit2_ke_position_manager`. */
   jenis: string;
   token: string;
@@ -252,6 +254,9 @@ export interface LangkahIzin {
  * bagian yang paling menarik untuk diubah justru calldata-nya.
  */
 export interface OpenPlanView {
+  deposit: Deposit;
+  plan_id: string;
+  request_id: string;
   pool_id: string;
   tick_lower: number;
   tick_upper: number;
@@ -323,9 +328,53 @@ export interface SendResultView {
   status: TxStatus;
   block_number: number | null;
   gas_used: number | null;
+  gas_cost_wei: string | null;
+  minted_amounts: { amount0: string; amount1: string } | null;
   token_id: string | null;
   verification: GateResult | null;
   sent_at: string;
+}
+
+export type JournalOperation =
+  | "approve"
+  | "zap"
+  | "open"
+  | "claim"
+  | "close"
+  | "increase"
+  | "rebalance";
+export type JournalStatus =
+  | "prepared"
+  | "submitted"
+  | "unknown"
+  | "succeeded"
+  | "reverted"
+  | "replaced";
+
+export interface TransactionJournalItem {
+  tx_hash: string;
+  operation: JournalOperation;
+  plan_id: string;
+  flow_id: string;
+  pool_id: string | null;
+  position_id: string | null;
+  status: JournalStatus;
+  nonce: number;
+  gas_limit: number;
+  block_number: number | null;
+  gas_used: number | null;
+  gas_cost_wei: string | null;
+  received: { amount0: string; amount1: string; evidence: string } | null;
+  confirmed: boolean;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TransactionsView {
+  owner: string;
+  items: TransactionJournalItem[];
+  error: string | null;
 }
 
 /**
@@ -336,22 +385,24 @@ export interface SendResultView {
  * slippage.
  */
 export interface HasilPnl {
-  fee: number;
+  currency: { id: string; symbol: string };
+  fee: number | null;
   /** Positif berarti rugi. Ditampilkan sebagai pengurang. */
   impermanent_loss: number;
-  gas: number;
-  slippage: number;
-  net: number;
+  gas: number | null;
+  slippage: number | null;
+  net: number | null;
   /** Benar kalau sebagian angkanya direkonstruksi, bukan dari catatan. */
   perkiraan: boolean;
 }
 
 export interface RingkasanPnl {
   jumlah: number;
-  total_net: number;
-  total_fee: number;
-  total_biaya: number;
-  win_rate_bps: number;
+  total_net: number | null;
+  total_fee: number | null;
+  total_biaya: number | null;
+  currencies: { currency: { id: string; symbol: string }; jumlah: number; total_net: number | null; total_fee: number | null; total_biaya: number | null }[];
+  win_rate_bps: number | null;
   perkiraan: number;
 }
 
@@ -438,7 +489,16 @@ export interface SignalsView {
 }
 
 /** Aksi yang bisa dijalankan pada sebuah posisi. */
-export type JenisAksi = "klaim_fee" | "tutup_posisi";
+export type JenisAksi =
+  | "tambah_likuiditas"
+  | "rebalance"
+  | "klaim_fee"
+  | "tutup_posisi";
+
+export interface ActionInput {
+  amount0?: string | null;
+  amount1?: string | null;
+}
 
 /**
  * Rencana aksi beserta hasil pemeriksaannya.
@@ -447,6 +507,9 @@ export type JenisAksi = "klaim_fee" | "tutup_posisi";
  * menyimpulkan sendiri akan menyimpang begitu ada gate baru ditambahkan.
  */
 export interface ActionPlanView {
+  plan_id: string;
+  position_id: string;
+  request_id: string;
   token_id: string;
   action: JenisAksi;
   nama: string;
@@ -457,17 +520,28 @@ export interface ActionPlanView {
   menutup: boolean;
   siap: boolean;
   expires_at: string;
-  fee0: string;
-  fee1: string;
+  fee0: string | null;
+  fee1: string | null;
+  allowances: LangkahIzin[];
+  amounts: {
+    symbol0: string;
+    amount0: string;
+    symbol1: string;
+    amount1: string;
+  } | null;
+  tick_lower_baru: number | null;
+  tick_upper_baru: number | null;
 }
 
 /** Satu posisi LP beserta keadaannya sekarang. */
 export interface Posisi {
+  position_id: string;
   token_id: string;
   version: PoolVersion;
   token0: string;
   token1: string;
   fee: number;
+  tick_spacing: number;
   tick_lower: number;
   tick_upper: number;
   liquidity: string;
@@ -475,8 +549,8 @@ export interface Posisi {
   tick_sekarang: number | null;
   in_range: boolean;
   /** Fee yang belum diklaim, dalam satuan terkecil. */
-  fee0: string;
-  fee1: string;
+  fee0: string | null;
+  fee1: string | null;
   hooks: string | null;
   sqrt_price_x96: string | null;
   /** Jumlah token yang benar benar ada di dalam posisi pada harga sekarang. */
@@ -486,6 +560,51 @@ export interface Posisi {
   pnl: HasilPnl | null;
   /** Benar kalau posisinya sudah tidak punya likuiditas sama sekali. */
   kosong: boolean;
+}
+
+export interface PosisiTertutup {
+  position_id: string;
+  token0: string;
+  token1: string;
+  tx_hash: string;
+  ditutup_pada: string;
+  diterima0: string;
+  diterima1: string;
+  bukti_penerimaan: string;
+  pnl: HasilPnl | null;
+  error: string | null;
+}
+
+export type RezimKalibrasi =
+  | "sideways"
+  | "dump_basis"
+  | "trend"
+  | "volatile"
+  | "unknown";
+
+export type StatusKalibrasi =
+  | "champion"
+  | "challenger"
+  | "archived"
+  | "rejected";
+
+export interface LearningView {
+  records: number;
+  closed_records: number;
+  /** Identitas posisi huruf kecil ke versi yang dipakai saat dibuka. */
+  position_versions: Record<string, string>;
+  calibrations: {
+    version: string;
+    regime: RezimKalibrasi;
+    status: StatusKalibrasi;
+    fee_factor: number;
+    hours_factor: number;
+    training_positions: number;
+    shadow_count: number;
+    shadow_wins: number;
+  }[];
+  /** Ringkasan dihitung engine agar filter PnL tidak mengulang matematika. */
+  summaries: { version: string; summary: RingkasanPnl }[];
 }
 
 /**
@@ -584,10 +703,15 @@ export type Kriteria = "lolos" | "gagal" | "belum_terukur";
  * sesuatu yang sebenarnya belum diukur akan menyimpulkan hal yang salah.
  */
 export interface PenilaianHook {
+  code_hash: string | null;
   hook: string;
   jumlah_pool: number | null;
   umur_hari: number | null;
   bisa_diupgrade: boolean | null;
+  /** TVL USD yang sudah terbukti; dapat berupa batas bawah. */
+  tvl_usd: number | null;
+  /** Jumlah alamat pemilik posisi aktif yang unik; dapat berupa batas bawah. */
+  lp_unik: number | null;
   kriteria_pool: Kriteria;
   kriteria_umur: Kriteria;
   kriteria_upgrade: Kriteria;
@@ -614,9 +738,11 @@ export interface ScanView {
 
 export interface PositionsView {
   positions: Posisi[];
+  tertutup: PosisiTertutup[];
   owner: string;
   keluar_range: number;
   ringkasan: RingkasanPnl;
+  learning: LearningView;
   error: string | null;
   dimuat_pada: string;
 }
@@ -668,6 +794,7 @@ export type ServerMessage =
   | ({ type: "open_plan" } & Partial<OpenPlanView>)
   | ({ type: "send_result" } & Partial<SendResultView>)
   | ({ type: "positions" } & Partial<PositionsView>)
+  | ({ type: "transactions" } & Partial<TransactionsView>)
   | ({ type: "scan_results" } & Partial<ScanView>)
   | ({ type: "depth" } & Partial<Distribusi>)
   | ({ type: "action_plan" } & Partial<ActionPlanView>)
@@ -675,6 +802,12 @@ export type ServerMessage =
   | ({ type: "notify" } & Partial<Kejadian>)
   | { type: "notify_history"; items: Kejadian[] }
   | { type: "alert"; level: AlertLevel; code: string; message: string };
+
+export interface Deposit {
+  side: "meme" | "quote";
+  amount: string;
+  zap: boolean;
+}
 
 export type ClientMessage =
   | { type: "get_status" }
@@ -686,19 +819,27 @@ export type ClientMessage =
   | { type: "select_quote"; quote: string }
   | { type: "set_range"; lower_mcap: number; upper_mcap: number }
   | { type: "set_full_range" }
-  | { type: "quote_range"; size_usd: number }
-  | { type: "approve_token"; token: string }
+  | { type: "invalidate_plan" }
+  | { type: "quote_range"; deposit: Deposit; request_id: string }
+  | { type: "approve_token"; plan_id: string; step_id: string }
   | { type: "get_positions" }
+  | { type: "get_transactions" }
   | { type: "get_notifications" }
   | { type: "scan" }
   | { type: "get_depth" }
   | { type: "set_rpc"; http: string[] }
   | { type: "approve_hook"; hook: string }
   | { type: "forget_hook"; hook: string }
-  | { type: "plan_action"; token_id: string; action: JenisAksi }
-  | { type: "execute_action" }
-  | { type: "swap_zap" }
-  | { type: "open_position" };
+  | {
+      type: "plan_action";
+      position_id: string;
+      request_id: string;
+      action: JenisAksi;
+      input: ActionInput;
+    }
+  | { type: "execute_action"; plan_id: string }
+  | { type: "swap_zap"; plan_id: string }
+  | { type: "open_position"; plan_id: string };
 
 export function asRangeView(msg: unknown): RangeView | null {
   if (!msg || typeof msg !== "object") return null;
@@ -718,6 +859,10 @@ export function asActionPlan(msg: unknown): ActionPlanView | null {
 
 export function asPositions(msg: unknown): PositionsView | null {
   return untag<PositionsView>(msg, "positions");
+}
+
+export function asTransactions(msg: unknown): TransactionsView | null {
+  return untag<TransactionsView>(msg, "transactions");
 }
 
 export function asScan(msg: unknown): ScanView | null {

@@ -100,6 +100,9 @@ async fn main() -> Result<()> {
     let (events, _) = broadcast::channel(256);
 
     let state = AppState {
+        intent: Arc::new(rangefinder_engine::api::intent::Intent::default()),
+        execution_lock: Arc::new(Mutex::new(())),
+        positions_lock: Arc::new(Mutex::new(())),
         cfg: Arc::new(cfg.clone()),
         auth: Arc::new(token),
         wallet: Arc::new(Mutex::new(wallet)),
@@ -108,7 +111,7 @@ async fn main() -> Result<()> {
         store: Arc::new(store),
         events,
         started_at: Instant::now(),
-        registry_checks: Arc::new(registry_checks),
+        registry_checks: Arc::new(tokio::sync::RwLock::new(registry_checks)),
         active: Arc::new(tokio::sync::RwLock::new(None)),
         pending_plan: Arc::new(tokio::sync::RwLock::new(None)),
         nonce: Arc::new(rangefinder_engine::exec::nonce::NonceKeeper::new()),
@@ -122,6 +125,7 @@ async fn main() -> Result<()> {
 
     spawn_health_loop(state.clone());
     spawn_auto_lock_loop(state.clone());
+    spawn_position_loop(state.clone());
 
     let listener = tokio::net::TcpListener::bind(bind)
         .await
@@ -187,10 +191,21 @@ fn spawn_health_loop(state: AppState) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
         let mut sehat_sebelumnya: Option<bool> = None;
+        let mut verifikasi_terakhir = Instant::now();
 
         loop {
             ticker.tick().await;
             let health = state.chain.check_health().await;
+            if health.healthy
+                && (sehat_sebelumnya != Some(true)
+                    || state.registry_checks.read().await.is_empty()
+                    || verifikasi_terakhir.elapsed() >= Duration::from_secs(600))
+            {
+                if let Err(e) = state.reverify_registry().await {
+                    tracing::warn!(error = %e, "eksekusi menunggu G1");
+                }
+                verifikasi_terakhir = Instant::now();
+            }
 
             // Hanya beri tahu saat status berubah, bukan setiap detak, supaya
             // tidak membanjiri panel. Lihat aturan pendinginan di PRD 3.7.
@@ -199,11 +214,7 @@ fn spawn_health_loop(state: AppState) {
                 // ikut pendinginan dan masuk riwayat. RPC yang berkedip
                 // sehat dan sakit bergantian akan membanjiri layar tanpa ini.
                 if health.healthy {
-                    state.beri_tahu(
-                        AlertLevel::Info,
-                        "rpc_healthy",
-                        "RPC kembali sehat".into(),
-                    );
+                    state.beri_tahu(AlertLevel::Info, "rpc_healthy", "RPC kembali sehat".into());
                 } else {
                     state.beri_tahu(
                         AlertLevel::Critical,
@@ -220,6 +231,60 @@ fn spawn_health_loop(state: AppState) {
             state.broadcast_status().await;
         }
     });
+}
+
+fn spawn_position_loop(state: AppState) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(30));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            ticker.tick().await;
+            if state.chain.health().await.healthy && state.wallet.lock().await.address().is_some() {
+                reconcile_transactions(&state).await;
+                state.on_get_positions().await;
+            }
+        }
+    });
+}
+
+/// Perbarui transaksi yang receipt-nya belum final tanpa membutuhkan signer.
+///
+/// Loop ini hanya membaca RPC dan jurnal lokal. Transaksi prepared atau unknown
+/// tidak pernah dikirim ulang otomatis, termasuk setelah engine restart.
+async fn reconcile_transactions(state: &AppState) {
+    let Some(owner) = state.wallet.lock().await.address() else {
+        return;
+    };
+    let provider = match state.chain.provider().await {
+        Ok(provider) => provider,
+        Err(error) => {
+            tracing::warn!(error = %error, "provider rekonsiliasi transaksi tidak tersedia");
+            return;
+        }
+    };
+    match rangefinder_engine::exec::journal::reconcile(
+        &provider,
+        &state.store,
+        state.registry.chain.id,
+        owner,
+    )
+    .await
+    {
+        Ok(report) => {
+            for entry in report.changed {
+                tracing::info!(
+                    tx = %entry.tx_hash,
+                    status = ?entry.status,
+                    confirmed = entry.confirmed_at.is_some(),
+                    "jurnal transaksi diperbarui"
+                );
+            }
+            for error in report.errors {
+                tracing::warn!(error = %error, "satu receipt jurnal belum dapat dibaca");
+            }
+        }
+        Err(error) => tracing::warn!(error = %error, "rekonsiliasi transaksi gagal"),
+    }
 }
 
 fn spawn_auto_lock_loop(state: AppState) {

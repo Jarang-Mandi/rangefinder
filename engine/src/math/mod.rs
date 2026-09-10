@@ -292,7 +292,11 @@ pub fn range_from_prices(
     // Kedua harga bisa jatuh di sel grid yang sama pada pool dengan spacing
     // lebar. Range dengan lebar nol tidak sah di Uniswap, jadi dilebarkan satu
     // sel. Pemanggil melihatnya lewat perbedaan harga hasil pembulatan.
-    let upper = if upper <= lower { lower + spacing } else { upper };
+    let upper = if upper <= lower {
+        lower + spacing
+    } else {
+        upper
+    };
 
     Some(TickRange { lower, upper })
 }
@@ -352,10 +356,7 @@ pub fn concentration_factor(pa: f64, pb: f64) -> Option<f64> {
 ///
 /// Hasil 2.45 berarti range kedua menghasilkan sekitar 2,45 kali lipat fee
 /// selama harga berada di dalamnya.
-pub fn concentration_ratio(
-    base: (f64, f64),
-    candidate: (f64, f64),
-) -> Option<f64> {
+pub fn concentration_ratio(base: (f64, f64), candidate: (f64, f64)) -> Option<f64> {
     let a = concentration_factor(base.0, base.1)?;
     let b = concentration_factor(candidate.0, candidate.1)?;
     if a <= 0.0 {

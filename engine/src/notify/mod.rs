@@ -179,7 +179,10 @@ mod tests {
         let mut n = notifier();
         n.catat(Tingkat::Info, "x", "a".into(), None, 1000);
         let k = n.catat(Tingkat::Info, "x", "b".into(), None, 1100);
-        assert!(k.ditahan, "kejadian yang sama dalam 300 detik harus tertahan");
+        assert!(
+            k.ditahan,
+            "kejadian yang sama dalam 300 detik harus tertahan"
+        );
     }
 
     #[test]

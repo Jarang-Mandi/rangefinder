@@ -262,3 +262,28 @@ yang tidak terbatas bukan sekadar tidak berguna, ia terlihat seperti temuan.
 modal itu wajib ikut di pesan protokol dan wajib tampil di panel. Kalau nanti
 modal acuan diambil dari ukuran posisi user, peringkat daftarnya bisa berubah,
 dan itu memang benar: pool tipis memang lebih menarik bagi modal kecil.
+
+---
+
+## 0009 Self-improvement tidak boleh melonggarkan gate keamanan
+
+**Tanggal** 10 September 2026. **Status** berlaku.
+
+**Konteks.** Draft PRD 12 semula memasukkan ambang gate risiko 5.4 ke parameter
+yang dapat dikalibrasi dari hasil trading. Hasil untung atau rugi sebuah posisi
+tidak membuktikan bahwa token berpajak, honeypot, atau hook yang dapat diupgrade
+menjadi aman. Sampel yang selamat juga mengandung survivor bias paling kuat.
+
+**Pilihan.** Loop self-improvement boleh mengubah faktor koreksi APR dan waktu,
+bobot klasifikasi, serta ambang detektor sideways dalam batas keras. Ia tidak
+boleh menurunkan syarat R1, R2, jumlah pool, TVL, LP unik, umur hook, atau
+larangan upgrade. Perubahan gate keamanan tetap membutuhkan perubahan kode,
+pengujian, dan review sadar.
+
+**Alasan.** Kalibrasi strategi menjawab seberapa baik sebuah setup menghasilkan
+fee. Gate keamanan menjawab apakah modal dapat masuk dan keluar sesuai kontrak.
+Keduanya memakai bukti yang berbeda dan tidak boleh saling menggantikan.
+
+**Konsekuensi.** Versi kalibrasi dapat meningkatkan atau menurunkan skor dan
+prediksi, tetapi tidak dapat membuat token atau hook yang gagal pemeriksaan
+kontrak menerima modal.

@@ -56,18 +56,23 @@ pub enum ClientMessage {
     /// di layar. Batas sebenarnya hanya diketahui engine, karena ia bergantung
     /// pada tick spacing pool.
     SetFullRange,
+    /// Input setoran sedang disunting, rencana yang tampil tidak lagi berlaku.
+    InvalidatePlan,
 
     /// Susun rencana membuka posisi sebesar sekian dolar pada range sekarang.
     ///
     /// Tidak mengirim apa pun. Seluruh gate dijalankan dan hasilnya
     /// dikirim balik sebagai `open_plan`, supaya user melihat persis apa
     /// yang akan terjadi sebelum menyetujuinya.
-    QuoteRange { size_usd: f64 },
+    QuoteRange {
+        deposit: super::deposit::Deposit,
+        request_id: String,
+    },
 
     /// Kirim `approve` ERC20 untuk satu token, sebesar yang dibutuhkan
     /// rencana terakhir. Alamat spender datang dari chain.toml, tidak
     /// pernah dari panel.
-    ApproveToken { token: String },
+    ApproveToken { plan_id: String, step_id: String },
 
     /// Deret candle dari chart gmgn, dipakai seluruh detektor sinyal.
     ///
@@ -80,12 +85,15 @@ pub enum ClientMessage {
 
     /// Susun rencana sebuah aksi pada posisi. Tidak mengirim apa pun.
     PlanAction {
-        token_id: String,
+        position_id: String,
+        request_id: String,
         action: crate::exec::aksi::JenisAksi,
+        #[serde(default)]
+        input: crate::exec::aksi::ActionInput,
     },
 
     /// Setujui aksi terakhir dan kirim transaksinya.
-    ExecuteAction,
+    ExecuteAction { plan_id: String },
 
     /// Minta riwayat notifikasi terakhir.
     GetNotifications,
@@ -131,19 +139,22 @@ pub enum ClientMessage {
     /// datang belakangan sebagai `positions`.
     GetPositions,
 
+    /// Minta jurnal transaksi persisten. Hanya membaca penyimpanan lokal.
+    GetTransactions,
+
     /// Jalankan swap zap dari rencana terakhir.
     ///
     /// Transaksi terpisah dari membuka posisi, dan itu bukan pilihan:
     /// swap berjalan lewat UniversalRouter sedangkan posisi dibuat lewat
     /// PositionManager, dan tidak ada kontrak yang bisa keduanya sekaligus.
-    SwapZap,
+    SwapZap { plan_id: String },
 
     /// Setujui rencana terakhir dan kirim transaksinya.
     ///
     /// Tidak membawa rencana, hanya persetujuan. Rencana yang datang
     /// kembali dari panel bisa saja sudah diubah, dan yang diubah itu
     /// justru calldata.
-    OpenPosition,
+    OpenPosition { plan_id: String },
 }
 
 /// Pesan dari engine ke panel.
@@ -198,6 +209,8 @@ pub enum ServerMessage {
     ScanResults(Box<ScanView>),
     /// Daftar posisi LP milik wallet beserta keadaannya.
     Positions(Box<PositionsView>),
+    /// Jurnal approve, zap, open, klaim, dan penutupan milik wallet.
+    Transactions(Box<TransactionsView>),
 
     /// Kejadian yang layak diberitahukan ke user. Lihat PRD 3.7.
     Alert {
@@ -326,6 +339,8 @@ pub struct ScanView {
 #[derive(Debug, Clone, Serialize)]
 pub struct PositionsView {
     pub positions: Vec<crate::positions::Posisi>,
+    /// Posisi yang NFT-nya sudah ditutup, direkonstruksi dari jurnal receipt.
+    pub tertutup: Vec<crate::pnl::PosisiTertutup>,
     /// Alamat wallet yang posisinya ditampilkan. Panel menampilkannya
     /// supaya tidak ada keraguan posisi siapa yang sedang dilihat.
     pub owner: String,
@@ -337,9 +352,20 @@ pub struct PositionsView {
     /// Dihitung engine, bukan panel, supaya tidak ada dua tempat yang
     /// menjumlahkan hal yang sama lalu menyimpang.
     pub ringkasan: crate::pnl::Ringkasan,
+    /// Versi kalibrasi per posisi, status penantang, dan ringkasan PnL yang
+    /// sudah dikelompokkan engine. Panel memakai ini untuk filter tanpa
+    /// menghitung ulang hasil uang sendiri.
+    pub learning: crate::learning::LearningView,
     /// Kosong kalau pemuatannya berhasil.
     pub error: Option<String>,
     pub dimuat_pada: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TransactionsView {
+    pub owner: String,
+    pub items: Vec<crate::exec::journal::View>,
+    pub error: Option<String>,
 }
 
 /// Hasil detektor sinyal untuk satu token.
@@ -360,7 +386,7 @@ pub struct SignalsView {
     pub dihitung_pada: String,
 }
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Tentukan apakah engine boleh mengeksekusi transaksi, beserta alasannya.
 ///
@@ -451,7 +477,11 @@ mod tests {
         w.exists = false;
         let (ok, reasons) = evaluate_execution_readiness(&c, &w);
         assert!(!ok);
-        assert_eq!(reasons.len(), 2, "kedua masalah harus dilaporkan, bukan yang pertama saja");
+        assert_eq!(
+            reasons.len(),
+            2,
+            "kedua masalah harus dilaporkan, bukan yang pertama saja"
+        );
     }
 
     #[test]
@@ -460,6 +490,47 @@ mod tests {
         assert!(matches!(m, ClientMessage::GetStatus));
         let m: ClientMessage = serde_json::from_str(r#"{"type":"ping"}"#).unwrap();
         assert!(matches!(m, ClientMessage::Ping));
+
+        let old: ClientMessage = serde_json::from_str(
+            r#"{"type":"plan_action","position_id":"p","request_id":"r","action":"klaim_fee"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            old,
+            ClientMessage::PlanAction { input, .. }
+                if input == crate::exec::aksi::ActionInput::default()
+        ));
+
+        let add: ClientMessage = serde_json::from_str(
+            r#"{"type":"plan_action","position_id":"p","request_id":"r","action":"tambah_likuiditas","input":{"amount0":"1.25","amount1":"2"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            add,
+            ClientMessage::PlanAction { action: crate::exec::aksi::JenisAksi::TambahLikuiditas, input, .. }
+                if input.amount0.as_deref() == Some("1.25")
+                    && input.amount1.as_deref() == Some("2")
+        ));
+
+        let zap: ClientMessage = serde_json::from_str(
+            r#"{"type":"quote_range","request_id":"quote-zap","deposit":{"side":"quote","amount":"25.5","zap":true}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            zap,
+            ClientMessage::QuoteRange { request_id, deposit }
+                if request_id == "quote-zap"
+                    && deposit.side == super::super::deposit::Side::Quote
+                    && deposit.amount == "25.5"
+                    && deposit.zap
+        ));
+
+        let execute_zap: ClientMessage =
+            serde_json::from_str(r#"{"type":"swap_zap","plan_id":"plan-123"}"#).unwrap();
+        assert!(matches!(
+            execute_zap,
+            ClientMessage::SwapZap { plan_id } if plan_id == "plan-123"
+        ));
     }
 
     #[test]

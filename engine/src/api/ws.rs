@@ -17,9 +17,7 @@ use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
 
 use super::protocol::{ClientMessage, ServerMessage, PROTOCOL_VERSION};
-use super::{
-    token_from_subprotocols, AppState, ENGINE_VERSION, WS_SUBPROTOCOL, WS_UNAUTHORIZED,
-};
+use super::{token_from_subprotocols, AppState, ENGINE_VERSION, WS_SUBPROTOCOL, WS_UNAUTHORIZED};
 
 pub async fn handler(
     State(state): State<AppState>,
@@ -109,21 +107,28 @@ async fn session(socket: WebSocket, state: AppState) {
                             Ok(ClientMessage::SetFullRange) => {
                                 state.on_set_full_range().await;
                             }
+                            Ok(ClientMessage::InvalidatePlan) => { state.intent.change(); }
                             // Tiga pesan berikut menyentuh dana. Masing masing
                             // dijalankan di tugas terpisah supaya loop ini tetap
                             // membalas denyut selama transaksi menunggu receipt,
                             // yang bisa memakan puluhan detik.
-                            Ok(ClientMessage::QuoteRange { size_usd }) => {
+                            Ok(ClientMessage::QuoteRange { deposit, request_id }) => {
                                 let s = state.clone();
-                                tokio::spawn(async move { s.on_quote_range(size_usd).await });
+                                let revision = s.intent.change();
+                                tokio::spawn(async move { s.on_quote_range(super::execute::QuoteTask {
+                                    deposit, request_id, revision, budget_override: None,
+                                }).await });
                             }
-                            Ok(ClientMessage::ApproveToken { token }) => {
+                            Ok(ClientMessage::ApproveToken { plan_id, step_id }) => {
                                 let s = state.clone();
-                                tokio::spawn(async move { s.on_approve_token(token).await });
+                                tokio::spawn(async move { s.on_approve_token(plan_id, step_id).await });
                             }
                             Ok(ClientMessage::GetPositions) => {
                                 let s = state.clone();
                                 tokio::spawn(async move { s.on_get_positions().await });
+                            }
+                            Ok(ClientMessage::GetTransactions) => {
+                                state.on_get_transactions().await;
                             }
                             Ok(ClientMessage::SetRpc { http }) => {
                                 let s = state.clone();
@@ -153,26 +158,26 @@ async fn session(socket: WebSocket, state: AppState) {
                                 let s = state.clone();
                                 tokio::spawn(async move { s.on_chart_bars(address, bars).await });
                             }
-                            Ok(ClientMessage::PlanAction { token_id, action }) => {
+                            Ok(ClientMessage::PlanAction { position_id, action, request_id, input }) => {
                                 let s = state.clone();
-                                tokio::spawn(async move { s.on_plan_action(token_id, action).await });
+                                let revision = s.intent.begin_action();
+                                tokio::spawn(async move { s.on_plan_action(position_id, action, input, request_id, revision).await });
                             }
-                            Ok(ClientMessage::ExecuteAction) => {
+                            Ok(ClientMessage::ExecuteAction { plan_id }) => {
                                 let s = state.clone();
-                                tokio::spawn(async move { s.on_execute_action().await });
+                                tokio::spawn(async move { s.on_execute_action(plan_id).await });
                             }
-                            Ok(ClientMessage::SwapZap) => {
+                            Ok(ClientMessage::SwapZap { plan_id }) => {
                                 let s = state.clone();
-                                tokio::spawn(async move { s.on_swap_zap().await });
+                                tokio::spawn(async move { s.on_swap_zap(plan_id).await });
                             }
-                            Ok(ClientMessage::OpenPosition) => {
+                            Ok(ClientMessage::OpenPosition { plan_id }) => {
                                 let s = state.clone();
-                                tokio::spawn(async move { s.on_open_position().await });
+                                tokio::spawn(async move { s.on_open_position(plan_id).await });
                             }
                             Ok(ClientMessage::Ping) => {
-                                // Denyut juga memundurkan kunci otomatis, karena
-                                // panel yang terbuka berarti user masih bekerja.
-                                state.wallet.lock().await.touch();
+                                // Denyut berasal juga dari tab notifikasi pasif.
+                                // Ia tidak boleh memperpanjang masa buka wallet.
                                 if send(&mut tx, &ServerMessage::Pong).await.is_err() {
                                     break;
                                 }

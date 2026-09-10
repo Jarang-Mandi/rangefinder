@@ -223,7 +223,10 @@ mod tests {
             tick += 373;
         }
 
-        assert!(diperiksa > 4_000, "hanya {diperiksa} tick diperiksa, terlalu sedikit");
+        assert!(
+            diperiksa > 4_000,
+            "hanya {diperiksa} tick diperiksa, terlalu sedikit"
+        );
     }
 
     #[test]
@@ -245,7 +248,18 @@ mod tests {
 
     #[test]
     fn membaca_balik_tick_dari_sqrt_ratio() {
-        for tick in [MIN_TICK, -100_000, -60, -1, 0, 1, 60, 78_782, 100_000, MAX_TICK - 1] {
+        for tick in [
+            MIN_TICK,
+            -100_000,
+            -60,
+            -1,
+            0,
+            1,
+            60,
+            78_782,
+            100_000,
+            MAX_TICK - 1,
+        ] {
             let sqrt = get_sqrt_ratio_at_tick(tick).unwrap();
             let kembali = get_tick_at_sqrt_ratio(sqrt).unwrap();
             assert_eq!(kembali, tick, "tick {tick} tidak kembali utuh");

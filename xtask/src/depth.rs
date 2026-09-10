@@ -43,8 +43,14 @@ pub async fn run(repo_root: &Path, token_arg: &str) -> Result<bool> {
         .parse()
         .with_context(|| format!("`{token_arg}` bukan alamat EVM"))?;
 
-    let snapshot =
-        pools::muat_token(&provider, &registry, None, token, pools::ModePencarian::Penuh).await?;
+    let snapshot = pools::muat_token(
+        &provider,
+        &registry,
+        None,
+        token,
+        pools::ModePencarian::Penuh,
+    )
+    .await?;
 
     let Some(kelompok) = snapshot.quotes.first() else {
         println!("  Tidak ada pool layak untuk token ini.");
@@ -119,11 +125,7 @@ pub async fn run(repo_root: &Path, token_arg: &str) -> Result<bool> {
     println!("  {} pita terbaca", d.pita.len());
     println!();
 
-    let puncak = d
-        .pita
-        .iter()
-        .map(|p| p.nilai_quote)
-        .fold(0.0_f64, f64::max);
+    let puncak = d.pita.iter().map(|p| p.nilai_quote).fold(0.0_f64, f64::max);
     if puncak <= 0.0 {
         println!("  Seluruh pita bernilai nol, tidak ada yang bisa digambar.");
         return Ok(false);

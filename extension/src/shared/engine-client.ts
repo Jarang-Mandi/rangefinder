@@ -13,27 +13,32 @@
 import {
   DEFAULT_ENGINE_ORIGIN,
   WS_SUBPROTOCOL,
+  PROTOCOL_VERSION,
   asEngineStatus,
   asActionPlan,
   asNotify,
   asSignals,
   asOpenPlan,
   asPositions,
+  asTransactions,
   asDepth,
   asRangeView,
   asScan,
   asSendResult,
   asTokenState,
   type ClientMessage,
+  type Deposit,
   type EnginePing,
   type EngineStatus,
   type ActionPlanView,
+  type ActionInput,
   type AlertLevel,
   type Bar,
   type JenisAksi,
   type Kejadian,
   type OpenPlanView,
   type PositionsView,
+  type TransactionsView,
   type RangeView,
   type Distribusi,
   type ScanView,
@@ -59,6 +64,7 @@ interface Handlers {
   onOpenPlan?: (plan: OpenPlanView) => void;
   onSendResult?: (result: SendResultView) => void;
   onPositions?: (view: PositionsView) => void;
+  onTransactions?: (view: TransactionsView) => void;
   onActionPlan?: (plan: ActionPlanView) => void;
   onSignals?: (view: SignalsView) => void;
   onScan?: (view: ScanView) => void;
@@ -77,6 +83,9 @@ export class EngineClient {
   private reconnectTimer: number | null = null;
   private backoff = BACKOFF_START_MS;
   private stopped = false;
+  private protocolReady = false;
+  private quoteRequest: string | null = null;
+  private actionRequest: string | null = null;
 
   constructor(
     private readonly origin: string = DEFAULT_ENGINE_ORIGIN,
@@ -151,11 +160,10 @@ export class EngineClient {
       return;
     }
     this.socket = socket;
+    this.protocolReady = false;
 
     socket.onopen = () => {
       this.backoff = BACKOFF_START_MS;
-      this.handlers.onState("connected");
-      this.startHeartbeat();
     };
 
     socket.onmessage = (event) => {
@@ -165,6 +173,20 @@ export class EngineClient {
       } catch {
         return;
       }
+
+      if (msg.type === "hello") {
+        if (msg.protocol_version !== PROTOCOL_VERSION) {
+          this.stopped = true;
+          socket.close(1000, "versi protokol berbeda");
+          this.handlers.onState("offline", "Versi engine dan ekstensi berbeda. Perbarui keduanya.");
+          return;
+        }
+        this.protocolReady = true;
+        this.handlers.onState("connected");
+        this.startHeartbeat();
+        return;
+      }
+      if (!this.protocolReady) return;
 
       const status = asEngineStatus(msg);
       if (status) {
@@ -186,8 +208,14 @@ export class EngineClient {
         this.handlers.onPositions?.(posisi);
         return;
       }
+      const transaksi = asTransactions(msg);
+      if (transaksi) {
+        this.handlers.onTransactions?.(transaksi);
+        return;
+      }
       const aksi = asActionPlan(msg);
       if (aksi) {
+        if (aksi.request_id !== this.actionRequest) return;
         this.handlers.onActionPlan?.(aksi);
         return;
       }
@@ -218,6 +246,7 @@ export class EngineClient {
       }
       const plan = asOpenPlan(msg);
       if (plan) {
+        if (plan.request_id !== this.quoteRequest) return;
         this.handlers.onOpenPlan?.(plan);
         return;
       }
@@ -234,6 +263,8 @@ export class EngineClient {
     socket.onclose = (event) => {
       this.clearTimers();
       this.socket = null;
+      this.protocolReady = false;
+      if (this.stopped) return;
       // 1006 tanpa pernah terbuka biasanya berarti handshake ditolak, dan
       // penyebab paling umum adalah token yang salah.
       if (event.code === 1006 && this.backoff === BACKOFF_START_MS) {
@@ -250,7 +281,7 @@ export class EngineClient {
   }
 
   private send(msg: ClientMessage) {
-    if (this.socket?.readyState === WebSocket.OPEN) {
+    if (this.protocolReady && this.socket?.readyState === WebSocket.OPEN) {
       this.socket.send(JSON.stringify(msg));
     }
   }
@@ -301,18 +332,29 @@ export class EngineClient {
    * karena keduanya sudah ada di engine, dan menerimanya dari panel berarti
    * menerima parameter transaksi dari luar.
    */
-  quoteRange(sizeUsd: number) {
-    this.send({ type: "quote_range", size_usd: sizeUsd });
+  quoteRange(deposit: Deposit) {
+    this.quoteRequest = crypto.randomUUID();
+    this.send({ type: "quote_range", deposit, request_id: this.quoteRequest });
+  }
+
+  invalidatePlan() {
+    this.quoteRequest = null;
+    this.send({ type: "invalidate_plan" });
   }
 
   /** Beri izin ERC20 sebesar yang dibutuhkan rencana terakhir. */
-  approveToken(token: string) {
-    this.send({ type: "approve_token", token });
+  approveToken(planId: string, stepId: string) {
+    this.send({ type: "approve_token", plan_id: planId, step_id: stepId });
   }
 
   /** Muat ulang posisi LP wallet dari rantai. */
   getPositions() {
     this.send({ type: "get_positions" });
+  }
+
+  /** Baca jurnal transaksi persisten tanpa menyentuh wallet signer. */
+  getTransactions() {
+    this.send({ type: "get_transactions" });
   }
 
   /**
@@ -326,13 +368,20 @@ export class EngineClient {
   }
 
   /** Susun rencana sebuah aksi pada posisi. Tidak mengirim apa pun. */
-  planAction(tokenId: string, action: JenisAksi) {
-    this.send({ type: "plan_action", token_id: tokenId, action });
+  planAction(positionId: string, action: JenisAksi, input: ActionInput = {}) {
+    this.actionRequest = crypto.randomUUID();
+    this.send({
+      type: "plan_action",
+      position_id: positionId,
+      request_id: this.actionRequest,
+      action,
+      input,
+    });
   }
 
   /** Setujui aksi terakhir. Ini yang benar benar memindahkan dana. */
-  executeAction() {
-    this.send({ type: "execute_action" });
+  executeAction(planId: string) {
+    this.send({ type: "execute_action", plan_id: planId });
   }
 
   /** Minta riwayat notifikasi terakhir. */
@@ -385,13 +434,13 @@ export class EngineClient {
   }
 
   /** Jalankan swap zap dari rencana terakhir. */
-  swapZap() {
-    this.send({ type: "swap_zap" });
+  swapZap(planId: string) {
+    this.send({ type: "swap_zap", plan_id: planId });
   }
 
   /** Setujui rencana terakhir. Ini yang benar benar memindahkan dana. */
-  openPosition() {
-    this.send({ type: "open_position" });
+  openPosition(planId: string) {
+    this.send({ type: "open_position", plan_id: planId });
   }
 
   /** Batas dalam market cap USD, karena itu satuan yang dipakai chart. */

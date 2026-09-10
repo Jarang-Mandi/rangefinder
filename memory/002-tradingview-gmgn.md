@@ -88,11 +88,20 @@ itu pembacanya wajib memeriksa `high >= max(open, close)` dan
 Library berikutnya, pemeriksaan itu yang akan menangkapnya, bukan pengguna yang
 menemukan garisnya salah tempat.
 
-## Chart tanpa data saat riset
+## URL baru bisa masih memakai data token lama
 
-Saat pengujian, chart tidak menampilkan lilin sama sekali, kemungkinan karena
-data chain sedang tertunda, dan gmgn memang menampilkan banner bahwa Robinhood
-Chain tidak stabil. Seluruh jalur API terbukti berfungsi dan garis berhasil
-dibuat lalu dibaca kembali, tapi **penggambaran garis di atas chart yang berisi
-lilin belum pernah dilihat langsung**. Verifikasi ulang hal itu di fase 2
-sebelum menganggap tampilannya benar.
+Pengujian browser 10 September menemukan bahwa navigasi SPA mengubah URL lebih
+dulu. Selama sekitar satu detik, `tradingViewApi.activeChart().symbol()` dan
+lilin terakhir masih milik token sebelumnya. Memeriksa URL saja justru membuat
+harga lama diberi label token baru. Attach harus menunggu sampai segmen alamat
+pada simbol sama dengan token URL.
+
+Pada profil Chromium baru, API chart juga pernah belum siap setelah 15 detik.
+Bridge harus mencoba attach lagi dengan satu timer, selama token dan generasi
+belum berubah. Jangan memperpanjang satu Promise tanpa batas karena iframe yang
+dibuang memang tidak akan memanggil callback `dataReady`.
+
+Bundle hasil build diuji sebagai ekstensi unpacked pada dua tab token GMGN.
+Keduanya mencapai capability tier 1 dengan simbol yang cocok. Pada chart berisi
+candle, perintah bridge menambah tepat dua shape lalu `clear_lines`
+mengembalikan jumlah shape ke keadaan awal.

@@ -64,7 +64,10 @@ pub async fn run(repo_root: &Path) -> Result<bool> {
             "modifyLiquidities(bytes,uint256)",
             IPositionManagerV4::modifyLiquiditiesCall::SELECTOR,
         ),
-        ("nextTokenId()", IPositionManagerV4::nextTokenIdCall::SELECTOR),
+        (
+            "nextTokenId()",
+            IPositionManagerV4::nextTokenIdCall::SELECTOR,
+        ),
         (
             "getPositionLiquidity(uint256)",
             IPositionManagerV4::getPositionLiquidityCall::SELECTOR,
@@ -73,9 +76,15 @@ pub async fn run(repo_root: &Path) -> Result<bool> {
             "getPoolAndPositionInfo(uint256)",
             IPositionManagerV4::getPoolAndPositionInfoCall::SELECTOR,
         ),
-        ("poolManager()", IPositionManagerV4::poolManagerCall::SELECTOR),
+        (
+            "poolManager()",
+            IPositionManagerV4::poolManagerCall::SELECTOR,
+        ),
         ("permit2()", IPositionManagerV4::permit2Call::SELECTOR),
-        ("ownerOf(uint256)", IPositionManagerV4::ownerOfCall::SELECTOR),
+        (
+            "ownerOf(uint256)",
+            IPositionManagerV4::ownerOfCall::SELECTOR,
+        ),
     ] {
         let ada = cari_selector(&kode_pm, &sel);
         if !ada {
@@ -283,7 +292,10 @@ pub async fn run(repo_root: &Path) -> Result<bool> {
     for (nama, sel) in [
         ("getSlot0", IStateView::getSlot0Call::SELECTOR),
         ("getLiquidity", IStateView::getLiquidityCall::SELECTOR),
-        ("getTickLiquidity", IStateView::getTickLiquidityCall::SELECTOR),
+        (
+            "getTickLiquidity",
+            IStateView::getTickLiquidityCall::SELECTOR,
+        ),
         ("getTickBitmap", IStateView::getTickBitmapCall::SELECTOR),
     ] {
         let ada = kode_sv.windows(4).any(|w| w == sel);

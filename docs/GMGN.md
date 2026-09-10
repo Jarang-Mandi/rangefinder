@@ -1,7 +1,7 @@
 # Kontrak terhadap gmgn.ai
 
 Semua yang ada di sini adalah hasil pengamatan langsung di browser pada
-5 September 2026, bukan dokumentasi resmi. gmgn tidak menjanjikan apa pun
+5 dan 10 September 2026, bukan dokumentasi resmi. gmgn tidak menjanjikan apa pun
 kepada kita, jadi setiap poin disertai cara memverifikasi ulang. Kalau ada satu
 saja yang tidak lagi benar, perbaiki berkas ini pada sesi yang sama, dan catat
 apa yang berubah di `memory/`.
@@ -38,6 +38,12 @@ gmgn adalah aplikasi Next.js satu halaman. Berpindah token TIDAK memuat ulang
 dokumen, jadi content script wajib mendeteksi navigasi lewat History API dan
 `MutationObserver`, bukan lewat `load`.
 
+Pada navigasi SPA, URL berubah sekitar satu detik sebelum simbol dan data pada
+`tradingViewApi` berpindah. Bridge wajib mencocokkan segmen alamat di
+`activeChart().symbol()` dengan alamat URL sebelum mengirim `token_page`,
+harga, atau candle. Pengujian 10 September mereproduksi harga PONS lama yang
+sempat berlabel alamat PONS baru sebelum pemeriksaan ini ditambahkan.
+
 ## Chart
 
 Chart adalah TradingView Charting Library di dalam iframe yang **same origin**,
@@ -64,6 +70,11 @@ getPanes
 
 Method pada `tradingViewApi` sendiri: `subscribe`, `unsubscribe`, `chart`,
 `activeChart`.
+
+Pada profil Chromium baru, `tradingViewApi` pernah baru siap sesudah batas
+tunggu 15 detik pertama. Kegagalan attach pertama bukan keadaan terminal;
+bridge mencoba lagi dengan satu timer selama URL masih menunjuk token yang
+sama.
 
 Properti shape yang bisa dioverride:
 
@@ -123,6 +134,13 @@ bukan diam diam mengembalikan angka yang salah.
 memanggil `getShapeById` menghasilkan `Error: There is no such shape`. Ini
 sudah terjadi saat riset awal, dan penyebabnya tidak kelihatan dari pesan
 errornya.
+
+Pembuatan shape juga bisa selesai setelah navigasi. Jangan mencatat ID itu
+sebagai milik chart baru: periksa generasi halaman setelah await dan hapus
+shape melalui objek chart yang membuatnya. Antrean halaman baru dipisahkan
+dari promise iframe lama. `dataReady` diberi batas waktu karena callback
+bisa tidak pernah datang ketika iframe dibuang. Perintah gambar membawa token
+dan ditolak jika sudah berbeda dengan URL tab tujuan.
 
 **`getAllShapes` mengembalikan shape milik user juga.** Jangan pernah menghapus
 massal. Simpan entity id milik sendiri, hapus hanya itu. Entity id berupa
@@ -191,6 +209,7 @@ memindai lebih cepat.
   untuk harga realtime.
 - Perilaku endpoint saat user tidak login belum diuji menyeluruh. Saat riset,
   sesi dalam keadaan tidak login dan endpoint rank tetap menjawab.
-- Chart tidak menampilkan lilin saat riset, kemungkinan karena data chain
-  sedang tertunda. Jalur akses API tetap terbukti berfungsi, tapi penggambaran
-  garis di atas chart berisi data belum pernah dilihat langsung.
+- Bentuk chart dan waktu pemasangan API tidak stabil. Pada 10 September, chart
+  berisi candle mencapai capability tier 1 pada tiga token Robinhood. Dua garis
+  dibuat dan dibersihkan lewat bundle ekstensi nyata. Pemeriksaan capability,
+  retry attach, dan pencocokan simbol tetap wajib karena semua API ini internal.

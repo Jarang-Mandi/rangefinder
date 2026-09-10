@@ -145,6 +145,19 @@ pub fn decode<C: SolCall>(raw: Option<&Bytes>) -> Option<C::Return> {
     C::abi_decode_returns(data).ok()
 }
 
+/// Respons ABI lengkap untuk pengujian konsumen Multicall tanpa RPC sungguhan.
+#[cfg(test)]
+pub(crate) fn respons_uji(hasil: Vec<Option<Bytes>>) -> Bytes {
+    let hasil: Vec<IMulticall3::Result> = hasil
+        .into_iter()
+        .map(|v| IMulticall3::Result {
+            success: v.is_some(),
+            returnData: v.unwrap_or_default(),
+        })
+        .collect();
+    IMulticall3::aggregate3Call::abi_encode_returns(&hasil).into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

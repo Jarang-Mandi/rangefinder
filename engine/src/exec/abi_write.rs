@@ -107,6 +107,17 @@ sol! {
 }
 
 sol! {
+    /// Jumlah token yang benar benar keluar saat fee atau posisi diambil.
+    #[derive(Debug)]
+    event Collect(
+        uint256 indexed tokenId,
+        address recipient,
+        uint256 amount0,
+        uint256 amount1
+    );
+}
+
+sol! {
     /// Dipancarkan saat likuiditas ditambahkan, baik lewat `mint` maupun
     /// `increaseLiquidity`.
     ///
@@ -115,6 +126,19 @@ sol! {
     /// cara menemukan transaksi berdasarkan kontrak tujuan.
     #[derive(Debug)]
     event IncreaseLiquidity(
+        uint256 indexed tokenId,
+        uint128 liquidity,
+        uint256 amount0,
+        uint256 amount1
+    );
+}
+
+sol! {
+    /// Principal yang dilepas dari posisi. Jumlah ini baru berpindah ketika
+    /// `Collect` dipanggil, sehingga keduanya harus direkonsiliasi saat
+    /// membangun histori posisi eksternal.
+    #[derive(Debug)]
+    event DecreaseLiquidity(
         uint256 indexed tokenId,
         uint128 liquidity,
         uint256 amount0,

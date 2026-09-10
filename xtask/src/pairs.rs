@@ -56,10 +56,8 @@ pub async fn run(repo_root: &Path, token_arg: &str) -> Result<bool> {
     );
 
     let lawan = pools::counterparties(&semua, &token.to_string());
-    let alamat_lawan: Vec<alloy::primitives::Address> = lawan
-        .iter()
-        .filter_map(|(a, _)| a.parse().ok())
-        .collect();
+    let alamat_lawan: Vec<alloy::primitives::Address> =
+        lawan.iter().filter_map(|(a, _)| a.parse().ok()).collect();
     let t1 = std::time::Instant::now();
     let meta_lawan = pools::token_meta_batch(&provider, &registry, &alamat_lawan).await?;
     println!();

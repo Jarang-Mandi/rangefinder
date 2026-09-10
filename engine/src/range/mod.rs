@@ -108,6 +108,25 @@ pub fn default_range(price_weth: f64, o: PoolOrientation, spacing: i32) -> Optio
     range_from_prices(bawah, atas, o, spacing)
 }
 
+/// Batas penuh dinyatakan pada sumbu harga memecoin, yang bisa kebalikan tick.
+pub fn full_bounds(pool: &PoolInfo, token: &str, mcap: f64) -> Option<(f64, f64)> {
+    if pool.tick_spacing <= 0 || !mcap.is_finite() || mcap <= 0.0 {
+        return None;
+    }
+    let lo = math::ceil_to_spacing(math::MIN_TICK, pool.tick_spacing);
+    let hi = math::floor_to_spacing(math::MAX_TICK, pool.tick_spacing);
+    let arah = if token.eq_ignore_ascii_case(&pool.token0) {
+        1
+    } else if token.eq_ignore_ascii_case(&pool.token1) {
+        -1
+    } else {
+        return None;
+    };
+    let a = mcap * 1.0001_f64.powi(arah * (lo - pool.tick));
+    let b = mcap * 1.0001_f64.powi(arah * (hi - pool.tick));
+    (a.is_finite() && b.is_finite() && a > 0.0 && b > 0.0).then_some((a.min(b), a.max(b)))
+}
+
 /// Susun tampilan range lengkap dari keadaan pool dan market cap di chart.
 ///
 /// `requested` berisi batas dalam market cap USD kalau user sudah menggeser
@@ -133,9 +152,10 @@ pub fn build_view(
     let price_weth = raw_price_to_price_weth(pool.raw_price, orientation)
         .ok_or_else(|| format!("harga pool {} tidak masuk akal", pool.id))?;
 
-    let eth_usd = calibrate_eth_usd(chart_mcap_usd, meta.total_supply, price_weth).ok_or_else(
-        || "kalibrasi kurs gagal, market cap atau suplai tidak masuk akal".to_string(),
-    )?;
+    let eth_usd =
+        calibrate_eth_usd(chart_mcap_usd, meta.total_supply, price_weth).ok_or_else(|| {
+            "kalibrasi kurs gagal, market cap atau suplai tidak masuk akal".to_string()
+        })?;
 
     // RENTANG WAJAR HANYA BERLAKU UNTUK ETH
     //
@@ -284,6 +304,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn penuh_kedua_orientasi_dan_tick_tidak_nol() {
+        for tick in [-100_000, 0, 100_000] {
+            for balik in [false, true] {
+                let mut p = pool_memecoin_token1(1.0001_f64.powi(tick));
+                p.tick = tick;
+                if balik {
+                    std::mem::swap(&mut p.token0, &mut p.token1);
+                }
+                let m = meta();
+                let bounds = full_bounds(&p, &m.address, 1e6).unwrap();
+                let view = build_view(&p, &m, 18, 1e6, Some(bounds), false).unwrap();
+                let (lo, hi) = (
+                    view.lower.tick.min(view.upper.tick),
+                    view.lower.tick.max(view.upper.tick),
+                );
+                assert_eq!((lo, hi), (-887220, 887220));
+            }
+        }
+    }
+
     /// Pool dengan memecoin sebagai token1, seperti PONS/WETH yang sebenarnya,
     /// karena alamat WETH lebih kecil.
     fn pool_memecoin_token1(raw_price: f64) -> PoolInfo {
@@ -303,7 +344,6 @@ mod tests {
             stats: None,
         }
     }
-
 
     #[test]
     fn peringatan_kurs_tidak_berlaku_untuk_kutipan_stablecoin() {
@@ -340,7 +380,9 @@ mod tests {
     #[test]
     fn token_asing_ditolak() {
         let p = pool_memecoin_token1(2638.0);
-        assert!(orientation_for(&p, "0xdeadbeef00000000000000000000000000000000", 18, 18).is_none());
+        assert!(
+            orientation_for(&p, "0xdeadbeef00000000000000000000000000000000", 18, 18).is_none()
+        );
     }
 
     #[test]
@@ -356,10 +398,16 @@ mod tests {
         // Batas bawah selalu di bawah batas atas dalam satuan tampilan, meski
         // memecoin menempati token1 sehingga sumbu ticknya terbalik.
         assert!(view.lower.mcap_usd < view.upper.mcap_usd);
-        assert!(view.lower.tick > view.upper.tick, "sumbu tick terbalik untuk token1");
+        assert!(
+            view.lower.tick > view.upper.tick,
+            "sumbu tick terbalik untuk token1"
+        );
 
         // Harga sekarang harus berada di dalam range bawaan.
-        assert!(view.in_range, "range bawaan harus melingkupi harga sekarang");
+        assert!(
+            view.in_range,
+            "range bawaan harus melingkupi harga sekarang"
+        );
 
         // Lebar bawaan sekitar 30 persen, yaitu 15 persen ke tiap arah.
         assert!(
@@ -369,8 +417,16 @@ mod tests {
         );
 
         // Kurs tersirat harus masuk akal untuk ETH.
-        assert!(view.eth_usd > 100.0 && view.eth_usd < 100_000.0, "kurs {}", view.eth_usd);
-        assert!(view.warnings.is_empty(), "tidak ada peringatan: {:?}", view.warnings);
+        assert!(
+            view.eth_usd > 100.0 && view.eth_usd < 100_000.0,
+            "kurs {}",
+            view.eth_usd
+        );
+        assert!(
+            view.warnings.is_empty(),
+            "tidak ada peringatan: {:?}",
+            view.warnings
+        );
     }
 
     #[test]
@@ -381,7 +437,15 @@ mod tests {
 
         let minta_bawah = 8.0e8;
         let minta_atas = 1.1e9;
-        let view = build_view(&p, &m, 18, 937_234_340.0, Some((minta_bawah, minta_atas)), true).unwrap();
+        let view = build_view(
+            &p,
+            &m,
+            18,
+            937_234_340.0,
+            Some((minta_bawah, minta_atas)),
+            true,
+        )
+        .unwrap();
 
         // Hasilnya harus dekat dengan yang diminta, tapi tidak wajib sama
         // persis karena tick dibulatkan ke grid.

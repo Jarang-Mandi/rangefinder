@@ -11,7 +11,9 @@
 //!   Authorization, untuk WebSocket ia dititipkan di subprotocol, karena
 //!   browser tidak bisa memasang header pada koneksi WebSocket.
 
+pub mod deposit;
 pub mod execute;
+pub mod intent;
 pub mod protocol;
 pub mod routes;
 pub mod ws;
@@ -65,6 +67,9 @@ pub type DeretBar = (String, Vec<crate::signals::bar::Bar>);
 
 #[derive(Clone)]
 pub struct AppState {
+    pub intent: Arc<intent::Intent>,
+    pub execution_lock: Arc<Mutex<()>>,
+    pub positions_lock: Arc<Mutex<()>>,
     pub cfg: Arc<Config>,
     pub auth: Arc<PairingToken>,
     pub wallet: Arc<Mutex<Wallet>>,
@@ -76,7 +81,7 @@ pub struct AppState {
     pub started_at: Instant,
     /// Hasil gate G1 dari saat start, disimpan supaya panel bisa menampilkannya
     /// tanpa memanggil RPC ulang setiap kali.
-    pub registry_checks: Arc<Vec<crate::chain::RegistryCheck>>,
+    pub registry_checks: Arc<tokio::sync::RwLock<Vec<crate::chain::RegistryCheck>>>,
     /// Token yang sedang dilihat user beserta pool terpilihnya.
     ///
     /// Satu slot saja, karena side panel hanya menampilkan satu token pada satu
@@ -145,19 +150,122 @@ impl ActiveToken {
     }
 }
 
+fn pool_dari_posisi(posisi: &crate::positions::Posisi) -> Result<crate::pools::PoolInfo, String> {
+    Ok(crate::pools::PoolInfo {
+        version: posisi.version,
+        id: posisi.position_id.clone(),
+        token0: posisi.token0.clone(),
+        token1: posisi.token1.clone(),
+        fee: posisi.fee,
+        dynamic_fee: posisi.fee & crate::pools::DYNAMIC_FEE_FLAG != 0,
+        tick_spacing: posisi.tick_spacing,
+        hooks: posisi.hooks.clone(),
+        sqrt_price_x96: posisi
+            .sqrt_price_x96
+            .clone()
+            .ok_or("harga pool posisi belum terbaca")?,
+        tick: posisi
+            .tick_sekarang
+            .ok_or("tick pool posisi belum terbaca")?,
+        liquidity: posisi.liquidity.clone(),
+        raw_price: f64::NAN,
+        stats: None,
+    })
+}
+
+fn jumlah_aksi(input: Option<&str>, decimals: u8) -> Result<alloy::primitives::U256, String> {
+    let Some(value) = input.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(alloy::primitives::U256::ZERO);
+    };
+    if value.bytes().all(|byte| byte == b'0' || byte == b'.') {
+        return Ok(alloy::primitives::U256::ZERO);
+    }
+    deposit::units(value, decimals)
+}
+
+fn batas_atas_aksi(
+    dibutuhkan: alloy::primitives::U256,
+    slippage_bps: u32,
+    tersedia: alloy::primitives::U256,
+) -> alloy::primitives::U256 {
+    let bps = alloy::primitives::U256::from(10_000u32);
+    let tambahan = alloy::primitives::U256::from(slippage_bps.min(10_000));
+    (dibutuhkan * (bps + tambahan) / bps)
+        .min(tersedia)
+        .max(dibutuhkan.min(tersedia))
+}
+
+fn ke_u128_aksi(value: alloy::primitives::U256, nama: &str) -> Result<u128, String> {
+    value
+        .try_into()
+        .map_err(|_| format!("{nama} melampaui batas uint128 kontrak"))
+}
+
+fn token_id_u256(value: &str) -> Result<alloy::primitives::U256, String> {
+    value
+        .parse()
+        .map_err(|_| format!("token id `{value}` bukan angka"))
+}
+
+fn nilai_usd_aksi(
+    posisi: &crate::positions::Posisi,
+    meta0: &crate::pools::TokenMeta,
+    meta1: &crate::pools::TokenMeta,
+    amount0: alloy::primitives::U256,
+    amount1: alloy::primitives::U256,
+    active: &ActiveToken,
+) -> Option<f64> {
+    let mcap = active.chart_mcap_usd?;
+    if !(mcap.is_finite() && mcap > 0.0 && active.meta.total_supply.is_finite())
+        || active.meta.total_supply <= 0.0
+    {
+        return None;
+    }
+    let meme0 = posisi.token0.eq_ignore_ascii_case(&active.meta.address);
+    let meme1 = posisi.token1.eq_ignore_ascii_case(&active.meta.address);
+    if !meme0 && !meme1 {
+        return None;
+    }
+    let sqrt: alloy::primitives::U256 = posisi.sqrt_price_x96.as_ref()?.parse().ok()?;
+    let raw = crate::pools::raw_price_from_sqrt_x96(sqrt);
+    if !(raw.is_finite() && raw > 0.0) {
+        return None;
+    }
+    let human_ratio = raw * 10f64.powi(i32::from(meta0.decimals) - i32::from(meta1.decimals));
+    if !(human_ratio.is_finite() && human_ratio > 0.0) {
+        return None;
+    }
+    let meme_usd = mcap / active.meta.total_supply;
+    let (price0, price1) = if meme0 {
+        (meme_usd, meme_usd / human_ratio)
+    } else {
+        (meme_usd * human_ratio, meme_usd)
+    };
+    let value = f64::from(amount0) / 10f64.powi(i32::from(meta0.decimals)) * price0
+        + f64::from(amount1) / 10f64.powi(i32::from(meta1.decimals)) * price1;
+    (value.is_finite() && value >= 0.0).then_some(value)
+}
+
 impl AppState {
     pub async fn status(&self) -> EngineStatus {
         let chain = self.chain.health().await;
         let wallet = self.wallet.lock().await.status();
-        let (can_execute, blocked_reasons) =
-            protocol::evaluate_execution_readiness(&chain, &wallet);
+        let (_, mut blocked_reasons) = protocol::evaluate_execution_readiness(&chain, &wallet);
+        let registry = self.registry_summary().await;
+        if registry.total == 0 || registry.verified != registry.total {
+            blocked_reasons.push("G1 belum memverifikasi seluruh kontrak yang dipin".into());
+        }
+        if let Err(e) = crate::exec::golden::verify_embedded() {
+            blocked_reasons.push(format!("G3: {e}"));
+        }
+        let can_execute = blocked_reasons.is_empty();
 
         EngineStatus {
             engine_version: ENGINE_VERSION.to_string(),
             uptime_secs: self.started_at.elapsed().as_secs(),
             chain,
             wallet,
-            registry: self.registry_summary(),
+            registry,
             can_execute,
             blocked_reasons,
             // Disunting saat dibuat, bukan saat ditampilkan. Uji struktural di
@@ -170,6 +278,60 @@ impl AppState {
                 .map(|u| crate::chain::endpoint::aman(u))
                 .collect(),
         }
+    }
+
+    pub async fn reverify_registry(&self) -> Result<(), String> {
+        match self.chain.verify_registry(&self.registry).await {
+            Ok(checks) => {
+                let total = self
+                    .registry
+                    .all_contracts()
+                    .map_err(|e| e.to_string())?
+                    .len();
+                let valid = total > 0
+                    && checks.len() == total
+                    && checks
+                        .iter()
+                        .all(|c| c.status == crate::chain::RegistryStatus::Verified);
+                *self.registry_checks.write().await = checks;
+                if valid {
+                    Ok(())
+                } else {
+                    Err("G1: bytecode kontrak belum seluruhnya cocok dengan pin".into())
+                }
+            }
+            Err(e) => {
+                self.registry_checks.write().await.clear();
+                Err(format!("G1 tidak bisa diverifikasi: {e}"))
+            }
+        }
+    }
+
+    async fn periksa_hook_rencana(&self, plan: &execute::RencanaTersimpan) -> Result<(), String> {
+        let provider = self.chain.provider().await.map_err(|e| e.to_string())?;
+        crate::risk::policy::periksa(&provider, &self.store, plan.hook)
+            .await
+            .map_err(|e| format!("kebijakan hook: {e}"))
+    }
+
+    async fn periksa_hook_aksi(&self, plan: &execute::AksiTersimpan) -> Result<(), String> {
+        let provider = self.chain.provider().await.map_err(|e| e.to_string())?;
+        crate::risk::policy::periksa(&provider, &self.store, plan.hook)
+            .await
+            .map_err(|e| format!("kebijakan hook: {e}"))
+    }
+
+    async fn ensure_execution(&self) -> Result<(), String> {
+        if self.cfg.execution.dry_run {
+            return Err("engine sedang dry run".into());
+        }
+        let health = self.chain.check_health().await;
+        if !health.healthy {
+            return Err(health.error.unwrap_or_else(|| "RPC belum sehat".into()));
+        }
+        self.reverify_registry().await?;
+        crate::exec::golden::verify_embedded()?;
+        Ok(())
     }
 
     /// Cari pool untuk sebuah token di tugas terpisah, lalu siarkan hasilnya.
@@ -189,11 +351,26 @@ impl AppState {
     /// Harga dan likuiditas TIDAK pernah datang dari cache. Yang disimpan hanya
     /// kunci pool, yang memang tidak pernah berubah. Lihat `pools::cache`.
     pub fn spawn_token_lookup(&self, address: String) {
+        let ticket = self.intent.begin_lookup();
         let state = self.clone();
         tokio::spawn(async move {
+            {
+                let mut active = state.active.write().await;
+                if !state.intent.lookup_current(ticket) {
+                    return;
+                }
+                *active = None;
+            }
             let cepat = state
-                .build_token_state(address.clone(), crate::pools::ModePencarian::CacheSaja)
+                .build_token_state(
+                    address.clone(),
+                    crate::pools::ModePencarian::CacheSaja,
+                    ticket,
+                )
                 .await;
+            if !state.intent.lookup_current(ticket) {
+                return;
+            }
 
             // Cache kosong berarti tidak ada yang bisa ditampilkan lebih awal.
             // Menyiarkan keadaan kosong justru akan menampilkan pesan "tidak ada
@@ -207,8 +384,11 @@ impl AppState {
             }
 
             let penuh = state
-                .build_token_state(address, crate::pools::ModePencarian::Penuh)
+                .build_token_state(address, crate::pools::ModePencarian::Penuh, ticket)
                 .await;
+            if !state.intent.lookup_current(ticket) {
+                return;
+            }
 
             // Siarkan ulang hanya kalau memang ada bedanya. Panel yang menerima
             // dua kiriman identik akan menggambar ulang garis chart tanpa
@@ -225,6 +405,7 @@ impl AppState {
         &self,
         address: String,
         mode: crate::pools::ModePencarian,
+        ticket: u64,
     ) -> protocol::TokenState {
         let mut out = protocol::TokenState {
             address: address.clone(),
@@ -314,24 +495,45 @@ impl AppState {
             );
         }
 
-        out.saldo = self
-            .baca_saldo(&provider, &out.meta, &terpilih)
-            .await;
+        out.saldo = self.baca_saldo(&provider, &out.meta, &terpilih).await;
 
         // Simpan sebagai token aktif supaya laporan harga dari chart yang
         // datang berikutnya punya konteks untuk dikalibrasi.
         if let (Some(meta), Some(selected)) = (out.meta.clone(), out.selected_pool_id.clone()) {
-            *self.active.write().await = Some(ActiveToken {
+            let mut guard = self.active.write().await;
+            if !self.intent.lookup_current(ticket) {
+                return out;
+            }
+            let sebelumnya = guard
+                .as_ref()
+                .filter(|a| a.meta.address.eq_ignore_ascii_case(&address));
+            let kelompok = sebelumnya
+                .and_then(|a| groups.iter().find(|g| g.quote == a.selected_quote))
+                .unwrap_or(&terpilih);
+            let selected = sebelumnya
+                .and_then(|a| kelompok.pools.iter().find(|p| p.id == a.selected_pool_id))
+                .or_else(|| kelompok.pools.first())
+                .map(|p| p.id.clone())
+                .unwrap_or(selected);
+            let requested = sebelumnya.and_then(|a| a.requested);
+            let chart_mcap_usd = sebelumnya.and_then(|a| a.chart_mcap_usd);
+            out.selected_quote = Some(kelompok.quote.clone());
+            out.selected_pool_id = Some(selected.clone());
+            out.pools = kelompok.pools.clone();
+            if kelompok.quote != terpilih.quote {
+                out.saldo = None;
+            }
+            *guard = Some(ActiveToken {
                 meta,
                 quotes: groups.clone(),
-                selected_quote: terpilih.quote.clone(),
-                pools: terpilih.pools.clone(),
+                selected_quote: kelompok.quote.clone(),
+                pools: kelompok.pools.clone(),
                 selected_pool_id: selected,
                 // Desimal kutipan ikut pasangan terpilih, bukan diandaikan 18.
                 // USDG memakai 6, dan salah desimal menggeser harga sejuta kali.
-                quote_decimals: terpilih.quote_decimals,
-                requested: None,
-                chart_mcap_usd: None,
+                quote_decimals: kelompok.quote_decimals,
+                requested,
+                chart_mcap_usd,
             });
         }
 
@@ -369,6 +571,7 @@ impl AppState {
             if !active.pools.iter().any(|p| p.id == pool_id) {
                 return;
             }
+            self.intent.change();
             active.selected_pool_id = pool_id;
             // Grid tick tiap pool berbeda, jadi batas yang diminta user pada
             // pool lama tidak lagi berlaku apa adanya. Dibiarkan supaya niat
@@ -399,6 +602,7 @@ impl AppState {
             if kelompok.pools.is_empty() {
                 return;
             }
+            self.intent.change();
 
             active.selected_quote = kelompok.quote.clone();
             active.quote_decimals = kelompok.quote_decimals;
@@ -478,6 +682,15 @@ impl AppState {
                 // diukur ulang setiap kali user bolak balik antar pasangan.
                 let mut guard = s.active.write().await;
                 if let Some(active) = guard.as_mut() {
+                    if !meta
+                        .as_ref()
+                        .is_some_and(|m| m.address.eq_ignore_ascii_case(&active.meta.address))
+                    {
+                        return;
+                    }
+                    if !active.selected_quote.eq_ignore_ascii_case(&kelompok.quote) {
+                        return;
+                    }
                     if active.selected_quote.eq_ignore_ascii_case(&kelompok.quote) {
                         active.pools = kelompok.pools.clone();
                     }
@@ -493,6 +706,13 @@ impl AppState {
 
             let guard = s.active.read().await;
             let Some(active) = guard.as_ref() else { return };
+            if !meta
+                .as_ref()
+                .is_some_and(|m| m.address.eq_ignore_ascii_case(&active.meta.address))
+                || !active.selected_quote.eq_ignore_ascii_case(&kelompok.quote)
+            {
+                return;
+            }
             let _ = s.events.send(protocol::ServerMessage::TokenState(Box::new(
                 protocol::TokenState {
                     address: active.meta.address.clone(),
@@ -513,9 +733,13 @@ impl AppState {
     /// Seluruh angka datang dari keadaan yang sedang aktif: pool terpilih,
     /// range yang sedang digambar, dan saldo wallet. Panel hanya menyebut
     /// nominalnya, karena itu satu satunya hal yang memang keputusan user.
-    pub async fn on_quote_range(&self, size_usd: f64) {
-        match self.susun_rencana(size_usd).await {
+    pub async fn on_quote_range(&self, task: execute::QuoteTask) {
+        let revision = task.revision;
+        match self.susun_rencana(task).await {
             Ok(view) => {
+                if !self.intent.current(revision) {
+                    return;
+                }
                 let _ = self
                     .events
                     .send(protocol::ServerMessage::OpenPlan(Box::new(view)));
@@ -524,9 +748,13 @@ impl AppState {
         }
     }
 
-    async fn susun_rencana(&self, size_usd: f64) -> Result<execute::OpenPlanView, String> {
-        if !(size_usd.is_finite() && size_usd > 0.0) {
-            return Err("ukuran posisi harus angka positif".into());
+    async fn susun_rencana(
+        &self,
+        task: execute::QuoteTask,
+    ) -> Result<execute::OpenPlanView, String> {
+        let revision = task.revision;
+        if !self.intent.current(revision) {
+            return Err("permintaan sudah berubah".into());
         }
 
         // Wallet harus terbuka lebih dulu, karena penerima posisi adalah
@@ -542,22 +770,16 @@ impl AppState {
             }
         };
 
-        let (pool, meta, quote_decimals, requested, mcap, quote_alamat) = {
+        let (pool, token_alamat, quote_alamat) = {
             let guard = self.active.read().await;
             let active = guard.as_ref().ok_or("belum ada token yang dimuat")?;
             let pool = active
                 .selected_pool()
                 .ok_or("pool terpilih tidak ada di daftar")?
                 .clone();
-            let mcap = active
-                .chart_mcap_usd
-                .ok_or("harga dari chart gmgn belum masuk, kurs belum bisa dikalibrasi")?;
             (
                 pool,
-                active.meta.clone(),
-                active.quote_decimals,
-                active.requested,
-                mcap,
+                active.meta.address.clone(),
                 active.selected_quote.clone(),
             )
         };
@@ -565,6 +787,50 @@ impl AppState {
         // Range yang dipakai persis yang sedang tergambar di chart, termasuk
         // pembulatan ke grid tick. Menghitungnya ulang di sini dengan cara lain
         // akan membuat yang dikirim berbeda dari yang dilihat user.
+        let provider = self.chain.provider().await.map_err(|e| e.to_string())?;
+        let pool = crate::pools::refresh(&provider, &self.registry, &pool)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // Pasangkan snapshot pool yang baru selesai dibaca dengan kalibrasi
+        // chart paling baru. Market cap sengaja diambil setelah RPC, bukan dari
+        // salinan sebelum RPC. Pilihan token, pasangan, atau pool yang berubah
+        // selama penantian membuat permintaan ini kedaluwarsa.
+        if !self.intent.current(revision) {
+            return Err("permintaan sudah berubah".into());
+        }
+        let (meta, quote_decimals, requested, mcap) = {
+            let guard = self.active.read().await;
+            let active = guard.as_ref().ok_or("token aktif sudah berubah")?;
+            if !active.meta.address.eq_ignore_ascii_case(&token_alamat)
+                || !active.selected_quote.eq_ignore_ascii_case(&quote_alamat)
+                || active.selected_pool_id != pool.id
+            {
+                return Err("token, pasangan, atau pool berubah saat snapshot dibaca".into());
+            }
+            (
+                active.meta.clone(),
+                active.quote_decimals,
+                active.requested,
+                active
+                    .chart_mcap_usd
+                    .ok_or("harga dari chart gmgn belum masuk, kurs belum bisa dikalibrasi")?,
+            )
+        };
+        let hook = if pool.version == crate::pools::PoolVersion::V4 {
+            Some(
+                pool.hooks
+                    .as_ref()
+                    .ok_or("alamat hook V4 belum tersedia")?
+                    .parse::<alloy::primitives::Address>()
+                    .map_err(|_| "alamat hook V4 tidak valid")?,
+            )
+        } else {
+            None
+        };
+        crate::risk::policy::periksa(&provider, &self.store, hook)
+            .await
+            .map_err(|e| format!("kebijakan hook: {e}"))?;
         let view = crate::range::build_view(
             &pool,
             &meta,
@@ -604,42 +870,80 @@ impl AppState {
         let (saldo0, saldo1) =
             execute::saldo_dua_token(&provider, multicall, pemilik, token0, token1).await?;
 
-        // Nominal diubah menjadi jumlah token memecoin, lalu dibatasi saldo.
-        // Sisi lawannya dibiarkan sebesar saldo, karena berapa yang benar benar
-        // terpakai ditentukan matematika likuiditas, bukan oleh kita.
-        let harga_token_usd = view.current.price_usd;
-        let memecoin_adalah_token0 = pool.token0.eq_ignore_ascii_case(&meta.address);
-        let desimal_memecoin = meta.decimals;
-
-        let diminta = execute::usd_ke_satuan_terkecil(size_usd, harga_token_usd, desimal_memecoin)
-            .ok_or("nominal posisi tidak masuk akal untuk harga token ini")?;
-
-        let (mut available0, mut available1) = if memecoin_adalah_token0 {
-            (diminta.min(saldo0), saldo1)
+        let meme0 = pool.token0.eq_ignore_ascii_case(&meta.address);
+        let source0 = (task.deposit.side == deposit::Side::Meme) == meme0;
+        let decimals = if task.deposit.side == deposit::Side::Meme {
+            meta.decimals
         } else {
-            (saldo0, diminta.min(saldo1))
+            quote_decimals
         };
-
-        // ETH ASLI TIDAK BOLEH DIPAKAI SAMPAI HABIS
-        //
-        // Di V4, currency nol adalah ETH asli, dan ia juga yang membayar gas.
-        // Menawarkan seluruh saldo sebagai modal berarti posisi yang berhasil
-        // dibuka tapi tidak bisa ditutup, karena tidak ada gas tersisa.
-        // Cadangannya diambil dari konfigurasi yang sama dengan gate G6,
-        // supaya tidak ada dua angka yang bisa menyimpang.
-        let cadangan_wei = alloy::primitives::U256::from(
-            (self.cfg.limits.min_eth_reserve.max(0.0) * 1e18) as u128,
-        );
-        if token0.is_zero() {
-            available0 = available0.saturating_sub(cadangan_wei);
+        let amount = deposit::units(&task.deposit.amount, decimals)?;
+        let (available0, available1) = match task.budget_override {
+            Some(budget) => budget,
+            None => deposit::budget(
+                &pool,
+                tick_lower,
+                tick_upper,
+                amount,
+                source0,
+                task.deposit.zap,
+            )?,
+        };
+        if available0 > saldo0 || available1 > saldo1 {
+            return Err("saldo tidak cukup untuk setoran yang diminta dan rasio range".into());
         }
-        if token1.is_zero() {
-            available1 = available1.saturating_sub(cadangan_wei);
-        }
-
         if available0.is_zero() && available1.is_zero() {
-            return Err("saldo kedua token nol, tidak ada yang bisa disetor".into());
+            return Err("jumlah setoran nol".into());
         }
+        let (meme, quote) = if meme0 {
+            (available0, available1)
+        } else {
+            (available1, available0)
+        };
+        let size_usd = f64::from(meme) / 10f64.powi(meta.decimals as i32) * view.current.price_usd
+            + f64::from(quote) / 10f64.powi(quote_decimals as i32) * view.eth_usd;
+        if !size_usd.is_finite() || size_usd <= 0.0 {
+            return Err("nilai setoran tidak dapat dihitung".into());
+        }
+
+        // Pembatas opsional harus memakai keadaan persisten dan pembacaan
+        // posisi aktual. Kalau pembacaan yang dibutuhkan gagal, rencana
+        // ditolak alih alih menyisipkan nol yang tampak sah.
+        let perlu_usage = self.cfg.limits.max_daily_deploy_usd.is_some()
+            || self.cfg.limits.new_pool_first_size_usd.is_some();
+        let usage = if perlu_usage {
+            crate::exec::journal::limit_usage(
+                &self.store,
+                self.registry.chain.id,
+                pemilik,
+                chrono::Utc::now(),
+            )
+            .map_err(|e| format!("penggunaan limit tidak terbaca: {e}"))?
+        } else {
+            crate::exec::journal::LimitUsage::default()
+        };
+        let open_positions = if self.cfg.limits.max_open_positions.is_some() {
+            let _pemuatan = self.positions_lock.lock().await;
+            let snapshot = crate::positions::muat::muat_snapshot_operasional(
+                &provider,
+                &self.registry,
+                Some(&self.store),
+                pemilik,
+            )
+            .await;
+            if !snapshot.errors.is_empty() {
+                return Err(format!(
+                    "jumlah posisi terbuka tidak dapat dibuktikan: {}",
+                    snapshot.errors.join("; ")
+                ));
+            }
+            u32::try_from(snapshot.positions.iter().filter(|p| !p.kosong).count())
+                .map_err(|_| "jumlah posisi terbuka melampaui u32".to_string())?
+        } else {
+            0
+        };
+        let is_new_pool = self.cfg.limits.new_pool_first_size_usd.is_some()
+            && !usage.used_pools.contains(&pool.id);
 
         let eth_balance = provider
             .get_balance(pemilik)
@@ -663,6 +967,9 @@ impl AppState {
             available1,
             pemilik,
             size_usd,
+            usage.daily_committed_usd,
+            open_positions,
+            is_new_pool,
             eth_balance_f64,
             // Biaya gas ditambah ETH yang benar benar masuk ke posisi. Untuk
             // pool yang kedua sisinya token, yang kedua nol. Untuk pool
@@ -672,7 +979,7 @@ impl AppState {
             DEADLINE_DETIK,
         );
 
-        let plan = crate::exec::plan::plan_open_auto(
+        let mut plan = crate::exec::plan::plan_open_auto(
             &provider,
             &alamat,
             &req,
@@ -686,19 +993,15 @@ impl AppState {
 
         // Zap dihitung setelah rencana, karena ia butuh tahu berapa yang benar
         // benar terpakai. Kalau modal sudah cocok rasio, hasilnya None.
-        let zap = self
-            .hitung_zap(
-                &provider,
-                &alamat,
-                &pool,
-                tick_lower,
-                tick_upper,
-                available0,
-                available1,
-                amount0,
+        let zap = if task.deposit.zap && task.budget_override.is_none() {
+            self.hitung_zap(
+                &provider, &alamat, &pool, tick_lower, tick_upper, available0, available1, amount0,
                 amount1,
             )
-            .await;
+            .await
+        } else {
+            None
+        };
 
         let allowances = crate::exec::plan::izin_yang_kurang(
             &provider,
@@ -717,20 +1020,13 @@ impl AppState {
             + chrono::Duration::seconds(execute::RENCANA_KEDALUWARSA_DETIK))
         .to_rfc3339();
 
-        *self.pending_plan.write().await = Some(execute::RencanaTersimpan {
-            plan: plan.clone(),
-            zap_calldata: zap.as_ref().map(|(_, c, v)| (c.clone(), *v)),
-            versi: pool.version,
-            token0,
-            token1,
-            amount0,
-            amount1,
-            disusun_pada,
-        });
-
         // Swap zap berjalan lewat UniversalRouter, yang menarik token lewat
         // Permit2 juga. Izin ke PositionManager tidak berlaku untuknya.
-        let mut allowances = allowances;
+        let mut allowances = if zap.is_some() {
+            Vec::new()
+        } else {
+            allowances
+        };
         if let Some((v, _, _)) = zap.as_ref() {
             if let (Ok(router), Ok(dari)) = (
                 self.registry.contract("uniswap_v4", "universal_router"),
@@ -750,12 +1046,155 @@ impl AppState {
                 .await
                 {
                     Ok(mut l) => allowances.append(&mut l),
-                    Err(e) => tracing::warn!(error = %e, "izin router untuk zap tidak terbaca"),
+                    Err(e) => return Err(format!("izin router untuk zap tidak terbaca: {e}")),
                 }
             }
         }
 
-        let (setor, apr_estimasi) = self.ringkas_setoran(&pool, &plan).await;
+        // R1 memakai simulasi mint yang persis akan dikirim. Core hanya
+        // menerima penyelesaian jika saldo yang masuk penuh, sehingga tax pada
+        // jalur wallet, manager, lalu pool membuat simulasi ini gagal.
+        let jalur_lp_lolos = plan.gates.iter().any(|g| g.id == "G4" && g.passed)
+            && plan.gates.iter().any(|g| g.id == "G5" && g.passed);
+        plan.gates.push(if jalur_lp_lolos {
+            crate::exec::pipeline::GateResult::lolos_publik(
+                "R1",
+                "transfer tax jalur LP",
+                "mint tersimulasi dengan penyelesaian jumlah penuh",
+            )
+        } else {
+            crate::exec::pipeline::GateResult::gagal_publik(
+                "R1",
+                "transfer tax jalur LP",
+                "jalur LP belum berhasil disimulasikan; selesaikan izin lalu susun ulang",
+            )
+        });
+
+        // R2 menjual kira kira sepuluh sen lewat router nyata dengan allowance
+        // nyata. eth_call menjalankan transfer lalu membuang seluruh perubahan.
+        let memecoin = if meme0 { token0 } else { token1 };
+        let saldo_meme = if meme0 { saldo0 } else { saldo1 };
+        let jumlah_uji =
+            execute::usd_ke_satuan_terkecil(0.10, view.current.price_usd, meta.decimals)
+                .map(|jumlah| {
+                    jumlah
+                        .max(alloy::primitives::U256::from(1u8))
+                        .min(saldo_meme)
+                })
+                .filter(|jumlah| !jumlah.is_zero());
+
+        let mut izin_risiko_kurang = false;
+        if let Some(jumlah) = jumlah_uji {
+            let router = match pool.version {
+                crate::pools::PoolVersion::V3 => self
+                    .registry
+                    .contract("uniswap_v3", "swap_router_02")
+                    .map_err(|e| e.to_string())?,
+                crate::pools::PoolVersion::V4 => self
+                    .registry
+                    .contract("uniswap_v4", "universal_router")
+                    .map_err(|e| e.to_string())?,
+            };
+            let izin_risiko = match pool.version {
+                crate::pools::PoolVersion::V3 => {
+                    crate::exec::plan::izin_erc20_untuk(
+                        &provider,
+                        &alamat,
+                        pemilik,
+                        router,
+                        "SwapRouter02",
+                        memecoin,
+                        jumlah,
+                    )
+                    .await?
+                }
+                crate::pools::PoolVersion::V4 => {
+                    crate::exec::plan::izin_permit2_untuk(
+                        &provider,
+                        &alamat,
+                        pemilik,
+                        router,
+                        "UniversalRouter",
+                        memecoin,
+                        jumlah,
+                        chrono::Utc::now().timestamp().max(0) as u64,
+                    )
+                    .await?
+                }
+            };
+            izin_risiko_kurang = !izin_risiko.is_empty();
+            for langkah in izin_risiko {
+                if !allowances.iter().any(|ada| {
+                    ada.jenis == langkah.jenis
+                        && ada.token.eq_ignore_ascii_case(&langkah.token)
+                        && ada.spender.eq_ignore_ascii_case(&langkah.spender)
+                }) {
+                    allowances.push(langkah);
+                }
+            }
+        }
+
+        let jual_kecil_lolos = match jumlah_uji {
+            None => {
+                plan.gates.push(crate::exec::pipeline::GateResult::gagal_publik(
+                    "R2",
+                    "simulasi jual kecil",
+                    "wallet belum mempunyai memecoin untuk uji jual. Jalankan zap pembelian lebih dulu atau sisakan sedikit token",
+                ));
+                false
+            }
+            Some(_) if izin_risiko_kurang => {
+                plan.gates.push(crate::exec::pipeline::GateResult::gagal_publik(
+                    "R2",
+                    "simulasi jual kecil",
+                    "izin router untuk uji jual belum lengkap; selesaikan langkah izin lalu susun ulang",
+                ));
+                false
+            }
+            Some(jumlah) => match crate::risk::token::uji_jual_kecil(
+                &provider,
+                &self.registry,
+                &pool,
+                pemilik,
+                memecoin,
+                jumlah,
+                self.cfg.limits.max_slippage_bps,
+            )
+            .await
+            {
+                Ok(keluaran) => {
+                    plan.gates.push(crate::exec::pipeline::GateResult::lolos_publik(
+                        "R2",
+                        "simulasi jual kecil",
+                        format!(
+                            "router menerima jual {jumlah} unit dan mengutip {keluaran} unit keluaran"
+                        ),
+                    ));
+                    true
+                }
+                Err(error) => {
+                    plan.gates
+                        .push(crate::exec::pipeline::GateResult::gagal_publik(
+                            "R2",
+                            "simulasi jual kecil",
+                            error.to_string(),
+                        ));
+                    false
+                }
+            },
+        };
+        if let Err(error) = crate::risk::token::simpan_bukti(
+            &self.store,
+            self.registry.chain.id,
+            &pool.id,
+            memecoin,
+            jalur_lp_lolos,
+            jual_kecil_lolos,
+        ) {
+            tracing::warn!(error = %error, "bukti risiko token gagal disimpan");
+        }
+
+        let (setor, apr_estimasi_mentah) = self.ringkas_setoran(&pool, &plan).await;
 
         // Harga gas dibaca sekarang, bukan diandaikan. Ia berubah dari blok ke
         // blok, dan biaya yang dihitung dari angka tetap akan meleset persis
@@ -774,7 +1213,81 @@ impl AppState {
             }
         };
 
+        let bars = self
+            .bars
+            .read()
+            .await
+            .as_ref()
+            .filter(|(address, _)| address.eq_ignore_ascii_case(&meta.address))
+            .map(|(_, bars)| bars.clone())
+            .unwrap_or_default();
+        let aturan_sideways = crate::learning::aturan_sideways(&self.store);
+        let sideways = crate::signals::sideways::ukur(&bars, &aturan_sideways);
+        let basis =
+            crate::signals::dump_basis::cari(&bars, &crate::signals::dump_basis::Aturan::default());
+        let protocol_version = match pool.version {
+            crate::pools::PoolVersion::V3 => "v3",
+            crate::pools::PoolVersion::V4 => "v4",
+        };
+        let gas_kutipan = setor
+            .as_ref()
+            .filter(|value| value.simbol_quote == "ETH" || value.simbol_quote == "WETH")
+            .and(gas_biaya);
+        let learning = crate::learning::create_draft(
+            &self.store,
+            crate::learning::DraftInput {
+                token: &meta.address,
+                pool_id: &pool.id,
+                protocol_version,
+                fee_tier: pool.fee,
+                range_lower: view.lower.mcap_usd,
+                range_upper: view.upper.mcap_usd,
+                current_price: view.current.mcap_usd,
+                planned_liquidity: plan.liquidity.parse().unwrap_or_default(),
+                active_liquidity: pool.liquidity.parse().unwrap_or_default(),
+                raw_fee_apr: apr_estimasi_mentah,
+                position_value_quote: setor.as_ref().map(|value| value.nilai_quote),
+                gas_cost_quote: gas_kutipan,
+                bars: &bars,
+                sideways: sideways.as_ref(),
+                basis: basis.as_ref(),
+            },
+        );
+        let apr_estimasi = learning.feature.predicted_fee_apr;
+
+        for (i, step) in allowances.iter_mut().enumerate() {
+            step.step_id = i.to_string();
+        }
+        let plan_id = intent::plan_id()?;
+        {
+            let mut pending = self.pending_plan.write().await;
+            if !self.intent.current(revision) {
+                return Err("permintaan berubah saat rencana disusun".into());
+            }
+            *pending = Some(execute::RencanaTersimpan {
+                position_usd: size_usd,
+                hook,
+                quote: task.clone(),
+                budget: (available0, available1),
+                zap_view: zap.as_ref().map(|(v, _, _)| v.clone()),
+                plan_id: plan_id.clone(),
+                revision,
+                allowances: allowances.clone(),
+                plan: plan.clone(),
+                learning,
+                zap_calldata: zap.as_ref().map(|(_, c, v)| (c.clone(), *v)),
+                versi: pool.version,
+                token0,
+                token1,
+                amount0,
+                amount1,
+                disusun_pada,
+            });
+        }
         Ok(execute::OpenPlanView {
+            plan_id,
+            request_id: task.request_id,
+            deposit: task.deposit,
             plan,
             allowances,
             zap: zap.as_ref().map(|(v, _, _)| v.clone()),
@@ -850,7 +1363,7 @@ impl AppState {
                 return None;
             }
             let fee = pool.fee as f64 / 1_000_000.0;
-            let bagian = nilai_quote / (st.tvl + nilai_quote);
+            let bagian = nilai_quote / (st.tvl? + nilai_quote);
             let per_jendela = volume * fee * bagian / nilai_quote;
             let periode = 365.0 * 24.0 * 60.0 / jendela_menit;
             Some(per_jendela * periode * 100.0)
@@ -888,9 +1401,13 @@ impl AppState {
         available1: alloy::primitives::U256,
         pakai0: alloy::primitives::U256,
         pakai1: alloy::primitives::U256,
-    ) -> Option<(execute::ZapView, alloy::primitives::Bytes, alloy::primitives::U256)> {
-        use alloy::primitives::U256;
+    ) -> Option<(
+        execute::ZapView,
+        alloy::primitives::Bytes,
+        alloy::primitives::U256,
+    )> {
         use crate::exec::zap::{self, SisiSumber};
+        use alloy::primitives::U256;
 
         if pool.version != crate::pools::PoolVersion::V4 {
             return None;
@@ -993,7 +1510,8 @@ impl AppState {
             return None;
         }
 
-        let minimum = crate::exec::limits::apply_slippage(diterima, self.cfg.limits.max_slippage_bps);
+        let minimum =
+            crate::exec::limits::apply_slippage(diterima, self.cfg.limits.max_slippage_bps);
         let (dari, ke) = if zero_for_one {
             (key.currency0, key.currency1)
         } else {
@@ -1036,128 +1554,203 @@ impl AppState {
     ///
     /// Jumlahnya diambil dari rencana, bukan dari panel. Panel yang boleh
     /// menentukan jumlah izin adalah panel yang boleh menguras wallet.
-    pub async fn on_approve_token(&self, token: String) {
-        match self.kirim_approve(token).await {
+    pub async fn on_approve_token(&self, plan_id: String, step_id: String) {
+        match self.kirim_approve(plan_id.clone(), step_id).await {
             Ok(view) => {
+                let ulang = view.outcome.status != crate::exec::send::TxStatus::Menggantung;
+                let menggantung = !ulang;
                 let _ = self
                     .events
                     .send(protocol::ServerMessage::SendResult(Box::new(view)));
+                if ulang {
+                    let lanjut_aksi = {
+                        let pending = self.pending_action.read().await;
+                        pending.as_ref().filter(|r| r.plan_id == plan_id).map(|r| {
+                            (
+                                r.position_id.clone(),
+                                r.action,
+                                r.input.clone(),
+                                r.request_id.clone(),
+                            )
+                        })
+                    };
+                    if let Some((position_id, action, input, request_id)) = lanjut_aksi {
+                        let revision = self.intent.begin_action();
+                        self.on_plan_action(position_id, action, input, request_id, revision)
+                            .await;
+                        return;
+                    }
+                    let lanjut = {
+                        let pending = self.pending_plan.read().await;
+                        pending
+                            .as_ref()
+                            .filter(|r| r.plan_id == plan_id)
+                            .and_then(|r| {
+                                let revision = self.intent.advance(r.revision)?;
+                                let mut task = r.quote.clone();
+                                task.revision = revision;
+                                Some(task)
+                            })
+                    };
+                    if let Some(task) = lanjut {
+                        self.on_quote_range(task).await;
+                    }
+                } else if menggantung {
+                    {
+                        let mut pending = self.pending_action.write().await;
+                        if pending.as_ref().is_some_and(|r| r.plan_id == plan_id) {
+                            pending.take();
+                            self.intent.begin_action();
+                        }
+                    }
+                    {
+                        let mut pending = self.pending_plan.write().await;
+                        if pending.as_ref().is_some_and(|r| r.plan_id == plan_id) {
+                            pending.take();
+                            self.intent.change();
+                        }
+                    }
+                    self.alert_kritis(
+                        "approve_unknown",
+                        "status approval belum diketahui. Periksa jurnal transaksi sebelum menyusun atau mengirim ulang"
+                            .into(),
+                    );
+                }
             }
             Err(pesan) => self.alert_kritis("approve_failed", pesan),
         }
     }
 
-    async fn kirim_approve(&self, token: String) -> Result<execute::SendResultView, String> {
-        let target: alloy::primitives::Address = token
-            .parse()
-            .map_err(|_| format!("`{token}` bukan alamat EVM yang valid"))?;
-
-        let (jumlah, versi) = {
-            let guard = self.pending_plan.read().await;
-            let r = guard.as_ref().ok_or("belum ada rencana yang disusun")?;
-            if r.kedaluwarsa() {
-                return Err("rencana sudah kedaluwarsa, susun ulang".into());
-            }
-            if target == r.token0 {
-                (r.amount0, r.versi)
-            } else if target == r.token1 {
-                (r.amount1, r.versi)
+    async fn kirim_approve(
+        &self,
+        plan_id: String,
+        step_id: String,
+    ) -> Result<execute::SendResultView, String> {
+        let _eksekusi = self.execution_lock.lock().await;
+        self.ensure_execution().await?;
+        let (langkah, context) = {
+            let open_matches = self
+                .pending_plan
+                .read()
+                .await
+                .as_ref()
+                .is_some_and(|r| r.plan_id == plan_id);
+            if open_matches {
+                let guard = self.pending_plan.read().await;
+                let r = guard.as_ref().ok_or("rencana open hilang")?;
+                r.periksa(&plan_id, &self.intent)?;
+                self.periksa_hook_rencana(r).await?;
+                r.periksa(&plan_id, &self.intent)?;
+                let langkah = r.allowances.first().ok_or("izin rencana ini sudah cukup")?;
+                if langkah.step_id != step_id {
+                    return Err("kerjakan langkah izin yang pertama terlebih dulu".into());
+                }
+                (
+                    r.allowances
+                        .first()
+                        .cloned()
+                        .expect("langkah sudah diperiksa"),
+                    r.journal_context(crate::exec::journal::Operation::Approve),
+                )
             } else {
-                return Err(format!("{token} bukan salah satu token rencana ini"));
+                let guard = self.pending_action.read().await;
+                let r = guard
+                    .as_ref()
+                    .ok_or("belum ada rencana open atau aksi yang disusun")?;
+                r.periksa(&plan_id, &self.intent)?;
+                self.periksa_hook_aksi(r).await?;
+                r.periksa(&plan_id, &self.intent)?;
+                let langkah = r
+                    .allowances
+                    .first()
+                    .ok_or("izin rencana aksi ini sudah cukup")?;
+                if langkah.step_id != step_id {
+                    return Err("kerjakan langkah izin yang pertama terlebih dulu".into());
+                }
+                (
+                    r.allowances
+                        .first()
+                        .cloned()
+                        .expect("langkah sudah diperiksa"),
+                    r.journal_context.clone(),
+                )
             }
         };
-
+        let mut context = context;
+        context.operation = crate::exec::journal::Operation::Approve;
+        let target: alloy::primitives::Address = langkah
+            .token
+            .parse()
+            .map_err(|_| "token izin tidak valid")?;
+        let spender: alloy::primitives::Address = langkah
+            .spender
+            .parse()
+            .map_err(|_| "spender izin tidak valid")?;
+        let jumlah: alloy::primitives::U256 = langkah
+            .needed
+            .parse()
+            .map_err(|_| "jumlah izin tidak valid")?;
         if jumlah.is_zero() {
-            return Err("jumlah yang dibutuhkan nol, izin tidak perlu diberikan".into());
+            return Err("jumlah izin nol".into());
         }
-
-        let provider = self
-            .chain
-            .provider()
-            .await
-            .map_err(|e| format!("RPC tidak bisa dipakai: {e}"))?;
+        let provider = self.chain.provider().await.map_err(|e| e.to_string())?;
         let alamat = crate::exec::plan::AlamatEksekusi::dari_registry(&self.registry)
             .map_err(|e| e.to_string())?;
-
-        let mut wallet = self.wallet.lock().await;
-        let signer = wallet.signer().map_err(|e| e.to_string())?.clone();
-        drop(wallet);
-
-        let sekarang = chrono::Utc::now().timestamp().max(0) as u64;
-        let outcome = match versi {
-            crate::pools::PoolVersion::V3 => crate::exec::send::send_approve(
-                &provider,
-                &self.nonce,
-                &signer,
-                alamat.multicall,
-                target,
-                alamat.position_manager_v3,
-                jumlah,
-                self.registry.chain.id,
-            )
+        let signer = self
+            .wallet
+            .lock()
             .await
-            .map_err(|e| e.to_string())?,
-
-            crate::pools::PoolVersion::V4 => {
-                // V4 butuh dua lapis izin, dan urutannya penting: izin Permit2
-                // tidak berguna sebelum token mengizinkan Permit2 lebih dulu.
-                // Engine mengerjakan langkah PERTAMA yang masih kurang, jadi
-                // panel cukup menekan tombolnya lagi untuk langkah berikutnya.
-                let kurang = crate::exec::plan::izin_yang_kurang(
-                    &provider,
-                    &alamat,
-                    crate::pools::PoolVersion::V4,
-                    signer.address(),
-                    target,
-                    jumlah,
-                    target,
-                    alloy::primitives::U256::ZERO,
-                    sekarang,
-                )
-                .await?;
-
-                let langkah = kurang
-                    .first()
-                    .ok_or("izin untuk token ini sudah cukup")?;
-
-                match langkah.jenis {
-                    "erc20_ke_permit2" => crate::exec::send::send_approve(
-                        &provider,
-                        &self.nonce,
-                        &signer,
-                        alamat.multicall,
-                        target,
-                        alamat.permit2,
-                        jumlah,
-                        self.registry.chain.id,
-                    )
-                    .await
-                    .map_err(|e| e.to_string())?,
-
-                    _ => {
-                        let calldata = crate::exec::v4::permit::permit2_approve_calldata(
-                            target,
-                            alamat.position_manager_v4,
-                            jumlah,
-                            sekarang + crate::exec::v4::permit::MASA_BERLAKU_DETIK,
-                        )?;
-                        let terkirim = crate::exec::send::send_calldata(
-                            &provider,
-                            &self.nonce,
-                            &signer,
-                            alamat.permit2,
-                            calldata,
-                            alloy::primitives::U256::ZERO,
-                            self.registry.chain.id,
-                        )
-                        .await
-                        .map_err(|e| e.to_string())?;
-                        crate::exec::send::jadikan_hasil(terkirim)
-                    }
-                }
-            }
+            .signer()
+            .map_err(|e| e.to_string())?
+            .clone();
+        let journal = crate::exec::journal::Journal {
+            store: &self.store,
+            context,
         };
-
+        let outcome = match langkah.jenis {
+            "erc20_ke_permit2" | "erc20_ke_position_manager" | "erc20_ke_router" => {
+                crate::exec::send::send_approve(
+                    &provider,
+                    &self.nonce,
+                    &signer,
+                    alamat.multicall,
+                    target,
+                    spender,
+                    jumlah,
+                    self.registry.chain.id,
+                    &self.cfg.execution,
+                    &self.cfg.limits,
+                    &journal,
+                )
+                .await
+                .map_err(|e| e.to_string())?
+            }
+            "permit2_ke_position_manager" => {
+                let sekarang = chrono::Utc::now().timestamp().max(0) as u64;
+                let calldata = crate::exec::v4::permit::permit2_approve_calldata(
+                    target,
+                    spender,
+                    jumlah,
+                    sekarang + crate::exec::v4::permit::MASA_BERLAKU_DETIK,
+                )?;
+                let terkirim = crate::exec::send::send_calldata(
+                    &provider,
+                    &self.nonce,
+                    &signer,
+                    alamat.permit2,
+                    calldata,
+                    alloy::primitives::U256::ZERO,
+                    self.registry.chain.id,
+                    &self.cfg.execution,
+                    &self.cfg.limits,
+                    &journal,
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+                crate::exec::send::jadikan_hasil(terkirim)
+            }
+            _ => return Err("jenis izin tidak dikenal".into()),
+        };
         Ok(execute::SendResultView {
             kind: "approve",
             outcome,
@@ -1227,6 +1820,15 @@ impl AppState {
     /// layar. Sumber lain akan selalu sedikit berbeda, dan selisih itu muncul
     /// persis saat harga bergerak cepat, yaitu saat keputusannya paling penting.
     pub async fn on_chart_bars(&self, address: String, bars: Vec<crate::signals::bar::Bar>) {
+        if !self
+            .active
+            .read()
+            .await
+            .as_ref()
+            .is_some_and(|a| a.meta.address.eq_ignore_ascii_case(&address))
+        {
+            return;
+        }
         let bersih = crate::signals::bar::bersihkan(bars);
         if bersih.is_empty() {
             return;
@@ -1235,7 +1837,8 @@ impl AppState {
         let jumlah = bersih.len();
         *self.bars.write().await = Some((address.clone(), bersih.clone()));
 
-        let sideways = crate::signals::sideways::ukur(&bersih, &crate::signals::sideways::Aturan::default());
+        let sideways =
+            crate::signals::sideways::ukur(&bersih, &crate::learning::aturan_sideways(&self.store));
         let basis = crate::signals::dump_basis::cari(
             &bersih,
             &crate::signals::dump_basis::Aturan::default(),
@@ -1287,9 +1890,22 @@ impl AppState {
     /// PRD 3.5 menuntut simulasi hasil ditampilkan sebelum tombol konfirmasi
     /// aktif. Karena itu polanya sama dengan membuka posisi: susun, lihat, lalu
     /// setujui, dan calldata-nya tidak pernah bolak balik lewat panel.
-    pub async fn on_plan_action(&self, token_id: String, aksi: crate::exec::aksi::JenisAksi) {
-        match self.susun_rencana_aksi(token_id, aksi).await {
+    pub async fn on_plan_action(
+        &self,
+        position_id: String,
+        aksi: crate::exec::aksi::JenisAksi,
+        input: crate::exec::aksi::ActionInput,
+        request_id: String,
+        revision: u64,
+    ) {
+        match self
+            .susun_rencana_aksi(position_id, aksi, input, request_id, revision)
+            .await
+        {
             Ok(view) => {
+                if !self.intent.action_current(revision) {
+                    return;
+                }
                 let _ = self
                     .events
                     .send(protocol::ServerMessage::ActionPlan(Box::new(view)));
@@ -1300,8 +1916,11 @@ impl AppState {
 
     async fn susun_rencana_aksi(
         &self,
-        token_id: String,
+        position_id: String,
         aksi: crate::exec::aksi::JenisAksi,
+        input: crate::exec::aksi::ActionInput,
+        request_id: String,
+        revision: u64,
     ) -> Result<execute::ActionPlanView, String> {
         let pemilik = {
             let w = self.wallet.lock().await;
@@ -1313,32 +1932,484 @@ impl AppState {
             }
         };
 
-        // Posisi diambil dari daftar yang terakhir dimuat, bukan dibaca ulang.
-        // Kalau daftarnya basi, gate simulasi di bawah yang akan menolak, dan
-        // pesannya datang dari kontrak sungguhan.
+        // Fee, likuiditas, dan kepemilikan harus segar sebelum quote aksi.
+        let provider = self.chain.provider().await.map_err(|e| e.to_string())?;
         let posisi = {
-            let daftar = self.positions.read().await;
+            let daftar = crate::positions::muat::muat_semua(
+                &provider,
+                &self.registry,
+                Some(&self.store),
+                pemilik,
+            )
+            .await;
             daftar
                 .iter()
-                .find(|p| p.token_id == token_id)
+                .find(|p| p.position_id == position_id)
                 .cloned()
                 .ok_or("posisi tidak ada di daftar. Muat ulang tab Positions dulu")?
         };
+        let token_id = posisi.token_id.clone();
+        let token_id_u256: alloy::primitives::U256 = token_id
+            .parse()
+            .map_err(|_| "token id posisi bukan angka")?;
+        let token0: alloy::primitives::Address = posisi
+            .token0
+            .parse()
+            .map_err(|_| "alamat token0 posisi tidak valid")?;
+        let token1: alloy::primitives::Address = posisi
+            .token1
+            .parse()
+            .map_err(|_| "alamat token1 posisi tidak valid")?;
 
         let deadline = alloy::primitives::U256::from(
             chrono::Utc::now().timestamp().max(0) as u64 + DEADLINE_DETIK,
         );
-        let rencana = crate::exec::aksi::susun(&posisi, aksi, pemilik, deadline)
-            .map_err(|e| e.to_string())?;
-
-        let provider = self
-            .chain
-            .provider()
-            .await
-            .map_err(|e| format!("RPC tidak bisa dipakai: {e}"))?;
         let alamat = crate::exec::plan::AlamatEksekusi::dari_registry(&self.registry)
             .map_err(|e| e.to_string())?;
-        let tujuan = alamat.position_manager(rencana.versi);
+        let tujuan = alamat.position_manager(posisi.version);
+        let memasukkan_modal = matches!(
+            aksi,
+            crate::exec::aksi::JenisAksi::TambahLikuiditas
+                | crate::exec::aksi::JenisAksi::Rebalance
+        );
+        let hook = if memasukkan_modal && posisi.version == crate::pools::PoolVersion::V4 {
+            posisi
+                .hooks
+                .as_deref()
+                .filter(|value| *value != crate::pools::ZERO_ADDRESS)
+                .map(|value| value.parse::<alloy::primitives::Address>())
+                .transpose()
+                .map_err(|_| "alamat hook posisi tidak valid")?
+        } else {
+            None
+        };
+        if memasukkan_modal {
+            crate::risk::policy::periksa(&provider, &self.store, hook)
+                .await
+                .map_err(|e| format!("kebijakan hook: {e}"))?;
+        }
+
+        let metadata = if memasukkan_modal {
+            let mut values =
+                crate::pools::token_meta_batch(&provider, &self.registry, &[token0, token1])
+                    .await
+                    .map_err(|e| format!("metadata token posisi tidak terbaca: {e}"))?;
+            if values.len() != 2 {
+                return Err("metadata kedua token posisi tidak lengkap".into());
+            }
+            let meta1 = values
+                .pop()
+                .flatten()
+                .ok_or("metadata token1 tidak terbaca")?;
+            let meta0 = values
+                .pop()
+                .flatten()
+                .ok_or("metadata token0 tidak terbaca")?;
+            Some((meta0, meta1))
+        } else {
+            None
+        };
+
+        let mut target_ticks = None;
+        let mut planned_amounts = None;
+        let mut planned_raw = None;
+        let mut planned_liquidity = None;
+        let mut allowances = Vec::new();
+        let (rencana, value, harapan) = match aksi {
+            crate::exec::aksi::JenisAksi::KlaimFee | crate::exec::aksi::JenisAksi::TutupPosisi => {
+                let rencana = crate::exec::aksi::susun(&posisi, aksi, pemilik, deadline)
+                    .map_err(|e| e.to_string())?;
+                (
+                    rencana,
+                    alloy::primitives::U256::ZERO,
+                    execute::HarapanAksi::TidakAda,
+                )
+            }
+            crate::exec::aksi::JenisAksi::TambahLikuiditas => {
+                let (meta0, meta1) = metadata.as_ref().expect("metadata aksi modal");
+                let available0 = jumlah_aksi(input.amount0.as_deref(), meta0.decimals)?;
+                let available1 = jumlah_aksi(input.amount1.as_deref(), meta1.decimals)?;
+                if available0.is_zero() && available1.is_zero() {
+                    return Err("isi jumlah token0 atau token1 yang akan ditambahkan".into());
+                }
+                let (saldo0, saldo1) =
+                    execute::saldo_dua_token(&provider, alamat.multicall, pemilik, token0, token1)
+                        .await?;
+                if available0 > saldo0 || available1 > saldo1 {
+                    return Err("saldo tidak cukup untuk jumlah tambah likuiditas".into());
+                }
+                let pool = pool_dari_posisi(&posisi)?;
+                let (liquidity, butuh0, butuh1) = crate::exec::pipeline::hitung_jumlah(
+                    &pool,
+                    posisi.tick_lower,
+                    posisi.tick_upper,
+                    available0,
+                    available1,
+                )?;
+                planned_liquidity = Some(liquidity);
+                let (calldata, value, izin0, izin1) = match posisi.version {
+                    crate::pools::PoolVersion::V3 => (
+                        crate::exec::calldata::increase_liquidity(
+                            token_id_u256,
+                            butuh0,
+                            butuh1,
+                            crate::exec::limits::apply_slippage(
+                                butuh0,
+                                self.cfg.limits.max_slippage_bps,
+                            ),
+                            crate::exec::limits::apply_slippage(
+                                butuh1,
+                                self.cfg.limits.max_slippage_bps,
+                            ),
+                            deadline,
+                        )
+                        .map_err(|e| e.to_string())?,
+                        alloy::primitives::U256::ZERO,
+                        butuh0,
+                        butuh1,
+                    ),
+                    crate::pools::PoolVersion::V4 => {
+                        let max0 =
+                            batas_atas_aksi(butuh0, self.cfg.limits.max_slippage_bps, available0);
+                        let max1 =
+                            batas_atas_aksi(butuh1, self.cfg.limits.max_slippage_bps, available1);
+                        let data = crate::exec::v4::calldata::increase_liquidity(
+                            token_id_u256,
+                            liquidity,
+                            ke_u128_aksi(max0, "batas token0")?,
+                            ke_u128_aksi(max1, "batas token1")?,
+                            token0,
+                            token1,
+                            deadline,
+                        )
+                        .map_err(|e| e.to_string())?;
+                        let value = if token0.is_zero() {
+                            max0
+                        } else if token1.is_zero() {
+                            max1
+                        } else {
+                            alloy::primitives::U256::ZERO
+                        };
+                        (data, value, max0, max1)
+                    }
+                };
+                allowances = crate::exec::plan::izin_yang_kurang(
+                    &provider,
+                    &alamat,
+                    posisi.version,
+                    pemilik,
+                    token0,
+                    izin0,
+                    token1,
+                    izin1,
+                    chrono::Utc::now().timestamp().max(0) as u64,
+                )
+                .await?;
+                planned_raw = Some((izin0, izin1));
+                planned_amounts = Some(execute::ActionAmountView {
+                    symbol0: meta0.symbol.clone(),
+                    amount0: deposit::display_units(izin0, meta0.decimals),
+                    symbol1: meta1.symbol.clone(),
+                    amount1: deposit::display_units(izin1, meta1.decimals),
+                });
+                (
+                    crate::exec::aksi::Rencana {
+                        calldata,
+                        versi: posisi.version,
+                        menutup: false,
+                    },
+                    value,
+                    execute::HarapanAksi::Tambah {
+                        sebelum: posisi.clone(),
+                        minimum_tambahan: liquidity.saturating_sub(liquidity / 100),
+                    },
+                )
+            }
+            crate::exec::aksi::JenisAksi::Rebalance => {
+                let (meta0, meta1) = metadata.as_ref().expect("metadata aksi modal");
+                let principal0: alloy::primitives::U256 = posisi
+                    .amount0
+                    .parse()
+                    .map_err(|_| "jumlah token0 posisi tidak valid")?;
+                let principal1: alloy::primitives::U256 = posisi
+                    .amount1
+                    .parse()
+                    .map_err(|_| "jumlah token1 posisi tidak valid")?;
+                let fee0: alloy::primitives::U256 = posisi
+                    .fee0
+                    .as_deref()
+                    .ok_or("fee token0 belum terbaca, rebalance tidak boleh menebak")?
+                    .parse()
+                    .map_err(|_| "fee token0 posisi tidak valid")?;
+                let fee1: alloy::primitives::U256 = posisi
+                    .fee1
+                    .as_deref()
+                    .ok_or("fee token1 belum terbaca, rebalance tidak boleh menebak")?
+                    .parse()
+                    .map_err(|_| "fee token1 posisi tidak valid")?;
+                let total0 = principal0.checked_add(fee0).ok_or("jumlah token0 meluap")?;
+                let total1 = principal1.checked_add(fee1).ok_or("jumlah token1 meluap")?;
+                let (tick_lower, tick_upper) =
+                    crate::exec::aksi::target_rebalance(&posisi, total0, total1)
+                        .map_err(|e| e.to_string())?;
+                target_ticks = Some((tick_lower, tick_upper));
+                let guaranteed0 = crate::exec::limits::apply_slippage(
+                    principal0,
+                    self.cfg.limits.max_slippage_bps,
+                )
+                .checked_add(fee0)
+                .ok_or("jaminan token0 meluap")?;
+                let guaranteed1 = crate::exec::limits::apply_slippage(
+                    principal1,
+                    self.cfg.limits.max_slippage_bps,
+                )
+                .checked_add(fee1)
+                .ok_or("jaminan token1 meluap")?;
+                let pool = pool_dari_posisi(&posisi)?;
+                let (liquidity, butuh0, butuh1) = crate::exec::pipeline::hitung_jumlah(
+                    &pool,
+                    tick_lower,
+                    tick_upper,
+                    guaranteed0,
+                    guaranteed1,
+                )?;
+                planned_liquidity = Some(liquidity);
+                let old_liquidity: u128 = posisi
+                    .liquidity
+                    .parse()
+                    .map_err(|_| "likuiditas posisi tidak valid")?;
+                if old_liquidity == 0 {
+                    return Err("posisi kosong tidak dapat direbalance".into());
+                }
+                let min_old0 = crate::exec::limits::apply_slippage(
+                    principal0,
+                    self.cfg.limits.max_slippage_bps,
+                );
+                let min_old1 = crate::exec::limits::apply_slippage(
+                    principal1,
+                    self.cfg.limits.max_slippage_bps,
+                );
+                let (calldata, value, harapan) = match posisi.version {
+                    crate::pools::PoolVersion::V3 => {
+                        let request = crate::exec::calldata::MintRequest {
+                            token0,
+                            token1,
+                            fee: posisi.fee,
+                            tick_lower,
+                            tick_upper,
+                            amount0_desired: butuh0,
+                            amount1_desired: butuh1,
+                            amount0_min: crate::exec::limits::apply_slippage(
+                                butuh0,
+                                self.cfg.limits.max_slippage_bps,
+                            ),
+                            amount1_min: crate::exec::limits::apply_slippage(
+                                butuh1,
+                                self.cfg.limits.max_slippage_bps,
+                            ),
+                            recipient: pemilik,
+                            deadline,
+                        };
+                        let data = crate::exec::calldata::rebalance_position(
+                            token_id_u256,
+                            old_liquidity,
+                            min_old0,
+                            min_old1,
+                            &request,
+                            posisi.tick_spacing,
+                        )
+                        .map_err(|e| e.to_string())?;
+                        (
+                            data,
+                            alloy::primitives::U256::ZERO,
+                            execute::HarapanAksi::RebalanceV3 {
+                                token_lama: token_id_u256,
+                                permintaan: request,
+                                expected_liquidity: liquidity,
+                            },
+                        )
+                    }
+                    crate::pools::PoolVersion::V4 => {
+                        let max0 =
+                            batas_atas_aksi(butuh0, self.cfg.limits.max_slippage_bps, guaranteed0);
+                        let max1 =
+                            batas_atas_aksi(butuh1, self.cfg.limits.max_slippage_bps, guaranteed1);
+                        let request = crate::exec::v4::calldata::MintV4Request {
+                            pool_key: crate::exec::v4::pipeline::pool_key_dari(&pool)?,
+                            tick_lower,
+                            tick_upper,
+                            liquidity,
+                            amount0_max: ke_u128_aksi(max0, "batas token0")?,
+                            amount1_max: ke_u128_aksi(max1, "batas token1")?,
+                            owner: pemilik,
+                            deadline,
+                        };
+                        let data = crate::exec::v4::calldata::rebalance_position(
+                            token_id_u256,
+                            ke_u128_aksi(min_old0, "minimum penarikan token0")?,
+                            ke_u128_aksi(min_old1, "minimum penarikan token1")?,
+                            &request,
+                        )
+                        .map_err(|e| e.to_string())?;
+                        let value = request.value();
+                        (
+                            data,
+                            value,
+                            execute::HarapanAksi::RebalanceV4 {
+                                token_lama: token_id_u256,
+                                permintaan: request,
+                            },
+                        )
+                    }
+                };
+                allowances = crate::exec::plan::izin_yang_kurang(
+                    &provider,
+                    &alamat,
+                    posisi.version,
+                    pemilik,
+                    token0,
+                    butuh0,
+                    token1,
+                    butuh1,
+                    chrono::Utc::now().timestamp().max(0) as u64,
+                )
+                .await?;
+                planned_raw = Some((butuh0, butuh1));
+                planned_amounts = Some(execute::ActionAmountView {
+                    symbol0: meta0.symbol.clone(),
+                    amount0: deposit::display_units(butuh0, meta0.decimals),
+                    symbol1: meta1.symbol.clone(),
+                    amount1: deposit::display_units(butuh1, meta1.decimals),
+                });
+                (
+                    crate::exec::aksi::Rencana {
+                        calldata,
+                        versi: posisi.version,
+                        menutup: false,
+                    },
+                    value,
+                    harapan,
+                )
+            }
+        };
+
+        let mut izin_risiko_kurang = false;
+        let uji_jual = if aksi == crate::exec::aksi::JenisAksi::TambahLikuiditas {
+            let (quote_token0, _, _) = crate::positions::muat::kutipan_pool(
+                &self.registry,
+                &posisi.token0,
+                &posisi.token1,
+            )
+            .ok_or("pasangan posisi tidak mempunyai token kutipan yang dikenal")?;
+            let memecoin = if quote_token0 { token1 } else { token0 };
+            let decimals = metadata
+                .as_ref()
+                .map(|(meta0, meta1)| {
+                    if quote_token0 {
+                        meta1.decimals
+                    } else {
+                        meta0.decimals
+                    }
+                })
+                .ok_or("metadata memecoin untuk uji jual tidak tersedia")?;
+            let (saldo0, saldo1) =
+                execute::saldo_dua_token(&provider, alamat.multicall, pemilik, token0, token1)
+                    .await?;
+            let saldo = if quote_token0 { saldo1 } else { saldo0 };
+            let satu_token = deposit::units("1", decimals)?;
+            let jumlah = satu_token
+                .max(saldo / alloy::primitives::U256::from(10_000u32))
+                .min(saldo);
+            if jumlah.is_zero() {
+                None
+            } else {
+                let pool = pool_dari_posisi(&posisi)?;
+                let router = match posisi.version {
+                    crate::pools::PoolVersion::V3 => self
+                        .registry
+                        .contract("uniswap_v3", "swap_router_02")
+                        .map_err(|e| e.to_string())?,
+                    crate::pools::PoolVersion::V4 => self
+                        .registry
+                        .contract("uniswap_v4", "universal_router")
+                        .map_err(|e| e.to_string())?,
+                };
+                let izin = match posisi.version {
+                    crate::pools::PoolVersion::V3 => {
+                        crate::exec::plan::izin_erc20_untuk(
+                            &provider,
+                            &alamat,
+                            pemilik,
+                            router,
+                            "SwapRouter02",
+                            memecoin,
+                            jumlah,
+                        )
+                        .await?
+                    }
+                    crate::pools::PoolVersion::V4 => {
+                        crate::exec::plan::izin_permit2_untuk(
+                            &provider,
+                            &alamat,
+                            pemilik,
+                            router,
+                            "UniversalRouter",
+                            memecoin,
+                            jumlah,
+                            chrono::Utc::now().timestamp().max(0) as u64,
+                        )
+                        .await?
+                    }
+                };
+                izin_risiko_kurang = !izin.is_empty();
+                for langkah in izin {
+                    if !allowances.iter().any(|ada| {
+                        ada.jenis == langkah.jenis
+                            && ada.token.eq_ignore_ascii_case(&langkah.token)
+                            && ada.spender.eq_ignore_ascii_case(&langkah.spender)
+                    }) {
+                        allowances.push(langkah);
+                    }
+                }
+                Some((pool, memecoin, jumlah))
+            }
+        } else {
+            None
+        };
+
+        for (index, step) in allowances.iter_mut().enumerate() {
+            step.step_id = format!("aksi-{index}");
+        }
+
+        let nominal_dibatasi = self.cfg.limits.max_position_usd.is_some()
+            || self.cfg.limits.max_daily_deploy_usd.is_some();
+        let deployment_usd = if aksi == crate::exec::aksi::JenisAksi::TambahLikuiditas {
+            if nominal_dibatasi {
+                let (meta0, meta1) = metadata.as_ref().expect("metadata aksi modal");
+                let active = self.active.read().await;
+                Some(
+                    active
+                        .as_ref()
+                        .and_then(|active| {
+                            nilai_usd_aksi(
+                                &posisi,
+                                meta0,
+                                meta1,
+                                planned_raw.unwrap_or_default().0,
+                                planned_raw.unwrap_or_default().1,
+                                active,
+                            )
+                        })
+                        .ok_or(
+                            "batas nominal aktif tetapi nilai USD tambah likuiditas belum dapat dibuktikan dari chart aktif",
+                        )?,
+                )
+            } else {
+                Some(0.0)
+            }
+        } else {
+            None
+        };
 
         let mut gates = Vec::new();
 
@@ -1351,17 +2422,138 @@ impl AppState {
             format!("posisi {:?}, kontrak tujuan sesuai", rencana.versi),
         ));
 
+        if memasukkan_modal {
+            gates.push(crate::exec::pipeline::GateResult::lolos_publik(
+                "G2",
+                "builder calldata",
+                format!(
+                    "{} byte, jumlah dan tick tervalidasi",
+                    rencana.calldata.len()
+                ),
+            ));
+            match crate::exec::golden::verify_embedded() {
+                Ok(()) => gates.push(crate::exec::pipeline::GateResult::lolos_publik(
+                    "G3",
+                    "golden vector",
+                    "encoder dasar cocok dengan transaksi acuan",
+                )),
+                Err(error) => gates.push(crate::exec::pipeline::GateResult::gagal_publik(
+                    "G3",
+                    "golden vector",
+                    error,
+                )),
+            }
+        }
+
         let tx = alloy::rpc::types::TransactionRequest::default()
             .from(pemilik)
             .to(tujuan)
+            .value(value)
             .input(rencana.calldata.clone().into());
 
+        let gas = provider.estimate_gas(tx.clone()).await.unwrap_or(0);
+        if memasukkan_modal {
+            let usage = if self.cfg.limits.max_daily_deploy_usd.is_some() {
+                crate::exec::journal::limit_usage(
+                    &self.store,
+                    self.registry.chain.id,
+                    pemilik,
+                    chrono::Utc::now(),
+                )
+                .map_err(|error| format!("penggunaan limit tidak terbaca: {error}"))?
+            } else {
+                crate::exec::journal::LimitUsage::default()
+            };
+            let balance = provider
+                .get_balance(pemilik)
+                .await
+                .map_err(|error| format!("saldo ETH untuk G6 tidak terbaca: {error}"))?;
+            let gas_price = provider
+                .get_gas_price()
+                .await
+                .map_err(|error| format!("harga gas untuk G6 tidak terbaca: {error}"))?;
+            let eth_needed = (f64::from(value) + gas as f64 * gas_price as f64) / 1e18;
+            let mut config = self.cfg.limits.clone();
+            // Kedua aksi ini tidak menambah jumlah posisi bersih dan tidak
+            // memperkenalkan pool baru.
+            config.max_open_positions = None;
+            config.new_pool_first_size_usd = None;
+            let context = crate::exec::limits::LimitContext {
+                position_usd: deployment_usd.unwrap_or(0.0),
+                daily_spent_usd: usage.daily_committed_usd,
+                open_positions: 0,
+                is_new_pool: false,
+                eth_balance: f64::from(balance) / 1e18,
+                eth_needed,
+            };
+            match crate::exec::limits::check(&config, &context) {
+                Ok(()) => gates.push(crate::exec::pipeline::GateResult::lolos_publik(
+                    "G6",
+                    "pembatas nilai",
+                    "jumlah dan cadangan gas berada dalam batas",
+                )),
+                Err(errors) => gates.push(crate::exec::pipeline::GateResult::gagal_publik(
+                    "G6",
+                    "pembatas nilai",
+                    errors.join("; "),
+                )),
+            }
+        }
+
         match provider.call(tx.clone()).await {
-            Ok(_) => gates.push(crate::exec::pipeline::GateResult::lolos_publik(
-                "G4",
-                "simulasi",
-                format!("kontrak menerima {}", aksi.nama()),
-            )),
+            Ok(output) => {
+                gates.push(crate::exec::pipeline::GateResult::lolos_publik(
+                    "G4",
+                    "simulasi",
+                    format!("kontrak menerima {}", aksi.nama()),
+                ));
+                if memasukkan_modal {
+                    let (max0, max1) = planned_raw.unwrap_or_default();
+                    let minimum_liquidity = planned_liquidity
+                        .unwrap_or_default()
+                        .saturating_sub(planned_liquidity.unwrap_or_default() / 100);
+                    if rencana.versi == crate::pools::PoolVersion::V3 {
+                        match crate::exec::simulate::decode_v3_liquidity_action(aksi, &output)
+                            .and_then(|simulated| {
+                                crate::exec::simulate::check_liquidity_action(
+                                    &simulated,
+                                    minimum_liquidity,
+                                    max0,
+                                    max1,
+                                )
+                                .map_err(|errors| errors.join("; "))?;
+                                Ok(simulated)
+                            }) {
+                            Ok(simulated) => {
+                                gates.push(crate::exec::pipeline::GateResult::lolos_publik(
+                                    "G5",
+                                    "asersi invarian",
+                                    format!(
+                                        "likuiditas {}, token0 {}, token1 {}",
+                                        simulated.liquidity, simulated.amount0, simulated.amount1
+                                    ),
+                                ))
+                            }
+                            Err(error) => {
+                                gates.push(crate::exec::pipeline::GateResult::gagal_publik(
+                                    "G5",
+                                    "asersi invarian",
+                                    error,
+                                ))
+                            }
+                        }
+                    } else {
+                        gates.push(crate::exec::pipeline::GateResult::lolos_publik(
+                            "G5",
+                            "asersi invarian",
+                            format!(
+                                "likuiditas {} dengan batas token0 {max0}, token1 {max1}",
+                                planned_liquidity.unwrap_or_default()
+                            ),
+                        ));
+                    }
+                }
+            }
             Err(e) => {
                 let teks = e.to_string();
                 let pesan = if teks.contains("revert") || teks.contains("execution reverted") {
@@ -1370,27 +2562,175 @@ impl AppState {
                     format!("RPC gagal: {teks}")
                 };
                 gates.push(crate::exec::pipeline::GateResult::gagal_publik(
-                    "G4",
-                    "simulasi",
-                    pesan,
+                    "G4", "simulasi", pesan,
                 ));
             }
         }
 
-        let gas = provider.estimate_gas(tx).await.unwrap_or(0);
+        let jalur_lp_lolos = if memasukkan_modal {
+            let lolos = gates.iter().any(|g| g.id == "G4" && g.passed)
+                && gates.iter().any(|g| g.id == "G5" && g.passed);
+            gates.push(if lolos {
+                crate::exec::pipeline::GateResult::lolos_publik(
+                    "R1",
+                    "transfer tax jalur LP",
+                    "aksi likuiditas tersimulasi dengan penyelesaian jumlah penuh",
+                )
+            } else {
+                crate::exec::pipeline::GateResult::gagal_publik(
+                    "R1",
+                    "transfer tax jalur LP",
+                    "jalur LP belum berhasil disimulasikan; selesaikan izin lalu susun ulang",
+                )
+            });
+            lolos
+        } else {
+            false
+        };
+
+        if aksi == crate::exec::aksi::JenisAksi::TambahLikuiditas {
+            let jual_kecil_lolos = match uji_jual.as_ref() {
+                None => {
+                    gates.push(crate::exec::pipeline::GateResult::gagal_publik(
+                        "R2",
+                        "simulasi jual kecil",
+                        "wallet belum mempunyai memecoin untuk uji jual kecil",
+                    ));
+                    false
+                }
+                Some(_) if izin_risiko_kurang => {
+                    gates.push(crate::exec::pipeline::GateResult::gagal_publik(
+                        "R2",
+                        "simulasi jual kecil",
+                        "izin router belum lengkap; selesaikan izin lalu susun ulang",
+                    ));
+                    false
+                }
+                Some((pool, memecoin, jumlah)) => {
+                    match crate::risk::token::uji_jual_kecil(
+                        &provider,
+                        &self.registry,
+                        pool,
+                        pemilik,
+                        *memecoin,
+                        *jumlah,
+                        self.cfg.limits.max_slippage_bps,
+                    )
+                    .await
+                    {
+                        Ok(keluaran) => {
+                            gates.push(crate::exec::pipeline::GateResult::lolos_publik(
+                                "R2",
+                                "simulasi jual kecil",
+                                format!(
+                                    "router menerima jual {jumlah} unit dan mengutip {keluaran} unit keluaran"
+                                ),
+                            ));
+                            true
+                        }
+                        Err(error) => {
+                            gates.push(crate::exec::pipeline::GateResult::gagal_publik(
+                                "R2",
+                                "simulasi jual kecil",
+                                error.to_string(),
+                            ));
+                            false
+                        }
+                    }
+                }
+            };
+            if let Some((pool, memecoin, _)) = uji_jual.as_ref() {
+                if let Err(error) = crate::risk::token::simpan_bukti(
+                    &self.store,
+                    self.registry.chain.id,
+                    &pool.id,
+                    *memecoin,
+                    jalur_lp_lolos,
+                    jual_kecil_lolos,
+                ) {
+                    tracing::warn!(error = %error, "bukti risiko token aksi gagal disimpan");
+                }
+            }
+        }
+
         let semua_lolos = gates.iter().all(|g| g.passed);
 
         let disusun_pada = chrono::Utc::now();
-        *self.pending_action.write().await = Some(execute::AksiTersimpan {
+        let plan_id = intent::plan_id()?;
+        let siap = semua_lolos && gas > 0 && allowances.is_empty() && !self.cfg.execution.dry_run;
+        let close_basis = if rencana.menutup {
+            posisi.sqrt_price_x96.as_ref().and_then(|sqrt_price_x96| {
+                crate::positions::muat::kutipan_pool(&self.registry, &posisi.token0, &posisi.token1)
+                    .map(|(quote_token0, quote_decimals, currency)| {
+                        crate::exec::journal::CloseBasis {
+                            sqrt_price_x96: sqrt_price_x96.clone(),
+                            fee0: posisi.fee0.clone(),
+                            fee1: posisi.fee1.clone(),
+                            quote_token0,
+                            quote_decimals,
+                            currency_id: currency.id,
+                            currency_symbol: currency.symbol,
+                        }
+                    })
+            })
+        } else {
+            None
+        };
+        let mut pending = self.pending_action.write().await;
+        if !self.intent.action_current(revision) {
+            return Err("permintaan aksi sudah berubah".into());
+        }
+        *pending = Some(execute::AksiTersimpan {
+            journal_context: crate::exec::journal::Context {
+                operation: match aksi {
+                    crate::exec::aksi::JenisAksi::TambahLikuiditas => {
+                        crate::exec::journal::Operation::Increase
+                    }
+                    crate::exec::aksi::JenisAksi::Rebalance => {
+                        crate::exec::journal::Operation::Rebalance
+                    }
+                    crate::exec::aksi::JenisAksi::KlaimFee => {
+                        crate::exec::journal::Operation::Claim
+                    }
+                    crate::exec::aksi::JenisAksi::TutupPosisi => {
+                        crate::exec::journal::Operation::Close
+                    }
+                },
+                plan_id: plan_id.clone(),
+                flow_id: request_id.clone(),
+                pool_id: None,
+                position_id: Some(position_id.clone()),
+                token0: posisi.token0.parse().ok(),
+                token1: posisi.token1.parse().ok(),
+                deployment_usd,
+                close_basis,
+            },
+            plan_id: plan_id.clone(),
+            position_id: position_id.clone(),
+            revision,
+            request_id: request_id.clone(),
+            action: aksi,
+            input,
+            siap,
             token_id: token_id.clone(),
+            versi: rencana.versi,
             calldata: rencana.calldata,
             tujuan,
+            value,
+            hook,
+            allowances: allowances.clone(),
+            amount0: planned_raw.map(|amounts| amounts.0).unwrap_or_default(),
+            amount1: planned_raw.map(|amounts| amounts.1).unwrap_or_default(),
+            harapan,
             menutup: rencana.menutup,
             nama: aksi.nama(),
             disusun_pada,
         });
 
         Ok(execute::ActionPlanView {
+            plan_id,
+            position_id,
+            request_id,
             token_id,
             action: aksi,
             nama: aksi.nama(),
@@ -1398,22 +2738,38 @@ impl AppState {
             gas_estimate: gas,
             dry_run: self.cfg.execution.dry_run,
             menutup: rencana.menutup,
-            siap: semua_lolos && !self.cfg.execution.dry_run,
+            siap,
             expires_at: (disusun_pada
                 + chrono::Duration::seconds(execute::RENCANA_KEDALUWARSA_DETIK))
             .to_rfc3339(),
             fee0: posisi.fee0,
             fee1: posisi.fee1,
+            allowances,
+            amounts: planned_amounts,
+            tick_lower_baru: target_ticks.map(|ticks| ticks.0),
+            tick_upper_baru: target_ticks.map(|ticks| ticks.1),
         })
     }
 
     /// Setujui aksi terakhir dan kirim transaksinya.
-    pub async fn on_execute_action(&self) {
-        match self.kirim_aksi().await {
+    pub async fn on_execute_action(&self, plan_id: String) {
+        match self.kirim_aksi(plan_id).await {
             Ok(view) => {
+                let verifikasi_gagal = view
+                    .outcome
+                    .verification
+                    .as_ref()
+                    .is_some_and(|gate| !gate.passed);
                 let _ = self
                     .events
                     .send(protocol::ServerMessage::SendResult(Box::new(view)));
+                if verifikasi_gagal {
+                    self.alert_kritis(
+                        "action_unverified",
+                        "transaksi sukses tetapi keadaan posisi tidak cocok dengan rencana. Periksa posisi sebelum melakukan aksi lain"
+                            .into(),
+                    );
+                }
                 // Keadaan posisi berubah setelah aksi, jadi daftarnya dimuat
                 // ulang. Tanpa ini kartunya menampilkan fee yang sudah diambil.
                 self.on_get_positions().await;
@@ -1422,19 +2778,26 @@ impl AppState {
         }
     }
 
-    async fn kirim_aksi(&self) -> Result<execute::SendResultView, String> {
+    async fn kirim_aksi(&self, plan_id: String) -> Result<execute::SendResultView, String> {
+        let _eksekusi = self.execution_lock.lock().await;
+        self.ensure_execution().await?;
         if self.cfg.execution.dry_run {
             return Err("engine sedang dry run, tidak ada yang dikirim".into());
         }
 
         // Dikeluarkan dari slot sebelum dikirim, dengan alasan yang sama seperti
         // rencana membuka posisi: yang masih tersimpan bisa disetujui dua kali.
-        let tersimpan = self
-            .pending_action
-            .write()
-            .await
-            .take()
-            .ok_or("belum ada aksi yang disusun")?;
+        let tersimpan = {
+            let mut pending = self.pending_action.write().await;
+            let r = pending.as_ref().ok_or("belum ada aksi yang disusun")?;
+            r.periksa(&plan_id, &self.intent)?;
+            self.periksa_hook_aksi(r).await?;
+            r.periksa(&plan_id, &self.intent)?;
+            if !r.allowances.is_empty() || !r.siap {
+                return Err("rencana aksi berubah atau belum lolos pemeriksaan".into());
+            }
+            pending.take().ok_or("rencana aksi hilang")?
+        };
 
         if tersimpan.kedaluwarsa() {
             return Err("rencana aksi sudah kedaluwarsa, susun ulang".into());
@@ -1450,21 +2813,389 @@ impl AppState {
         let signer = wallet.signer().map_err(|e| e.to_string())?.clone();
         drop(wallet);
 
+        let tokens = tersimpan
+            .journal_context
+            .token0
+            .zip(tersimpan.journal_context.token1);
+        let multicall = self.registry.contract("common", "multicall3").ok();
+        let catat_penerimaan = matches!(
+            tersimpan.action,
+            crate::exec::aksi::JenisAksi::KlaimFee | crate::exec::aksi::JenisAksi::TutupPosisi
+        );
+        let before = match (catat_penerimaan, tokens, multicall) {
+            (true, Some((token0, token1)), Some(multicall)) => {
+                execute::saldo_dua_token(&provider, multicall, signer.address(), token0, token1)
+                    .await
+                    .ok()
+            }
+            _ => None,
+        };
+        let journal_context = tersimpan.journal_context.clone();
+
         let terkirim = crate::exec::send::send_calldata(
             &provider,
             &self.nonce,
             &signer,
             tersimpan.tujuan,
             tersimpan.calldata,
-            alloy::primitives::U256::ZERO,
+            tersimpan.value,
             self.registry.chain.id,
+            &self.cfg.execution,
+            &self.cfg.limits,
+            &crate::exec::journal::Journal {
+                store: &self.store,
+                context: journal_context,
+            },
         )
         .await
         .map_err(|e| e.to_string())?;
 
+        let mut minted_amounts = None;
+        let mut hasil_token_id = None;
+        let mut verification = None;
+        if let Some(receipt) = terkirim.receipt.as_ref().filter(|receipt| receipt.status()) {
+            let token_id = tersimpan.token_id.parse().ok();
+            let from_event = (catat_penerimaan && tersimpan.versi == crate::pools::PoolVersion::V3)
+                .then(|| {
+                    crate::exec::send::collect_dari_log(
+                        receipt.inner.logs(),
+                        tersimpan.tujuan,
+                        token_id?,
+                        signer.address(),
+                    )
+                })
+                .flatten()
+                .map(|amounts| crate::exec::journal::ReceivedAmounts {
+                    amount0: amounts.amount0,
+                    amount1: amounts.amount1,
+                    evidence: "v3_collect_event".into(),
+                });
+            let from_balances = match (before, tokens, multicall) {
+                (Some(before), Some((token0, token1)), Some(multicall)) => {
+                    let after = execute::saldo_dua_token(
+                        &provider,
+                        multicall,
+                        signer.address(),
+                        token0,
+                        token1,
+                    )
+                    .await
+                    .ok();
+                    let gas_wei =
+                        (receipt.gas_used > 0 && receipt.effective_gas_price > 0).then(|| {
+                            alloy::primitives::U256::from(receipt.gas_used)
+                                * alloy::primitives::U256::from(receipt.effective_gas_price)
+                        });
+                    after
+                        .and_then(|after| {
+                            execute::received_from_balances(before, after, token0, token1, gas_wei)
+                        })
+                        .map(|(amount0, amount1)| crate::exec::journal::ReceivedAmounts {
+                            amount0: amount0.to_string(),
+                            amount1: amount1.to_string(),
+                            evidence: "wallet_balance_delta".into(),
+                        })
+                }
+                _ => None,
+            };
+            if let Some(received) = from_event.or(from_balances) {
+                if let Err(error) = crate::exec::journal::record_received(
+                    &self.store,
+                    self.registry.chain.id,
+                    signer.address(),
+                    terkirim.tx_hash,
+                    received,
+                ) {
+                    tracing::warn!(error = %error, tx = %terkirim.tx_hash, "hasil aksi tidak dapat dicatat");
+                }
+            }
+
+            let gate = match &tersimpan.harapan {
+                execute::HarapanAksi::TidakAda => None,
+                execute::HarapanAksi::Tambah {
+                    sebelum,
+                    minimum_tambahan,
+                } => {
+                    hasil_token_id = Some(tersimpan.token_id.clone());
+                    if tersimpan.versi == crate::pools::PoolVersion::V3 {
+                        if let Some((id, amounts)) =
+                            crate::exec::send::mint_dari_log(receipt.inner.logs(), tersimpan.tujuan)
+                                .filter(|(id, _)| id.to_string() == tersimpan.token_id)
+                        {
+                            hasil_token_id = Some(id.to_string());
+                            minted_amounts = Some(amounts);
+                        }
+                    }
+                    let actual = match tersimpan.versi {
+                        crate::pools::PoolVersion::V3 => crate::exec::verify::read_position(
+                            &provider,
+                            tersimpan.tujuan,
+                            token_id_u256(&tersimpan.token_id)?,
+                        )
+                        .await
+                        .map(|position| {
+                            (
+                                position.token0,
+                                position.token1,
+                                position.fee,
+                                position.tick_lower,
+                                position.tick_upper,
+                                position.liquidity,
+                            )
+                        }),
+                        crate::pools::PoolVersion::V4 => crate::exec::v4::verify::baca_posisi(
+                            &provider,
+                            tersimpan.tujuan,
+                            multicall.ok_or("alamat multicall tidak tersedia")?,
+                            token_id_u256(&tersimpan.token_id)?,
+                        )
+                        .await
+                        .map(|position| {
+                            (
+                                position.currency0,
+                                position.currency1,
+                                position.fee,
+                                position.tick_lower,
+                                position.tick_upper,
+                                position.liquidity,
+                            )
+                        }),
+                    };
+                    Some(match actual {
+                        Ok((a0, a1, fee, lower, upper, liquidity)) => {
+                            let before_liquidity = sebelum.liquidity.parse::<u128>().unwrap_or(0);
+                            let minimum = before_liquidity.saturating_add(*minimum_tambahan);
+                            let cocok = a0.to_string().eq_ignore_ascii_case(&sebelum.token0)
+                                && a1.to_string().eq_ignore_ascii_case(&sebelum.token1)
+                                && fee == sebelum.fee
+                                && lower == sebelum.tick_lower
+                                && upper == sebelum.tick_upper
+                                && liquidity >= minimum;
+                            if cocok {
+                                crate::exec::pipeline::GateResult::lolos_publik(
+                                    "G7",
+                                    "verifikasi pasca kirim",
+                                    format!("likuiditas posisi naik menjadi {liquidity}"),
+                                )
+                            } else {
+                                crate::exec::pipeline::GateResult::gagal_publik(
+                                    "G7",
+                                    "verifikasi pasca kirim",
+                                    format!(
+                                        "posisi setelah tambah tidak cocok: likuiditas {liquidity}, minimum {minimum}"
+                                    ),
+                                )
+                            }
+                        }
+                        Err(error) => crate::exec::pipeline::GateResult::gagal_publik(
+                            "G7",
+                            "verifikasi pasca kirim",
+                            error,
+                        ),
+                    })
+                }
+                execute::HarapanAksi::RebalanceV3 {
+                    token_lama,
+                    permintaan,
+                    expected_liquidity,
+                } => {
+                    let event =
+                        crate::exec::send::mint_dari_log(receipt.inner.logs(), tersimpan.tujuan);
+                    if let Some((id, amounts)) = event.as_ref() {
+                        hasil_token_id = Some(id.to_string());
+                        minted_amounts = Some(amounts.clone());
+                    }
+                    Some(match event {
+                        Some((id, _)) => {
+                            let baru =
+                                crate::exec::verify::read_position(&provider, tersimpan.tujuan, id)
+                                    .await;
+                            let lama_hilang = crate::exec::verify::read_position(
+                                &provider,
+                                tersimpan.tujuan,
+                                *token_lama,
+                            )
+                            .await
+                            .is_err();
+                            match baru {
+                                Ok(position) if lama_hilang => {
+                                    match crate::exec::verify::check_matches_request(
+                                        &position,
+                                        permintaan,
+                                        *expected_liquidity,
+                                    ) {
+                                        Ok(()) => crate::exec::pipeline::GateResult::lolos_publik(
+                                            "G7",
+                                            "verifikasi pasca kirim",
+                                            format!("NFT lama dibakar dan posisi baru {id} cocok"),
+                                        ),
+                                        Err(errors) => {
+                                            crate::exec::pipeline::GateResult::gagal_publik(
+                                                "G7",
+                                                "verifikasi pasca kirim",
+                                                errors.join("; "),
+                                            )
+                                        }
+                                    }
+                                }
+                                Ok(_) => crate::exec::pipeline::GateResult::gagal_publik(
+                                    "G7",
+                                    "verifikasi pasca kirim",
+                                    "NFT lama masih terbaca setelah rebalance",
+                                ),
+                                Err(error) => crate::exec::pipeline::GateResult::gagal_publik(
+                                    "G7",
+                                    "verifikasi pasca kirim",
+                                    error,
+                                ),
+                            }
+                        }
+                        None => crate::exec::pipeline::GateResult::gagal_publik(
+                            "G7",
+                            "verifikasi pasca kirim",
+                            "event IncreaseLiquidity posisi baru tidak ditemukan atau ambigu",
+                        ),
+                    })
+                }
+                execute::HarapanAksi::RebalanceV4 {
+                    token_lama,
+                    permintaan,
+                } => {
+                    let id =
+                        crate::exec::v4::pipeline::token_id_dari_receipt(receipt, tersimpan.tujuan);
+                    hasil_token_id = id.map(|value| value.to_string());
+                    Some(match id {
+                        Some(id) => {
+                            let baru = crate::exec::v4::verify::baca_posisi(
+                                &provider,
+                                tersimpan.tujuan,
+                                multicall.ok_or("alamat multicall tidak tersedia")?,
+                                id,
+                            )
+                            .await;
+                            let lama_hilang = crate::exec::v4::verify::baca_posisi(
+                                &provider,
+                                tersimpan.tujuan,
+                                multicall.ok_or("alamat multicall tidak tersedia")?,
+                                *token_lama,
+                            )
+                            .await
+                            .is_err();
+                            match baru {
+                                Ok(position) if lama_hilang => {
+                                    match crate::exec::v4::verify::cocok_dengan_permintaan(
+                                        &position, permintaan,
+                                    ) {
+                                        Ok(()) => crate::exec::pipeline::GateResult::lolos_publik(
+                                            "G7",
+                                            "verifikasi pasca kirim",
+                                            format!(
+                                                "NFT lama dibakar dan posisi V4 baru {id} cocok"
+                                            ),
+                                        ),
+                                        Err(errors) => {
+                                            crate::exec::pipeline::GateResult::gagal_publik(
+                                                "G7",
+                                                "verifikasi pasca kirim",
+                                                errors.join("; "),
+                                            )
+                                        }
+                                    }
+                                }
+                                Ok(_) => crate::exec::pipeline::GateResult::gagal_publik(
+                                    "G7",
+                                    "verifikasi pasca kirim",
+                                    "NFT lama masih terbaca setelah rebalance",
+                                ),
+                                Err(error) => crate::exec::pipeline::GateResult::gagal_publik(
+                                    "G7",
+                                    "verifikasi pasca kirim",
+                                    error,
+                                ),
+                            }
+                        }
+                        None => crate::exec::pipeline::GateResult::gagal_publik(
+                            "G7",
+                            "verifikasi pasca kirim",
+                            "Transfer NFT posisi baru tidak ditemukan",
+                        ),
+                    })
+                }
+            };
+            verification = gate;
+        }
+        let mut outcome = crate::exec::send::jadikan_hasil(terkirim);
+        outcome.verification = verification;
+        outcome.token_id = hasil_token_id;
+        outcome.minted_amounts = minted_amounts;
+        let verified = outcome.status == crate::exec::send::TxStatus::Sukses
+            && outcome
+                .verification
+                .as_ref()
+                .is_some_and(|gate| gate.passed);
+        if verified {
+            match tersimpan.action {
+                crate::exec::aksi::JenisAksi::TambahLikuiditas => {
+                    let actual = outcome.minted_amounts.as_ref();
+                    let amount0 = actual
+                        .and_then(|amounts| amounts.amount0.parse().ok())
+                        .unwrap_or(tersimpan.amount0);
+                    let amount1 = actual
+                        .and_then(|amounts| amounts.amount1.parse().ok())
+                        .unwrap_or(tersimpan.amount1);
+                    if let Err(error) = crate::pnl::tambah_setoran(
+                        &self.store,
+                        &tersimpan.position_id,
+                        amount0,
+                        amount1,
+                        actual.is_some(),
+                    ) {
+                        tracing::warn!(error = %error, "basis tambah likuiditas tidak dapat dicatat");
+                    }
+                }
+                crate::exec::aksi::JenisAksi::Rebalance => {
+                    if let Some(token_id) = outcome.token_id.as_ref() {
+                        let position_id = crate::positions::position_id(
+                            self.registry.chain.id,
+                            tersimpan.tujuan,
+                            token_id
+                                .parse()
+                                .map_err(|_| "token ID rebalance tidak valid")?,
+                        );
+                        let actual = outcome.minted_amounts.as_ref();
+                        crate::pnl::simpan(
+                            &self.store,
+                            &crate::pnl::Catatan {
+                                position_id,
+                                token_id: token_id.clone(),
+                                flow_id: Some(tersimpan.request_id.clone()),
+                                setor0: actual
+                                    .map(|amounts| amounts.amount0.clone())
+                                    .unwrap_or_else(|| tersimpan.amount0.to_string()),
+                                setor1: actual
+                                    .map(|amounts| amounts.amount1.clone())
+                                    .unwrap_or_else(|| tersimpan.amount1.to_string()),
+                                harga_buka: None,
+                                lengkap: false,
+                                setoran_aktual: actual.is_some(),
+                                gas_wei: None,
+                                gas_kutipan: None,
+                                slippage_kutipan: Some(0.0),
+                                dibuka_pada: outcome.sent_at.clone(),
+                                tx_buka: Some(outcome.tx_hash.clone()),
+                                rekonstruksi_log: None,
+                                rekonstruksi_v4: None,
+                            },
+                        );
+                    }
+                }
+                crate::exec::aksi::JenisAksi::KlaimFee
+                | crate::exec::aksi::JenisAksi::TutupPosisi => {}
+            }
+        }
         Ok(execute::SendResultView {
             kind: "action",
-            outcome: crate::exec::send::jadikan_hasil(terkirim),
+            outcome,
         })
     }
 
@@ -1632,8 +3363,7 @@ impl AppState {
         };
 
         let menit = |dari: u64, sampai: u64| {
-            sampai.saturating_sub(dari) as f64 * self.registry.chain.block_time_ms as f64
-                / 60_000.0
+            sampai.saturating_sub(dari) as f64 * self.registry.chain.block_time_ms as f64 / 60_000.0
         };
         let jendela_pindai_menit = menit(hasil.dari_blok, hasil.sampai_blok);
 
@@ -1655,22 +3385,20 @@ impl AppState {
             .filter(|h| crate::risk::persetujuan::disetujui(&self.store, h))
             .collect();
 
-        let daftar =
-            match kandidat::perkaya(&provider, &self.registry, &hasil, &disetujui).await {
-                Ok(d) => d,
-                Err(e) => {
-                    let mut v = kosong(Some(format!("penilaian kandidat gagal: {e}")));
-                    v.total_swap = hasil.total_swap;
-                    v.jendela_pindai_menit = jendela_pindai_menit;
-                    return v;
-                }
-            };
+        let daftar = match kandidat::perkaya(&provider, &self.registry, &hasil, &disetujui).await {
+            Ok(d) => d,
+            Err(e) => {
+                let mut v = kosong(Some(format!("penilaian kandidat gagal: {e}")));
+                v.total_swap = hasil.total_swap;
+                v.jendela_pindai_menit = jendela_pindai_menit;
+                return v;
+            }
+        };
 
         // Penilaian hook disusun untuk hook yang benar benar muncul di hasil,
         // bukan untuk semuanya. Satu pemindaian `Initialize` melayani seluruh
         // hook sekaligus, jadi biayanya tidak bertambah per hook.
-        let (hooks, adopsi_lengkap) =
-            self.nilai_hook_pada(&daftar.baris, hasil.sampai_blok).await;
+        let (hooks, adopsi_lengkap) = self.nilai_hook_pada(&daftar.baris, hasil.sampai_blok).await;
 
         protocol::ScanView {
             rows: daftar.baris,
@@ -1696,10 +3424,8 @@ impl AppState {
         baris: &[crate::pools::kandidat::BarisScan],
         sampai_blok: u64,
     ) -> (Vec<crate::risk::hook::PenilaianHook>, bool) {
-        let alamat: std::collections::BTreeSet<String> = baris
-            .iter()
-            .filter_map(|b| b.hooks.clone())
-            .collect();
+        let alamat: std::collections::BTreeSet<String> =
+            baris.iter().filter_map(|b| b.hooks.clone()).collect();
         if alamat.is_empty() {
             // Tidak ada hook berarti tidak ada yang perlu dinilai, dan sejarah
             // adopsi tidak perlu disentuh sama sekali. Ini jalur tercepat, dan
@@ -1731,11 +3457,18 @@ impl AppState {
             match crate::risk::hook::nilai(&provider, &self.registry, &adopsi, &h, sampai_blok)
                 .await
             {
-                Ok(p) => out.push(p),
+                Ok(p) => {
+                    if p.lolos_otomatis {
+                        if let Err(e) = crate::risk::persetujuan::catat_otomatis(&self.store, &p) {
+                            tracing::warn!(hook = %h, error = %e, "allowlist otomatis gagal disimpan");
+                        }
+                    }
+                    out.push(p);
+                }
                 Err(e) => tracing::warn!(hook = %h, error = %e, "penilaian hook gagal"),
             }
         }
-        (out, adopsi.lengkap)
+        (out, adopsi.lengkap && adopsi.posisi_lengkap)
     }
 
     /// Catat persetujuan sadar user atas sebuah hook, PRD 5.4.
@@ -1744,45 +3477,54 @@ impl AppState {
     /// yang datang dari panel bisa saja sudah diubah, dan bagian yang paling
     /// menarik untuk diubah justru kesimpulan bisa diupgrade atau tidaknya.
     pub async fn on_approve_hook(&self, hook: String) {
+        if hook.parse::<alloy::primitives::Address>().is_err() {
+            return self.alert_kritis("hook_failed", "alamat hook tidak valid".into());
+        }
+        let ticket = self.intent.begin_hook(&hook);
         let provider = match self.chain.provider().await {
             Ok(p) => p,
-            Err(e) => return self.alert_kritis("hook_failed", format!("RPC tidak bisa dipakai: {e}")),
+            Err(e) => {
+                return self.alert_kritis("hook_failed", format!("RPC tidak bisa dipakai: {e}"))
+            }
         };
-        let blok = provider.get_block_number().await.unwrap_or(0);
+        let blok = match provider.get_block_number().await {
+            Ok(block) => block,
+            Err(e) => {
+                return self
+                    .alert_kritis("hook_failed", format!("blok penilaian tidak terbaca: {e}"))
+            }
+        };
 
         // Adopsi dibaca ulang di sini, bukan diambil dari hasil pemindaian
         // terakhir. Persetujuan menyimpan penilaian saat itu sebagai catatan
         // yang bisa ditinjau, jadi angkanya harus yang paling baru, bukan yang
         // kebetulan masih tersimpan dari pemindaian entah kapan.
-        let adopsi = crate::risk::hook::hitung_adopsi(
-            &provider,
-            &self.registry,
-            Some(&self.store),
-            blok,
-        )
-        .await
-        .unwrap_or_default();
+        let adopsi =
+            crate::risk::hook::hitung_adopsi(&provider, &self.registry, Some(&self.store), blok)
+                .await
+                .unwrap_or_default();
 
-        let penilaian = match crate::risk::hook::nilai(
-            &provider,
-            &self.registry,
-            &adopsi,
-            &hook,
-            blok,
-        )
-        .await
-        {
-            Ok(p) => p,
-            Err(e) => {
-                return self.alert_kritis("hook_failed", format!("hook tidak bisa dinilai: {e}"))
-            }
-        };
+        let penilaian =
+            match crate::risk::hook::nilai(&provider, &self.registry, &adopsi, &hook, blok).await {
+                Ok(p) => p,
+                Err(e) => {
+                    return self
+                        .alert_kritis("hook_failed", format!("hook tidak bisa dinilai: {e}"))
+                }
+            };
 
+        let _eksekusi = self.execution_lock.lock().await;
+        if !self.intent.hook_current(&hook, ticket) {
+            return;
+        }
         match crate::risk::persetujuan::setujui(&self.store, &penilaian) {
             Ok(_) => {
+                self.intent.change();
                 self.alert_info(
                     "hook_approved",
-                    format!("Hook {hook} disetujui dan dicatat. Pindai ulang untuk melihat efeknya."),
+                    format!(
+                        "Hook {hook} disetujui dan dicatat. Pindai ulang untuk melihat efeknya."
+                    ),
                 );
             }
             Err(e) => self.alert_kritis("hook_rejected", e.to_string()),
@@ -1791,7 +3533,18 @@ impl AppState {
 
     /// Cabut persetujuan sebuah hook.
     pub async fn on_forget_hook(&self, hook: String) {
+        if hook.parse::<alloy::primitives::Address>().is_err() {
+            return self.alert_kritis("hook_failed", "alamat hook tidak valid".into());
+        }
+        let ticket = self.intent.begin_hook(&hook);
+        let _eksekusi = self.execution_lock.lock().await;
+        if !self.intent.hook_current(&hook, ticket) {
+            return;
+        }
         let ada = crate::risk::persetujuan::cabut(&self.store, &hook);
+        if ada {
+            self.intent.change();
+        }
         self.alert_info(
             "hook_forgotten",
             if ada {
@@ -1803,16 +3556,47 @@ impl AppState {
     }
 
     pub async fn on_get_positions(&self) {
+        let _pemuatan = self.positions_lock.lock().await;
         let view = self.susun_positions().await;
 
         // Perubahan keadaan range diperiksa SEBELUM disimpan, karena
         // perbandingannya butuh keadaan sebelumnya.
         self.periksa_perubahan_range(&view.positions).await;
 
-        *self.positions.write().await = view.positions.clone();
+        if view.error.is_none() {
+            *self.positions.write().await = view.positions.clone();
+        }
         let _ = self
             .events
             .send(protocol::ServerMessage::Positions(Box::new(view)));
+    }
+
+    pub async fn on_get_transactions(&self) {
+        let owner = self.wallet.lock().await.address();
+        let view = match owner {
+            Some(owner) => {
+                match crate::exec::journal::views(&self.store, self.registry.chain.id, owner) {
+                    Ok(items) => protocol::TransactionsView {
+                        owner: owner.to_string(),
+                        items,
+                        error: None,
+                    },
+                    Err(error) => protocol::TransactionsView {
+                        owner: owner.to_string(),
+                        items: Vec::new(),
+                        error: Some(format!("jurnal transaksi tidak terbaca: {error}")),
+                    },
+                }
+            }
+            None => protocol::TransactionsView {
+                owner: String::new(),
+                items: Vec::new(),
+                error: Some("wallet belum dibuat".into()),
+            },
+        };
+        let _ = self
+            .events
+            .send(protocol::ServerMessage::Transactions(Box::new(view)));
     }
 
     async fn susun_positions(&self) -> protocol::PositionsView {
@@ -1825,9 +3609,11 @@ impl AppState {
         let Some(pemilik) = pemilik else {
             return protocol::PositionsView {
                 positions: Vec::new(),
+                tertutup: Vec::new(),
                 owner: String::new(),
                 keluar_range: 0,
                 ringkasan: crate::pnl::ringkas(&[]),
+                learning: crate::learning::view(&self.store, &[], &[]).unwrap_or_default(),
                 error: Some("wallet belum dibuat".into()),
                 dimuat_pada: waktu,
             };
@@ -1836,18 +3622,36 @@ impl AppState {
         let provider = match self.chain.provider().await {
             Ok(p) => p,
             Err(e) => {
+                let (tertutup, histori_error) = match crate::pnl::histori_tertutup(
+                    &self.store,
+                    self.registry.chain.id,
+                    pemilik,
+                ) {
+                    Ok(items) => (items, None),
+                    Err(_) => (Vec::new(), Some("histori tertutup tidak terbaca")),
+                };
+                let hasil: Vec<_> = tertutup.iter().filter_map(|p| p.pnl.clone()).collect();
+                let _ =
+                    crate::learning::synchronize(&self.store, &[], &tertutup, chrono::Utc::now());
+                let learning =
+                    crate::learning::view(&self.store, &[], &tertutup).unwrap_or_default();
                 return protocol::PositionsView {
                     positions: Vec::new(),
+                    tertutup,
                     owner: pemilik.to_string(),
                     keluar_range: 0,
-                    ringkasan: crate::pnl::ringkas(&[]),
-                    error: Some(format!("RPC tidak bisa dipakai: {e}")),
+                    ringkasan: crate::pnl::ringkas(&hasil),
+                    learning,
+                    error: Some(match histori_error {
+                        Some(histori) => format!("RPC tidak bisa dipakai: {e}; {histori}"),
+                        None => format!("RPC tidak bisa dipakai: {e}"),
+                    }),
                     dimuat_pada: waktu,
-                }
+                };
             }
         };
 
-        let posisi = crate::positions::muat::muat_semua(
+        let snapshot = crate::positions::muat::muat_snapshot(
             &provider,
             &self.registry,
             Some(&self.store),
@@ -1855,17 +3659,46 @@ impl AppState {
         )
         .await;
 
+        let posisi = snapshot.positions;
+        let mut errors = snapshot.errors;
+        let tertutup =
+            match crate::pnl::histori_tertutup(&self.store, self.registry.chain.id, pemilik) {
+                Ok(items) => items,
+                Err(_) => {
+                    errors.push("histori tertutup tidak terbaca".into());
+                    Vec::new()
+                }
+            };
+
+        if let Err(error) =
+            crate::learning::synchronize(&self.store, &posisi, &tertutup, chrono::Utc::now())
+        {
+            errors.push(format!("self improvement tidak tersinkron: {error}"));
+        }
+
         let keluar = posisi.iter().filter(|p| !p.in_range && !p.kosong).count();
-        let hasil: Vec<crate::pnl::Hasil> =
-            posisi.iter().filter_map(|p| p.pnl.clone()).collect();
+        let hasil: Vec<crate::pnl::Hasil> = posisi
+            .iter()
+            .filter_map(|p| p.pnl.clone())
+            .chain(tertutup.iter().filter_map(|p| p.pnl.clone()))
+            .collect();
         let ringkasan = crate::pnl::ringkas(&hasil);
+        let learning = match crate::learning::view(&self.store, &posisi, &tertutup) {
+            Ok(view) => view,
+            Err(error) => {
+                errors.push(format!("versi kalibrasi tidak terbaca: {error}"));
+                crate::learning::LearningView::default()
+            }
+        };
 
         protocol::PositionsView {
             positions: posisi,
+            tertutup,
             owner: pemilik.to_string(),
             keluar_range: keluar,
             ringkasan,
-            error: None,
+            learning,
+            error: (!errors.is_empty()).then(|| errors.join("; ")),
             dimuat_pada: waktu,
         }
     }
@@ -1886,14 +3719,15 @@ impl AppState {
 
         let lama: std::collections::HashMap<&str, bool> = sebelum
             .iter()
-            .map(|p| (p.token_id.as_str(), p.in_range))
+            .filter(|p| p.tick_sekarang.is_some())
+            .map(|p| (p.position_id.as_str(), p.in_range))
             .collect();
 
         for p in sekarang {
-            if p.kosong {
+            if p.kosong || p.tick_sekarang.is_none() {
                 continue;
             }
-            let Some(dulu) = lama.get(p.token_id.as_str()) else {
+            let Some(dulu) = lama.get(p.position_id.as_str()) else {
                 continue;
             };
             if *dulu == p.in_range {
@@ -1901,20 +3735,24 @@ impl AppState {
             }
 
             if p.in_range {
-                self.beri_tahu(
+                self.beri_tahu_subjek(
                     protocol::AlertLevel::Info,
                     "position_back_in_range",
                     format!("Posisi #{} kembali masuk range", p.token_id),
-                );
+                    Some(p.position_id.clone()),
+                )
+                .await;
             } else {
-                self.beri_tahu(
+                self.beri_tahu_subjek(
                     protocol::AlertLevel::Critical,
                     "position_out_of_range",
                     format!(
                         "Posisi #{} keluar range dan berhenti menghasilkan fee",
                         p.token_id
                     ),
-                );
+                    Some(p.position_id.clone()),
+                )
+                .await;
             }
         }
     }
@@ -1925,28 +3763,48 @@ impl AppState {
     /// masih perlu menyusun ulang rencana dengan saldo yang sudah berubah.
     /// Yang dikosongkan hanya calldata zapnya, supaya swap yang sama tidak
     /// bisa dijalankan dua kali.
-    pub async fn on_swap_zap(&self) {
-        match self.kirim_zap().await {
-            Ok(view) => {
+    pub async fn on_swap_zap(&self, plan_id: String) {
+        match self.kirim_zap(plan_id).await {
+            Ok((view, lanjut)) => {
                 let _ = self
                     .events
                     .send(protocol::ServerMessage::SendResult(Box::new(view)));
+                if let Some(task) = lanjut {
+                    self.on_quote_range(task).await;
+                }
             }
             Err(pesan) => self.alert_kritis("zap_failed", pesan),
         }
     }
 
-    async fn kirim_zap(&self) -> Result<execute::SendResultView, String> {
-        let (calldata, value) = {
+    async fn kirim_zap(
+        &self,
+        plan_id: String,
+    ) -> Result<(execute::SendResultView, Option<execute::QuoteTask>), String> {
+        let _eksekusi = self.execution_lock.lock().await;
+        self.ensure_execution().await?;
+        let mut rencana = {
             let mut guard = self.pending_plan.write().await;
             let r = guard.as_mut().ok_or("belum ada rencana yang disusun")?;
-            if r.kedaluwarsa() {
-                return Err("rencana sudah kedaluwarsa, susun ulang".into());
+            r.periksa(&plan_id, &self.intent)?;
+            self.periksa_hook_rencana(r).await?;
+            r.periksa(&plan_id, &self.intent)?;
+            if r.plan.gates.iter().any(|g| g.id == "G6" && !g.passed) {
+                return Err("pembatas G6 belum lolos".into());
             }
-            r.zap_calldata
-                .take()
-                .ok_or("rencana ini tidak memerlukan zap")?
+            if r.zap_calldata.is_none() {
+                return Err("rencana ini tidak memerlukan zap".into());
+            }
+            guard.take().ok_or("rencana zap hilang")?
         };
+        let (calldata, value) = rencana
+            .zap_calldata
+            .take()
+            .ok_or("calldata zap tidak tersedia")?;
+        let zap = rencana
+            .zap_view
+            .as_ref()
+            .ok_or("rincian zap tidak tersedia")?;
 
         let provider = self
             .chain
@@ -1962,6 +3820,40 @@ impl AppState {
         let signer = wallet.signer().map_err(|e| e.to_string())?.clone();
         drop(wallet);
 
+        let mc = self
+            .registry
+            .contract("common", "multicall3")
+            .map_err(|e| e.to_string())?;
+        let before = execute::saldo_dua_token(
+            &provider,
+            mc,
+            signer.address(),
+            rencana.token0,
+            rencana.token1,
+        )
+        .await?;
+
+        // Jalankan calldata yang persis sama dari wallet yang sama sebelum
+        // menyentuh signer. Ini membuktikan allowance, transfer token, hook,
+        // batas keluaran, dan jalur router pada state rantai terkini. Estimasi
+        // gas di pintu kirim tetap mengulang pemeriksaan ini karena state bisa
+        // berubah di antara dua panggilan.
+        provider
+            .call(
+                alloy::rpc::types::TransactionRequest::default()
+                    .from(signer.address())
+                    .to(router)
+                    .value(value)
+                    .input(calldata.clone().into()),
+            )
+            .await
+            .map_err(|error| {
+                format!(
+                    "simulasi zap ditolak: {}",
+                    crate::exec::simulate::jelaskan_revert(&error.to_string())
+                )
+            })?;
+
         let terkirim = crate::exec::send::send_calldata(
             &provider,
             &self.nonce,
@@ -1970,14 +3862,71 @@ impl AppState {
             calldata,
             value,
             self.registry.chain.id,
+            &self.cfg.execution,
+            &self.cfg.limits,
+            &crate::exec::journal::Journal {
+                store: &self.store,
+                context: rencana.journal_context(crate::exec::journal::Operation::Zap),
+            },
         )
         .await
         .map_err(|e| e.to_string())?;
 
-        Ok(execute::SendResultView {
-            kind: "zap",
-            outcome: crate::exec::send::jadikan_hasil(terkirim),
-        })
+        let outcome = crate::exec::send::jadikan_hasil(terkirim);
+        let mut lanjut = None;
+        if outcome.status == crate::exec::send::TxStatus::Sukses
+            && self.intent.current(rencana.revision)
+        {
+            match execute::saldo_dua_token(
+                &provider,
+                mc,
+                signer.address(),
+                rencana.token0,
+                rencana.token1,
+            )
+            .await
+            {
+                Ok(after) => {
+                    let input: alloy::primitives::U256 =
+                        zap.jumlah.parse().map_err(|_| "jumlah zap tidak valid")?;
+                    let cap: alloy::primitives::U256 = zap
+                        .perkiraan_diterima
+                        .parse()
+                        .map_err(|_| "kutipan zap tidak valid")?;
+                    let source0 = zap.dari.eq_ignore_ascii_case(&rencana.token0.to_string());
+                    // Anggaran berikutnya hanya sisa input dan hasil swap yang
+                    // diterima. Saldo tujuan yang sudah ada tidak ikut dipakai.
+                    let budget = if source0 {
+                        (
+                            rencana.budget.0.saturating_sub(input),
+                            after.1.saturating_sub(before.1).min(cap),
+                        )
+                    } else {
+                        (
+                            after.0.saturating_sub(before.0).min(cap),
+                            rencana.budget.1.saturating_sub(input),
+                        )
+                    };
+                    if let Some(revision) = self.intent.advance(rencana.revision) {
+                        rencana.quote.revision = revision;
+                        rencana.quote.budget_override = Some(budget);
+                        rencana.quote.deposit.zap = false;
+                        lanjut = Some(rencana.quote);
+                    }
+                }
+                Err(e) => self.alert_kritis(
+                    "zap_balance_unknown",
+                    format!("swap berhasil, saldo hasil belum terbaca: {e}"),
+                ),
+            }
+        }
+        Ok((
+            execute::SendResultView {
+                kind: "zap",
+                outcome,
+            },
+            lanjut,
+        ))
     }
 
     /// Setujui rencana terakhir dan kirim transaksinya.
@@ -1985,8 +3934,8 @@ impl AppState {
     /// Rencana dikeluarkan dari slot SEBELUM dikirim, apa pun hasilnya. Rencana
     /// yang tetap tersimpan setelah dikirim bisa disetujui dua kali, dan dua
     /// persetujuan berarti dua posisi beserta dua kali biayanya.
-    pub async fn on_open_position(&self) {
-        match self.kirim_open().await {
+    pub async fn on_open_position(&self, plan_id: String) {
+        match self.kirim_open(plan_id).await {
             Ok(view) => {
                 let terverifikasi = view.outcome.fully_verified();
                 let _ = self
@@ -2005,17 +3954,20 @@ impl AppState {
         }
     }
 
-    async fn kirim_open(&self) -> Result<execute::SendResultView, String> {
-        let tersimpan = self
-            .pending_plan
-            .write()
-            .await
-            .take()
-            .ok_or("belum ada rencana yang disusun")?;
-
-        if tersimpan.kedaluwarsa() {
-            return Err("rencana sudah kedaluwarsa, susun ulang".into());
-        }
+    async fn kirim_open(&self, plan_id: String) -> Result<execute::SendResultView, String> {
+        let _eksekusi = self.execution_lock.lock().await;
+        self.ensure_execution().await?;
+        let tersimpan = {
+            let mut pending = self.pending_plan.write().await;
+            let r = pending.as_ref().ok_or("belum ada rencana yang disusun")?;
+            r.periksa(&plan_id, &self.intent)?;
+            self.periksa_hook_rencana(r).await?;
+            r.periksa(&plan_id, &self.intent)?;
+            if r.zap_calldata.is_some() {
+                return Err("jalankan zap lalu susun ulang rencana mint".into());
+            }
+            pending.take().ok_or("rencana hilang")?
+        };
 
         let provider = self
             .chain
@@ -2049,32 +4001,96 @@ impl AppState {
             &tersimpan.plan,
             self.registry.chain.id,
             value,
+            &self.cfg.execution,
+            &self.cfg.limits,
+            &crate::exec::journal::Journal {
+                store: &self.store,
+                context: tersimpan.journal_context(crate::exec::journal::Operation::Open),
+            },
         )
         .await
         .map_err(|e| e.to_string())?;
 
-        // Catatan biaya disimpan hanya kalau posisinya benar benar tercipta.
-        // Tanpa ini, PnL posisi yang kita buka sendiri akan selamanya
-        // ditandai perkiraan, padahal kita tahu persis berapa yang disetor.
+        // Receipt menjadi sumber jumlah aktual. Catatan tetap belum lengkap
+        // sampai biaya approval/zap serta perubahan posisi ikut direkonsiliasi.
         if let Some(token_id) = outcome.token_id.as_ref() {
+            let position_id = crate::positions::position_id(
+                self.registry.chain.id,
+                position_manager,
+                token_id
+                    .parse()
+                    .map_err(|_| "token ID receipt tidak valid")?,
+            );
+            crate::exec::journal::link_position(
+                &self.store,
+                self.registry.chain.id,
+                signer.address(),
+                outcome
+                    .tx_hash
+                    .parse()
+                    .map_err(|_| "hash transaksi open tidak valid")?,
+                &position_id,
+            )
+            .map_err(|e| format!("posisi tidak dapat diikat ke jurnal: {e}"))?;
+            let flow_costs = crate::exec::journal::flow_costs(
+                &self.store,
+                self.registry.chain.id,
+                signer.address(),
+                &tersimpan.quote.request_id,
+            )
+            .map_err(|e| format!("biaya flow tidak terbaca: {e}"))?;
+            let currency = crate::positions::muat::kutipan_pool(
+                &self.registry,
+                &tersimpan.token0.to_string(),
+                &tersimpan.token1.to_string(),
+            )
+            .map(|(_, _, currency)| currency);
+            let gas_kutipan = currency
+                .filter(|c| c.symbol == "ETH" || c.symbol == "WETH")
+                .filter(|_| flow_costs.complete)
+                .and_then(|_| flow_costs.gas_wei.to_string().parse::<f64>().ok())
+                .map(|wei| wei / 1e18);
             crate::pnl::simpan(
                 &self.store,
                 &crate::pnl::Catatan {
+                    position_id: position_id.clone(),
                     token_id: token_id.clone(),
-                    setor0: tersimpan.plan.amount0.clone(),
-                    setor1: tersimpan.plan.amount1.clone(),
-                    harga_buka: 0.0,
-                    // Gas dinyatakan dalam ETH, sedangkan PnL dalam token
-                    // kutipan. Konversinya butuh kurs, yang baru ada saat
-                    // chart terbuka, jadi nilainya diisi nol dan bukan
-                    // ditebak. Angka yang ditebak lebih buruk daripada nol
-                    // yang jujur, karena ia terlihat seperti fakta.
-                    gas_kutipan: 0.0,
-                    slippage_kutipan: 0.0,
+                    flow_id: Some(tersimpan.quote.request_id.clone()),
+                    setor0: outcome
+                        .minted_amounts
+                        .as_ref()
+                        .map(|a| a.amount0.clone())
+                        .unwrap_or_else(|| tersimpan.plan.amount0.clone()),
+                    setor1: outcome
+                        .minted_amounts
+                        .as_ref()
+                        .map(|a| a.amount1.clone())
+                        .unwrap_or_else(|| tersimpan.plan.amount1.clone()),
+                    harga_buka: None,
+                    lengkap: false,
+                    setoran_aktual: outcome.minted_amounts.is_some(),
+                    gas_wei: (flow_costs.gas_wei > alloy::primitives::U256::ZERO)
+                        .then(|| flow_costs.gas_wei.to_string()),
+                    gas_kutipan,
+                    slippage_kutipan: tersimpan.quote.budget_override.is_none().then_some(0.0),
                     dibuka_pada: outcome.sent_at.clone(),
                     tx_buka: Some(outcome.tx_hash.clone()),
+                    rekonstruksi_log: None,
+                    rekonstruksi_v4: None,
                 },
             );
+            if outcome.fully_verified() {
+                if let Err(error) = crate::learning::record_open(
+                    &self.store,
+                    &position_id,
+                    &outcome.sent_at,
+                    tersimpan.learning.clone(),
+                ) {
+                    // Posisi sudah aman dibuka dan tidak boleh dianggap gagal
+                    // hanya karena catatan analitik lokal bermasalah.
+                    tracing::warn!(%position_id, error = %error, "vektor fitur posisi gagal disimpan");
+                }
+            }
         }
 
         Ok(execute::SendResultView {
@@ -2158,31 +4174,17 @@ impl AppState {
         let batas = {
             let guard = self.active.read().await;
             let Some(active) = guard.as_ref() else { return };
-            let Some(pool) = active.selected_pool() else { return };
-            let Some(mcap) = active.chart_mcap_usd else { return };
-
-            let spacing = pool.tick_spacing.max(1);
-            let bawah = crate::math::ceil_to_spacing(crate::math::MIN_TICK, spacing);
-            let atas = crate::math::floor_to_spacing(crate::math::MAX_TICK, spacing);
-
-            // Tick diubah menjadi kelipatan harga, lalu dikalikan market cap
-            // sekarang. Gerakan satu persen pada harga adalah gerakan satu
-            // persen pada market cap, jadi perbandingannya langsung berlaku.
-            let kali_bawah = 1.0001_f64.powi(bawah - pool.tick);
-            let kali_atas = 1.0001_f64.powi(atas - pool.tick);
-
-            // Sisi tampilan bertukar kalau memecoin menempati token1, dengan
-            // alasan yang sama seperti di batas range biasa.
-            let memecoin_token0 = active
-                .meta
-                .address
-                .eq_ignore_ascii_case(&pool.token0);
-            let (b, a) = if memecoin_token0 {
-                (kali_bawah, kali_atas)
-            } else {
-                (kali_atas, kali_bawah)
+            let Some(pool) = active.selected_pool() else {
+                return;
             };
-            (mcap * b.min(a), mcap * b.max(a))
+            let Some(mcap) = active.chart_mcap_usd else {
+                return;
+            };
+
+            let Some(batas) = crate::range::full_bounds(pool, &active.meta.address, mcap) else {
+                return;
+            };
+            batas
         };
 
         self.on_set_range(batas.0, batas.1).await;
@@ -2204,6 +4206,7 @@ impl AppState {
             let mut guard = self.active.write().await;
             let Some(active) = guard.as_mut() else { return };
             active.requested = Some((lo, hi));
+            self.intent.change();
         }
         self.broadcast_range_view().await;
     }
@@ -2215,6 +4218,12 @@ impl AppState {
     /// dan memeriksanya terhadap rentang harga ETH akan memunculkan peringatan
     /// pada setiap pool yang sebenarnya sehat.
     fn quote_adalah_eth(&self, quote: &str) -> bool {
+        if quote
+            .parse::<alloy::primitives::Address>()
+            .is_ok_and(|a| a.is_zero())
+        {
+            return true;
+        }
         match self.registry.tokens.get("weth") {
             Some(w) => w.address.eq_ignore_ascii_case(quote),
             None => false,
@@ -2224,8 +4233,12 @@ impl AppState {
     async fn broadcast_range_view(&self) {
         let guard = self.active.read().await;
         let Some(active) = guard.as_ref() else { return };
-        let Some(pool) = active.selected_pool() else { return };
-        let Some(mcap) = active.chart_mcap_usd else { return };
+        let Some(pool) = active.selected_pool() else {
+            return;
+        };
+        let Some(mcap) = active.chart_mcap_usd else {
+            return;
+        };
 
         match crate::range::build_view(
             pool,
@@ -2246,9 +4259,9 @@ impl AppState {
         }
     }
 
-    pub fn registry_summary(&self) -> RegistrySummary {
+    pub async fn registry_summary(&self) -> RegistrySummary {
         use crate::chain::RegistryStatus::*;
-        let checks = self.registry_checks.as_ref();
+        let checks = self.registry_checks.read().await;
         RegistrySummary {
             total: checks.len(),
             verified: checks.iter().filter(|c| c.status == Verified).count(),

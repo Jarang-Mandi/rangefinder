@@ -95,10 +95,7 @@ pub fn encrypt(passphrase: &str, private_key: &[u8], address: &str) -> Result<Ke
         "kunci privat harus {PRIVATE_KEY_LEN} byte, dapat {}",
         private_key.len()
     );
-    anyhow::ensure!(
-        !passphrase.is_empty(),
-        "passphrase tidak boleh kosong"
-    );
+    anyhow::ensure!(!passphrase.is_empty(), "passphrase tidak boleh kosong");
 
     let mut salt = [0u8; SALT_LEN];
     getrandom::fill(&mut salt).context("gagal mengambil entropi untuk salt")?;

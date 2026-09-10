@@ -380,7 +380,10 @@ mod tests {
 
     #[test]
     fn unpinned_dan_no_code_tidak_menghentikan() {
-        let checks = vec![check(RegistryStatus::Unpinned), check(RegistryStatus::NoCode)];
+        let checks = vec![
+            check(RegistryStatus::Unpinned),
+            check(RegistryStatus::NoCode),
+        ];
         let report = registry_gate(&checks).unwrap();
         assert_eq!(report.total, 2);
         assert_eq!(report.unpinned, 1);

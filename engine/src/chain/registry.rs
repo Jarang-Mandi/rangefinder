@@ -95,8 +95,8 @@ impl Registry {
                 path.display()
             )
         })?;
-        let reg: Registry =
-            toml::from_str(&text).with_context(|| format!("{} bukan TOML yang valid", path.display()))?;
+        let reg: Registry = toml::from_str(&text)
+            .with_context(|| format!("{} bukan TOML yang valid", path.display()))?;
         reg.validate()?;
         Ok(reg)
     }

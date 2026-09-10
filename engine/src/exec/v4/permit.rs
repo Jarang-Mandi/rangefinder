@@ -249,8 +249,8 @@ mod tests {
         // Ini inti kenapa Permit2 berbeda dari allowance biasa: jumlahnya bisa
         // cukup tapi masa berlakunya sudah lewat, dan kontrak akan menolak.
         let sekarang = 1_800_000_000u64;
-        let cukup_tapi_kedaluwarsa = U256::from(1_000u64) >= U256::from(500u64)
-            && 1_700_000_000u64 > sekarang;
+        let cukup_tapi_kedaluwarsa =
+            U256::from(1_000u64) >= U256::from(500u64) && 1_700_000_000u64 > sekarang;
         assert!(
             !cukup_tapi_kedaluwarsa,
             "izin dengan expiration di masa lalu tidak boleh dianggap sah"

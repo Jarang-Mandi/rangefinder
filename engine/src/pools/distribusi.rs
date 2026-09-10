@@ -46,14 +46,6 @@ use serde::Serialize;
 use super::abi;
 use crate::math::{liquidity_math, tick_math};
 
-/// Berapa kata bitmap paling banyak dibaca sekali jalan.
-///
-/// Satu kata mencakup 256 tick terkompresi, yang pada `tick_spacing` 60 berarti
-/// 15.360 tick atau sekitar 366 persen gerakan harga. Dua belas kata sudah jauh
-/// melampaui rentang yang masuk akal untuk sebuah range, dan membatasinya
-/// menjaga biaya pembacaan tetap satu batch.
-pub const MAKS_KATA: i32 = 12;
-
 /// Lebar harga yang ingin dicakup histogram, dalam persen ke tiap arah.
 ///
 /// Dipilih supaya seluruh preset yang ditawarkan panel, sampai kurang lebih 20
@@ -61,6 +53,16 @@ pub const MAKS_KATA: i32 = 12;
 /// luar batas yang dipilih itulah yang memberi tahu apakah range kita berada di
 /// tepi tebing likuiditas atau di tengah lapangan kosong.
 pub const SPAN_PERSEN: f64 = 35.0;
+
+/// Jendela lengkap yang sama untuk histogram dan TVL. Multicall membagi batch
+/// besar; batas jumlah kata tidak boleh memotong pembacaan diam diam.
+fn batas_jendela(tick: i32) -> (i32, i32) {
+    let rentang = ((SPAN_PERSEN / 100.0 + 1.0).ln() / 1.0001_f64.ln()).ceil() as i32;
+    (
+        (tick - rentang).max(crate::math::MIN_TICK),
+        (tick + rentang).min(crate::math::MAX_TICK),
+    )
+}
 
 /// Satu pita distribusi.
 #[derive(Debug, Clone, Serialize)]
@@ -149,13 +151,14 @@ impl SumberTick {
         match self {
             SumberTick::V4 { state_view } => crate::chain::multicall::encode(
                 *state_view,
-                &abi::IStateView::getTickBitmapCall { poolId: id, tick: kata },
+                &abi::IStateView::getTickBitmapCall {
+                    poolId: id,
+                    tick: kata,
+                },
             ),
             SumberTick::V3 { pool } => crate::chain::multicall::encode(
                 *pool,
-                &abi::IUniswapV3Pool::tickBitmapCall {
-                    wordPosition: kata,
-                },
+                &abi::IUniswapV3Pool::tickBitmapCall { wordPosition: kata },
             ),
         }
     }
@@ -176,12 +179,14 @@ impl SumberTick {
         match self {
             SumberTick::V4 { state_view } => crate::chain::multicall::encode(
                 *state_view,
-                &abi::IStateView::getTickLiquidityCall { poolId: id, tick: t },
+                &abi::IStateView::getTickLiquidityCall {
+                    poolId: id,
+                    tick: t,
+                },
             ),
-            SumberTick::V3 { pool } => crate::chain::multicall::encode(
-                *pool,
-                &abi::IUniswapV3Pool::ticksCall { tick: t },
-            ),
+            SumberTick::V3 { pool } => {
+                crate::chain::multicall::encode(*pool, &abi::IUniswapV3Pool::ticksCall { tick: t })
+            }
         }
     }
 
@@ -261,15 +266,9 @@ pub async fn susun<P: Provider>(
     }
 
     // Rentang tick yang ingin dicakup, lalu kata bitmap yang memuatnya.
-    let rentang_tick = (SPAN_PERSEN / 100.0 + 1.0).ln() / 1.0001_f64.ln();
-    let rentang_tick = rentang_tick as i32;
-
-    let kata_tengah = posisi(kompres(tick_sekarang, tick_spacing)).0 as i32;
-    let kata_bawah = posisi(kompres(tick_sekarang - rentang_tick, tick_spacing)).0 as i32;
-    let kata_atas = posisi(kompres(tick_sekarang + rentang_tick, tick_spacing)).0 as i32;
-
-    let dari_kata = kata_bawah.max(kata_tengah - MAKS_KATA / 2);
-    let sampai_kata = kata_atas.min(kata_tengah + MAKS_KATA / 2);
+    let (batas_bawah_pindai, batas_atas_pindai) = batas_jendela(tick_sekarang);
+    let dari_kata = posisi(kompres(batas_bawah_pindai, tick_spacing)).0 as i32;
+    let sampai_kata = posisi(kompres(batas_atas_pindai, tick_spacing)).0 as i32;
 
     // Satu batch untuk seluruh kata bitmap.
     let mut calls = Vec::new();
@@ -282,7 +281,7 @@ pub async fn susun<P: Provider>(
     let mut tick_aktif: Vec<i32> = Vec::new();
     for (n, k) in (dari_kata..=sampai_kata).enumerate() {
         let Some(kata) = sumber.urai_bitmap(hasil.get(n).and_then(|x| x.as_ref())) else {
-            continue;
+            return Ok(kosong(Some("bitmap tidak terbaca lengkap".into())));
         };
         if kata.is_zero() {
             continue;
@@ -295,12 +294,7 @@ pub async fn susun<P: Provider>(
         }
     }
 
-    if tick_aktif.is_empty() {
-        return Ok(kosong(Some(
-            "tidak ada tick terinisialisasi pada rentang ini".into(),
-        )));
-    }
-
+    tick_aktif.retain(|t| *t >= batas_bawah_pindai && *t <= batas_atas_pindai);
     tick_aktif.sort_unstable();
 
     // Satu batch lagi untuk liquidityNet setiap tick yang terinisialisasi.
@@ -313,10 +307,9 @@ pub async fn susun<P: Provider>(
 
     let mut net: Vec<(i32, i128)> = Vec::with_capacity(tick_aktif.len());
     for (n, t) in tick_aktif.iter().enumerate() {
-        // Dilewati, bukan dianggap nol. Nol berarti tick itu tidak mengubah
-        // likuiditas apa pun, dan itu kesimpulan yang berbeda.
+        // Satu perubahan yang hilang merusak seluruh pita setelahnya.
         let Some(v) = sumber.urai_net(hasil.get(n).and_then(|x| x.as_ref())) else {
-            continue;
+            return Ok(kosong(Some("likuiditas tick tidak terbaca lengkap".into())));
         };
         net.push((*t, v));
     }
@@ -330,10 +323,6 @@ pub async fn susun<P: Provider>(
     //
     // Likuiditasnya tetap benar. Yang dipotong hanya rentang yang ditampilkan,
     // sampai sejauh histogram ini memang berniat menggambarkan.
-    let batas_bawah_pindai = (tick_sekarang - rentang_tick).max(dari_kata * 256 * tick_spacing);
-    let batas_atas_pindai =
-        (tick_sekarang + rentang_tick).min(((sampai_kata + 1) * 256 - 1) * tick_spacing);
-
     let pita = rangkai(
         &net,
         tick_sekarang,
@@ -345,6 +334,10 @@ pub async fn susun<P: Provider>(
         skala_quote,
     );
 
+    if pita.is_empty() {
+        return Ok(kosong(Some("distribusi likuiditas tidak konsisten".into())));
+    }
+
     Ok(Distribusi {
         pool_id: pool_id.to_string(),
         tick_sekarang,
@@ -355,20 +348,6 @@ pub async fn susun<P: Provider>(
         error: None,
     })
 }
-
-/// Berapa kata bitmap paling banyak dibaca saat menjumlahkan TVL.
-///
-/// DULU JAUH LEBIH LEBAR, DAN ITU KELIRU
-/// Percobaan pertama membaca delapan kata penuh, yang pada tick spacing 200
-/// mencakup empat ratus ribu tick. Likuiditas yang dijumlahkan sejauh itu
-/// berhenti menggambarkan apa pun: tick penutupnya berada di luar jendela,
-/// sehingga likuiditasnya tidak pernah berkurang dan pita terluar memuat token
-/// dalam jumlah yang mustahil. Satu pool V3 dilaporkan berisi 50 juta WETH,
-/// jauh melebihi seluruh market cap tokennya.
-///
-/// Sekarang jendelanya sama dengan histogram, dan artinya menjadi jelas: modal
-/// yang berada cukup dekat dengan harga untuk benar benar menerima fee.
-pub const MAKS_KATA_TVL: i32 = 4;
 
 /// Jumlahkan modal yang tertanam di beberapa pool sekaligus.
 ///
@@ -408,14 +387,9 @@ pub async fn tvl_beberapa<P: Provider>(
         if k.tick_spacing <= 0 {
             continue;
         }
-        // Jendela yang sama dengan histogram, dibatasi jumlah kata supaya
-        // biayanya tetap terkendali pada pool bertick spacing kecil.
-        let rentang = ((SPAN_PERSEN / 100.0 + 1.0).ln() / 1.0001_f64.ln()) as i32;
-        let tengah = posisi(kompres(k.tick_sekarang, k.tick_spacing)).0 as i32;
-        let bawah = posisi(kompres(k.tick_sekarang - rentang, k.tick_spacing)).0 as i32;
-        let atas = posisi(kompres(k.tick_sekarang + rentang, k.tick_spacing)).0 as i32;
-        let dari = bawah.max(tengah - MAKS_KATA_TVL / 2);
-        let sampai = atas.min(tengah + MAKS_KATA_TVL / 2);
+        let (bawah, atas) = batas_jendela(k.tick_sekarang);
+        let dari = posisi(kompres(bawah, k.tick_spacing)).0 as i32;
+        let sampai = posisi(kompres(atas, k.tick_spacing)).0 as i32;
         let awal = calls.len();
         for w in dari..=sampai {
             calls.push(sumber.panggil_bitmap(bytes, w as i16));
@@ -431,7 +405,7 @@ pub async fn tvl_beberapa<P: Provider>(
     // TAHAP DUA: likuiditas tiap tick yang terinisialisasi, juga satu batch.
     let mut calls = Vec::new();
     let mut rencana2: Vec<(usize, usize, String, SumberTick, KeadaanPool, Vec<i32>)> = Vec::new();
-    for (awal, id, sumber, k, dari, sampai) in rencana {
+    'pool: for (awal, id, sumber, k, dari, sampai) in rencana {
         let bytes = match sumber {
             SumberTick::V4 { .. } => match id.parse::<FixedBytes<32>>() {
                 Ok(b) => b,
@@ -443,7 +417,7 @@ pub async fn tvl_beberapa<P: Provider>(
         for (n, w) in (dari..=sampai).enumerate() {
             let Some(kata) = sumber.urai_bitmap(hasil.get(awal + n).and_then(|x| x.as_ref()))
             else {
-                continue;
+                continue 'pool;
             };
             if kata.is_zero() {
                 continue;
@@ -455,8 +429,8 @@ pub async fn tvl_beberapa<P: Provider>(
             }
         }
         ticks.sort_unstable();
-        let rentang_tick = ((SPAN_PERSEN / 100.0 + 1.0).ln() / 1.0001_f64.ln()) as i32;
-        ticks.retain(|t| (*t - k.tick_sekarang).abs() <= rentang_tick);
+        let (bawah, atas) = batas_jendela(k.tick_sekarang);
+        ticks.retain(|t| *t >= bawah && *t <= atas);
 
         // Pool yang tidak punya tick terinisialisasi di dalam jendela TIDAK
         // dilewati. Likuiditas yang sedang aktif membentang dari tick di luar
@@ -486,11 +460,11 @@ pub async fn tvl_beberapa<P: Provider>(
         }
     };
 
-    for (awal, jumlah, id, sumber, k, ticks) in rencana2 {
+    'pool: for (awal, jumlah, id, sumber, k, ticks) in rencana2 {
         let mut net: Vec<(i32, i128)> = Vec::with_capacity(jumlah);
         for (n, t) in ticks.iter().enumerate() {
             let Some(v) = sumber.urai_net(hasil2.get(awal + n).and_then(|x| x.as_ref())) else {
-                continue;
+                continue 'pool;
             };
             net.push((*t, v));
         }
@@ -499,9 +473,7 @@ pub async fn tvl_beberapa<P: Provider>(
         // kebetulan terinisialisasi. Alasannya sama dengan di histogram: pita
         // yang sangat lebar menghasilkan angka besar karena lebarnya, bukan
         // karena isinya.
-        let rentang = ((SPAN_PERSEN / 100.0 + 1.0).ln() / 1.0001_f64.ln()) as i32;
-        let batas_bawah = k.tick_sekarang - rentang;
-        let batas_atas = k.tick_sekarang + rentang;
+        let (batas_bawah, batas_atas) = batas_jendela(k.tick_sekarang);
         let pita = rangkai(
             &net,
             k.tick_sekarang,
@@ -514,7 +486,7 @@ pub async fn tvl_beberapa<P: Provider>(
         );
 
         let total: f64 = pita.iter().map(|p| p.nilai_quote).sum();
-        if total.is_finite() {
+        if !pita.is_empty() && total.is_finite() {
             out.insert(id.to_lowercase(), total);
         }
     }
@@ -543,8 +515,12 @@ pub fn rangkai(
     // KE ATAS
     // Menyeberangi tick ke atas berarti likuiditas yang dimulai di situ menjadi
     // aktif dan yang berakhir di situ berhenti, yaitu `L += liquidityNet`.
-    let mut l = likuiditas_sekarang as i128;
-    let atas: Vec<&(i32, i128)> = net.iter().filter(|(t, _)| *t > tick_sekarang).collect();
+    let mut l = likuiditas_sekarang;
+    let mut atas: Vec<&(i32, i128)> = net
+        .iter()
+        .filter(|(t, _)| *t > tick_sekarang && *t < batas_atas_pindai)
+        .collect();
+    atas.sort_by_key(|(t, _)| *t);
     let mut batas_bawah = tick_sekarang;
     for (t, n) in &atas {
         dorong(
@@ -557,7 +533,10 @@ pub fn rangkai(
             skala_meme,
             skala_quote,
         );
-        l += n;
+        let Some(baru) = geser_l(l, *n, true) else {
+            return Vec::new();
+        };
+        l = baru;
         batas_bawah = *t;
     }
     // PITA PENUTUP
@@ -583,8 +562,11 @@ pub fn rangkai(
 
     // KE BAWAH
     // Arah sebaliknya: menyeberangi tick ke bawah berarti `L -= liquidityNet`.
-    let mut l = likuiditas_sekarang as i128;
-    let mut bawah: Vec<&(i32, i128)> = net.iter().filter(|(t, _)| *t <= tick_sekarang).collect();
+    let mut l = likuiditas_sekarang;
+    let mut bawah: Vec<&(i32, i128)> = net
+        .iter()
+        .filter(|(t, _)| *t <= tick_sekarang && *t > batas_bawah_pindai)
+        .collect();
     bawah.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
     let mut batas_atas = tick_sekarang;
     for (t, n) in &bawah {
@@ -598,7 +580,10 @@ pub fn rangkai(
             skala_meme,
             skala_quote,
         );
-        l -= n;
+        let Some(baru) = geser_l(l, *n, false) else {
+            return Vec::new();
+        };
+        l = baru;
         batas_atas = *t;
     }
     dorong(
@@ -616,12 +601,20 @@ pub fn rangkai(
     pita
 }
 
+fn geser_l(l: u128, net: i128, naik: bool) -> Option<u128> {
+    if (net >= 0) == naik {
+        l.checked_add(net.unsigned_abs())
+    } else {
+        l.checked_sub(net.unsigned_abs())
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn dorong(
     keluaran: &mut Vec<Pita>,
     tick_bawah: i32,
     tick_atas: i32,
-    l: i128,
+    l: u128,
     tick_sekarang: i32,
     quote_adalah_token1: bool,
     skala_meme: f64,
@@ -630,10 +623,6 @@ fn dorong(
     if tick_atas <= tick_bawah {
         return;
     }
-    // Likuiditas negatif berarti pembacaannya bolong, bukan berarti pool
-    // berutang likuiditas. Menggambarnya apa adanya akan membalik batangnya.
-    let l = l.max(0) as u128;
-
     // Kedua ujung dihitung lalu diurutkan menurut nilainya, bukan menurut
     // ticknya, karena arah keduanya berlawanan pada pool yang memecoinnya
     // token1.
@@ -662,8 +651,8 @@ fn dorong(
 
 /// Modal yang tertanam di sebuah pita, dalam token kutipan.
 ///
-/// Kedua sisi dihitung. Satu sisi saja akan membaca nol pada pita yang
-/// seluruhnya berada di satu sisi harga, dan itu justru mayoritas pita.
+/// Inventori mengikuti posisi spot terhadap pita. Amount0 penuh dan amount1
+/// penuh adalah dua keadaan harga berbeda, sehingga tidak boleh dijumlahkan.
 ///
 /// SISI MEMECOIN DINILAI PADA HARGA SEKARANG
 /// Percobaan pertama menilainya pada harga tengah pita, dan itu meledak pada
@@ -693,8 +682,12 @@ fn nilai_pita(
         return 0.0;
     };
 
-    let amount0 = liquidity_math::amount0_for_liquidity(a, b, l).unwrap_or(U256::ZERO);
-    let amount1 = liquidity_math::amount1_for_liquidity(a, b, l).unwrap_or(U256::ZERO);
+    let Ok(spot) = tick_math::get_sqrt_ratio_at_tick(tick_sekarang) else {
+        return 0.0;
+    };
+    let Ok((amount0, amount1)) = liquidity_math::amounts_for_liquidity(spot, a, b, l) else {
+        return 0.0;
+    };
 
     let harga = harga_di_tick(tick_sekarang, quote_adalah_token1, skala_meme, skala_quote);
 
@@ -733,6 +726,97 @@ fn _tipe_terpakai(_: I256) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pool_uji() -> KeadaanPool {
+        KeadaanPool {
+            tick_spacing: 1,
+            tick_sekarang: 0,
+            likuiditas: 1_000_000_000,
+            quote_adalah_token1: true,
+            skala_meme: 1.0,
+            skala_quote: 1.0,
+        }
+    }
+
+    #[tokio::test]
+    async fn bitmap_kosong_yang_lengkap_tetap_memuat_modal_aktif() {
+        use alloy::sol_types::SolCall;
+        let k = pool_uji();
+        let (a, b) = batas_jendela(0);
+        let jumlah = (posisi(b).0 - posisi(a).0 + 1) as usize;
+        assert!(jumlah > 12, "spacing satu harus mencakup semua kata");
+        let kosong = abi::IUniswapV3Pool::tickBitmapCall::abi_encode_returns(&U256::ZERO);
+        let hasil = crate::chain::multicall::respons_uji(vec![Some(kosong.into()); jumlah]);
+        let rpc = alloy::transports::mock::Asserter::new();
+        rpc.push_success(&hasil);
+        rpc.push_success(&hasil);
+        let provider = alloy::providers::ProviderBuilder::new().connect_mocked_client(rpc);
+        let sumber = SumberTick::V3 {
+            pool: Address::repeat_byte(1),
+        };
+        let distribusi = susun(&provider, sumber, Address::repeat_byte(2), "pool", k)
+            .await
+            .unwrap();
+        assert!(distribusi.error.is_none());
+        let modal: f64 = distribusi.pita.iter().map(|p| p.nilai_quote).sum();
+        assert!(modal > 0.0);
+        assert_eq!(distribusi.pita.first().unwrap().tick_bawah, a);
+        assert_eq!(distribusi.pita.last().unwrap().tick_atas, b);
+        let tvl = tvl_beberapa(
+            &provider,
+            Address::repeat_byte(2),
+            &[("pool".into(), sumber, k)],
+        )
+        .await;
+        assert_eq!(tvl.get("pool"), Some(&modal));
+    }
+
+    #[tokio::test]
+    async fn satu_bitmap_hilang_membatalkan_histogram_dan_tvl() {
+        let hasil = crate::chain::multicall::respons_uji(vec![None]);
+        let rpc = alloy::transports::mock::Asserter::new();
+        rpc.push_success(&hasil);
+        rpc.push_success(&hasil);
+        let provider = alloy::providers::ProviderBuilder::new().connect_mocked_client(rpc);
+        let sumber = SumberTick::V3 {
+            pool: Address::repeat_byte(1),
+        };
+        let d = susun(
+            &provider,
+            sumber,
+            Address::repeat_byte(2),
+            "pool",
+            pool_uji(),
+        )
+        .await
+        .unwrap();
+        assert!(d.error.is_some());
+        assert!(d.pita.is_empty());
+        assert!(tvl_beberapa(
+            &provider,
+            Address::repeat_byte(2),
+            &[("pool".into(), sumber, pool_uji())]
+        )
+        .await
+        .is_empty());
+    }
+
+    #[test]
+    fn tick_di_luar_jendela_tidak_memperlebar_pita() {
+        let pita = rangkai(
+            &[(-9000, 100), (9000, -100)],
+            0,
+            u128::MAX,
+            -3000,
+            3000,
+            true,
+            1.0,
+            1.0,
+        );
+        assert_eq!(pita.first().unwrap().tick_bawah, -3000);
+        assert_eq!(pita.last().unwrap().tick_atas, 3000);
+        assert!(pita.iter().all(|p| p.liquidity == u128::MAX.to_string()));
+    }
 
     #[test]
     fn kompresi_membulat_ke_bawah_juga_untuk_tick_negatif() {
@@ -774,10 +858,7 @@ mod tests {
         let atas = pita.iter().find(|p| p.tick_bawah == 0).expect("pita atas");
         assert_eq!(atas.liquidity, "1000", "di atas harga, sebelum tick 100");
 
-        let bawah = pita
-            .iter()
-            .find(|p| p.tick_atas == 0)
-            .expect("pita bawah");
+        let bawah = pita.iter().find(|p| p.tick_atas == 0).expect("pita bawah");
         assert_eq!(bawah.liquidity, "1000", "tepat di bawah harga");
     }
 
@@ -865,5 +946,22 @@ mod tests {
                 w[1].tick_bawah
             );
         }
+    }
+}
+#[test]
+fn nilai_pita_sama_dengan_inventori_posisi_di_spot() {
+    let l = 1_000_000_000_000_000_000_000;
+    for spot in [-300, 0, 300] {
+        let pita = rangkai(&[], spot, l, -600, 600, true, 1e18, 1e18);
+        let (a0, a1) = liquidity_math::amounts_for_liquidity(
+            tick_math::get_sqrt_ratio_at_tick(spot).unwrap(),
+            tick_math::get_sqrt_ratio_at_tick(-600).unwrap(),
+            tick_math::get_sqrt_ratio_at_tick(600).unwrap(),
+            l,
+        )
+        .unwrap();
+        let aktual = (f64::from(a0) * 1.0001_f64.powi(spot) + f64::from(a1)) / 1e18;
+        let terukur: f64 = pita.iter().map(|p| p.nilai_quote).sum();
+        assert!((aktual - terukur).abs() < 1e-10);
     }
 }

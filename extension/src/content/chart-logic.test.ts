@@ -21,6 +21,7 @@ import {
   parseBar,
   readLastBar,
   sideOfShape,
+  symbolMatchesToken,
   tokenFromPath,
 } from "./chart-logic.ts";
 
@@ -65,6 +66,25 @@ describe("bentuk URL gmgn", () => {
   it("alamat Solana memakai abjad base58", () => {
     // Karakter yang tidak ada di base58 harus menggagalkan pencocokan.
     assert.equal(tokenFromPath("/sol/token/0OIl1111111111111111111111111111111111112"), null);
+  });
+});
+
+describe("identitas simbol chart", () => {
+  const token = "0x39dbed3a2bd333467115de45665cc57f813c4571";
+
+  it("mencocokkan segmen alamat tanpa peka huruf", () => {
+    assert.equal(symbolMatchesToken(`robinhood/${token.toUpperCase()}/USD/MCAP`, token), true);
+  });
+
+  it("menolak API chart token sebelumnya", () => {
+    assert.equal(
+      symbolMatchesToken(
+        "robinhood/0x91da2b31cc53c829b7bf1907bddd385e261c6a28/USD/MCAP",
+        token,
+      ),
+      false,
+    );
+    assert.equal(symbolMatchesToken(null, token), false);
   });
 });
 

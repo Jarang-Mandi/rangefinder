@@ -11,6 +11,7 @@
 //!   dipalsukan menjadi nol. Posisi yang tidak terbaca dilewati dan dicatat.
 
 pub mod fees;
+pub mod history;
 pub mod muat;
 
 use alloy::primitives::{Address, FixedBytes, U256};
@@ -25,12 +26,15 @@ use crate::pools::PoolVersion;
 /// Satu posisi LP beserta keadaannya sekarang.
 #[derive(Debug, Clone, Serialize)]
 pub struct Posisi {
+    /// Identitas global: chain:position-manager:token-id.
+    pub position_id: String,
     /// Token id NFT posisi.
     pub token_id: String,
     pub version: PoolVersion,
     pub token0: String,
     pub token1: String,
     pub fee: u32,
+    pub tick_spacing: i32,
     pub tick_lower: i32,
     pub tick_upper: i32,
     pub liquidity: String,
@@ -38,8 +42,8 @@ pub struct Posisi {
     pub tick_sekarang: Option<i32>,
     pub in_range: bool,
     /// Fee yang belum diklaim, dalam satuan terkecil.
-    pub fee0: String,
-    pub fee1: String,
+    pub fee0: Option<String>,
+    pub fee1: Option<String>,
     /// Hook pool, hanya ada di V4.
     pub hooks: Option<String>,
     /// Harga pool sekarang dalam format Q64.96. Kosong kalau tidak terbaca.
@@ -73,6 +77,10 @@ impl Posisi {
     }
 }
 
+pub fn position_id(chain: u64, manager: Address, token_id: U256) -> String {
+    format!("{chain}:{}:{token_id}", manager.to_string().to_lowercase())
+}
+
 /// Kunci posisi V4 yang tersimpan, supaya tidak memindai log berulang kali.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CacheV4 {
@@ -84,8 +92,12 @@ pub struct CacheV4 {
     pub kandidat: Vec<String>,
 }
 
-fn kunci_cache(owner: &str) -> String {
-    format!("posisi_v4:v1:{}", owner.to_lowercase())
+fn kunci_cache(chain: u64, manager: Address, owner: &str) -> String {
+    format!(
+        "posisi_v4:v2:{chain}:{}:{}",
+        manager.to_string().to_lowercase(),
+        owner.to_lowercase()
+    )
 }
 
 /// Jendela mundur pemindaian Transfer, dalam blok.
@@ -129,13 +141,12 @@ pub async fn kandidat_v4<P: Provider>(
         .await
         .context("gagal membaca blok terakhir")?;
 
+    let cache_key = kunci_cache(registry.chain.id, pm, &alamat_owner);
     let tersimpan: CacheV4 = store
-        .and_then(|s| s.get(&kunci_cache(&alamat_owner)).ok().flatten())
+        .and_then(|s| s.get(&cache_key).ok().flatten())
         .unwrap_or_default();
 
-    let jendela = latest
-        .saturating_sub(LOOKBACK_TRANSFER)
-        .max(registry.chain.deploy_block);
+    let jendela = registry.chain.deploy_block;
     let bersambung = tersimpan.scanned_to > 0 && tersimpan.scanned_to + 1 >= jendela;
     let dari = if bersambung {
         (tersimpan.scanned_to + 1).min(latest)
@@ -145,20 +156,26 @@ pub async fn kandidat_v4<P: Provider>(
 
     let mut kandidat: Vec<String> = tersimpan.kandidat.clone();
 
-    if dari <= latest {
-        let filter = Filter::new()
-            .address(pm)
-            .event_signature(FixedBytes::<32>::from(TOPIC_TRANSFER))
-            .topic2(owner.into_word())
-            .from_block(dari)
-            .to_block(latest);
+    let mut sampai = latest;
+    while dari <= sampai {
+        let hasil = crate::chain::logs::baca_mundur(
+            provider,
+            sampai,
+            dari,
+            LOOKBACK_TRANSFER,
+            100,
+            |lo, hi| {
+                Filter::new()
+                    .address(pm)
+                    .event_signature(FixedBytes::<32>::from(TOPIC_TRANSFER))
+                    .topic2(owner.into_word())
+                    .from_block(lo)
+                    .to_block(hi)
+            },
+        )
+        .await?;
 
-        let logs = provider
-            .get_logs(&filter)
-            .await
-            .with_context(|| format!("pemindaian Transfer posisi V4 gagal pada {dari}..{latest}"))?;
-
-        for log in logs {
+        for log in hasil.logs {
             let topics = log.inner.data.topics();
             if topics.len() != 4 {
                 continue;
@@ -168,6 +185,10 @@ pub async fn kandidat_v4<P: Provider>(
                 kandidat.push(id);
             }
         }
+        if hasil.dari_blok <= dari {
+            break;
+        }
+        sampai = hasil.dari_blok - 1;
     }
 
     if let Some(s) = store {
@@ -175,7 +196,7 @@ pub async fn kandidat_v4<P: Provider>(
             scanned_to: latest,
             kandidat: kandidat.clone(),
         };
-        if let Err(e) = s.put(&kunci_cache(&alamat_owner), &baru) {
+        if let Err(e) = s.put(&cache_key, &baru) {
             tracing::warn!(error = %e, "cache posisi V4 gagal disimpan");
         }
     }
@@ -192,18 +213,20 @@ mod tests {
 
     fn posisi(lower: i32, upper: i32, tick: Option<i32>) -> Posisi {
         Posisi {
+            position_id: "4663:uji:1".into(),
             token_id: "1".into(),
             version: PoolVersion::V4,
             token0: "0x0".into(),
             token1: "0x1".into(),
             fee: 3000,
+            tick_spacing: 60,
             tick_lower: lower,
             tick_upper: upper,
             liquidity: "100".into(),
             tick_sekarang: tick,
             in_range: tick.is_some_and(|t| t >= lower && t < upper),
-            fee0: "0".into(),
-            fee1: "0".into(),
+            fee0: Some("0".into()),
+            fee1: Some("0".into()),
             hooks: None,
             sqrt_price_x96: None,
             amount0: "0".into(),
@@ -260,6 +283,13 @@ mod tests {
 
     #[test]
     fn kunci_cache_tidak_peduli_besar_kecil_huruf() {
-        assert_eq!(kunci_cache("0xAbC"), kunci_cache("0xabc"));
+        assert_eq!(
+            kunci_cache(4663, Address::ZERO, "0xAbC"),
+            kunci_cache(4663, Address::ZERO, "0xabc")
+        );
+        assert_ne!(
+            kunci_cache(4663, Address::ZERO, "0xabc"),
+            kunci_cache(1, Address::ZERO, "0xabc")
+        );
     }
 }

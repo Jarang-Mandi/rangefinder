@@ -164,7 +164,7 @@ pub struct PoolStats {
     /// di satu tick. Taksiran seperti itu pernah melaporkan 0,82 untuk pool
     /// yang isinya kira kira 360, karena likuiditas berubah di setiap tick yang
     /// terinisialisasi dan satu titik tidak mewakili seluruhnya.
-    pub tvl: f64,
+    pub tvl: Option<f64>,
     /// Proyeksi fee setahun terhadap modal acuan, dalam persen.
     ///
     /// `None` untuk fee dinamis, yang besarannya baru diketahui saat swap
@@ -181,6 +181,63 @@ pub fn raw_price_from_sqrt_x96(sqrt_price_x96: U256) -> f64 {
     let s: f64 = sqrt_price_x96.to_string().parse().unwrap_or(f64::NAN);
     let ratio = s / 2f64.powi(96);
     ratio * ratio
+}
+
+/// Harga dan likuiditas segar dari satu eth_call sebelum menyusun transaksi.
+pub async fn refresh<P: Provider>(
+    provider: &P,
+    registry: &Registry,
+    pool: &PoolInfo,
+) -> Result<PoolInfo> {
+    use crate::chain::multicall::{batch_call, decode, encode};
+    let mc = registry.contract("common", "multicall3")?;
+    let mut p = pool.clone();
+    let (sqrt, tick, liquidity) = match pool.version {
+        PoolVersion::V3 => {
+            let address: Address = pool.id.parse()?;
+            let r = batch_call(
+                provider,
+                mc,
+                vec![
+                    encode(address, &abi::IUniswapV3Pool::slot0Call {}),
+                    encode(address, &abi::IUniswapV3Pool::liquidityCall {}),
+                ],
+            )
+            .await?;
+            let slot = decode::<abi::IUniswapV3Pool::slot0Call>(r.first().and_then(|r| r.as_ref()))
+                .context("slot0 V3 tidak terbaca")?;
+            let l = decode::<abi::IUniswapV3Pool::liquidityCall>(r.get(1).and_then(|r| r.as_ref()))
+                .context("likuiditas V3 tidak terbaca")?;
+            (U256::from(slot.sqrtPriceX96), slot.tick.as_i32(), l)
+        }
+        PoolVersion::V4 => {
+            let address = registry.contract("uniswap_v4", "state_view")?;
+            let id = pool.id.parse()?;
+            let r = batch_call(
+                provider,
+                mc,
+                vec![
+                    encode(address, &abi::IStateView::getSlot0Call { poolId: id }),
+                    encode(address, &abi::IStateView::getLiquidityCall { poolId: id }),
+                ],
+            )
+            .await?;
+            let slot = decode::<abi::IStateView::getSlot0Call>(r.first().and_then(|r| r.as_ref()))
+                .context("slot0 V4 tidak terbaca")?;
+            let l = decode::<abi::IStateView::getLiquidityCall>(r.get(1).and_then(|r| r.as_ref()))
+                .context("likuiditas V4 tidak terbaca")?;
+            (U256::from(slot.sqrtPriceX96), slot.tick.as_i32(), l)
+        }
+    };
+    anyhow::ensure!(
+        !sqrt.is_zero() && liquidity > 0,
+        "pool tidak memiliki harga atau likuiditas aktif"
+    );
+    p.sqrt_price_x96 = sqrt.to_string();
+    p.tick = tick;
+    p.liquidity = liquidity.to_string();
+    p.raw_price = raw_price_from_sqrt_x96(sqrt);
+    Ok(p)
 }
 
 /// Baca metadata beberapa token sekaligus dalam satu permintaan.
@@ -208,21 +265,60 @@ pub async fn saldo_dua<P: Provider>(
         return (None, None);
     };
 
-    let calls = vec![
-        crate::chain::multicall::encode(a, &abi::IERC20::balanceOfCall { account: pemilik }),
-        crate::chain::multicall::encode(b, &abi::IERC20::balanceOfCall { account: pemilik }),
-    ];
+    saldo_dua_dengan_multicall(provider, multicall, pemilik, a, b).await
+}
 
-    let Ok(hasil) = crate::chain::multicall::batch_call(provider, multicall, calls).await else {
-        return (None, None);
+/// Currency alamat nol adalah ETH asli. Kegagalan salah satu pembacaan tidak
+/// menghapus saldo sisi lain yang sudah terukur.
+pub async fn saldo_dua_dengan_multicall<P: Provider>(
+    provider: &P,
+    multicall: Address,
+    pemilik: Address,
+    a: Address,
+    b: Address,
+) -> (Option<U256>, Option<U256>) {
+    let native = if a.is_zero() || b.is_zero() {
+        provider.get_balance(pemilik).await.ok()
+    } else {
+        None
     };
-
-    let baca = |i: usize| {
+    let token: Vec<Address> = [a, b].into_iter().filter(|a| !a.is_zero()).collect();
+    let calls = token
+        .iter()
+        .map(|a| {
+            crate::chain::multicall::encode(*a, &abi::IERC20::balanceOfCall { account: pemilik })
+        })
+        .collect();
+    let hasil = crate::chain::multicall::batch_call(provider, multicall, calls)
+        .await
+        .ok();
+    let baca = |alamat: Address| {
+        if alamat.is_zero() {
+            return native;
+        }
+        let i = token.iter().position(|a| *a == alamat)?;
         crate::chain::multicall::decode::<abi::IERC20::balanceOfCall>(
-            hasil.get(i).and_then(|x| x.as_ref()),
+            hasil.as_ref()?.get(i).and_then(|x| x.as_ref()),
         )
     };
-    (baca(0), baca(1))
+    (baca(a), baca(b))
+}
+
+#[tokio::test]
+async fn saldo_native_tetap_terbaca_saat_token_gagal() {
+    let rpc = alloy::transports::mock::Asserter::new();
+    rpc.push_success(&U256::from(123));
+    rpc.push_success(&crate::chain::multicall::respons_uji(vec![None]));
+    let provider = alloy::providers::ProviderBuilder::new().connect_mocked_client(rpc);
+    let saldo = saldo_dua_dengan_multicall(
+        &provider,
+        Address::repeat_byte(1),
+        Address::repeat_byte(2),
+        Address::ZERO,
+        Address::repeat_byte(3),
+    )
+    .await;
+    assert_eq!(saldo, (Some(U256::from(123)), None));
 }
 
 pub async fn token_meta_batch<P: Provider>(
@@ -237,6 +333,9 @@ pub async fn token_meta_batch<P: Provider>(
 
     let mut calls = Vec::with_capacity(alamat.len() * 3);
     for a in alamat {
+        if a.is_zero() {
+            continue;
+        }
         calls.push(crate::chain::multicall::encode(
             *a,
             &abi::IERC20::decimalsCall {},
@@ -254,7 +353,19 @@ pub async fn token_meta_batch<P: Provider>(
     let hasil = crate::chain::multicall::batch_call(provider, multicall, calls).await?;
 
     let mut out = Vec::with_capacity(alamat.len());
-    for (i, a) in alamat.iter().enumerate() {
+    let mut token_index = 0;
+    for a in alamat {
+        if a.is_zero() {
+            out.push(Some(TokenMeta {
+                address: ZERO_ADDRESS.into(),
+                symbol: "ETH".into(),
+                decimals: 18,
+                total_supply: f64::NAN,
+            }));
+            continue;
+        }
+        let i = token_index;
+        token_index += 1;
         let decimals = crate::chain::multicall::decode::<abi::IERC20::decimalsCall>(
             hasil.get(i * 3).and_then(|x| x.as_ref()),
         );
@@ -459,9 +570,9 @@ async fn hydrate_v3<P: Provider>(
             crate::chain::multicall::decode::<abi::IUniswapV3Pool::liquidityCall>(ambil(dasar + 1)),
             crate::chain::multicall::decode::<abi::IUniswapV3Pool::token0Call>(ambil(dasar + 2)),
             crate::chain::multicall::decode::<abi::IUniswapV3Pool::token1Call>(ambil(dasar + 3)),
-            crate::chain::multicall::decode::<abi::IUniswapV3Pool::tickSpacingCall>(
-                ambil(dasar + 4),
-            ),
+            crate::chain::multicall::decode::<abi::IUniswapV3Pool::tickSpacingCall>(ambil(
+                dasar + 4,
+            )),
         ) else {
             tracing::warn!(pool = %alamat, "pool V3 tidak terbaca lengkap, dilewati");
             continue;
@@ -487,7 +598,6 @@ async fn hydrate_v3<P: Provider>(
 
     Ok(out)
 }
-
 
 /// Cari pool V4 dengan memindai event `Initialize` milik PoolManager.
 ///
@@ -516,10 +626,9 @@ pub async fn discover_v4<P: Provider>(
         .topic3(currency1.into_word())
         .from_block(registry.chain.deploy_block);
 
-    let logs = provider
-        .get_logs(&filter)
-        .await
-        .context("pemindaian log Initialize V4 gagal. Endpoint publik bisa membatasi rentang blok")?;
+    let logs = provider.get_logs(&filter).await.context(
+        "pemindaian log Initialize V4 gagal. Endpoint publik bisa membatasi rentang blok",
+    )?;
 
     let view = abi::IStateView::new(state_view, provider);
     let mut out = Vec::new();
@@ -686,10 +795,7 @@ pub async fn muat_token<P: Provider>(
     }
 
     if dilewati_fee > 0 {
-        tracing::debug!(
-            dilewati_fee,
-            "pool berfee mustahil tidak dibaca keadaannya"
-        );
+        tracing::debug!(dilewati_fee, "pool berfee mustahil tidak dibaca keadaannya");
     }
 
     let jam = std::time::Instant::now();
@@ -706,9 +812,9 @@ pub async fn muat_token<P: Provider>(
     // seperti itu diperlakukan sebagai bukan ERC20 alih alih ditebak 18.
     let meta = crate::chain::multicall::decode::<abi::IERC20::decimalsCall>(ambil(awal_meta)).map(
         |decimals| {
-            let supply = crate::chain::multicall::decode::<abi::IERC20::totalSupplyCall>(
-                ambil(awal_meta + 1),
-            );
+            let supply = crate::chain::multicall::decode::<abi::IERC20::totalSupplyCall>(ambil(
+                awal_meta + 1,
+            ));
             let symbol =
                 crate::chain::multicall::decode::<abi::IERC20::symbolCall>(ambil(awal_meta + 2))
                     .unwrap_or_else(|| "?".to_string());
@@ -801,13 +907,14 @@ pub async fn ukur_stats<P: Provider>(
 
     let mut per_pool: std::collections::HashMap<String, u128> = Default::default();
     let mut per_pool1: std::collections::HashMap<String, u128> = Default::default();
-    let mut jendela_detik = 0.0_f64;
+    let mut durasi: std::collections::HashMap<String, f64> = Default::default();
 
     if !v4.is_empty() {
         let ids: Vec<String> = v4.iter().map(|p| p.id.clone()).collect();
         match volume::ukur_volume(provider, registry, &ids).await {
             Ok(v) => {
-                jendela_detik = v.jendela_detik(registry.chain.block_time_ms);
+                let j = v.jendela_detik(registry.chain.block_time_ms);
+                durasi.extend(v.per_pool.keys().map(|id| (id.clone(), j)));
                 per_pool.extend(v.per_pool);
                 per_pool1.extend(v.per_pool1);
             }
@@ -819,15 +926,10 @@ pub async fn ukur_stats<P: Provider>(
         let alamat: Vec<String> = v3.iter().map(|p| p.id.clone()).collect();
         match volume::ukur_volume_v3(provider, registry, &alamat).await {
             Ok(v) => {
-                // Jendela keduanya sama panjang kecuali salah satunya
-                // menyempit. Yang terpendek yang dipakai, karena volume dari
-                // dua jendela berbeda tidak bisa dibandingkan.
+                // Setiap volume mempertahankan jendela aslinya. Memendekkan
+                // penyebut tanpa memangkas event akan membesarkan APR.
                 let j = v.jendela_detik(registry.chain.block_time_ms);
-                jendela_detik = if jendela_detik == 0.0 {
-                    j
-                } else {
-                    jendela_detik.min(j)
-                };
+                durasi.extend(v.per_pool.keys().map(|id| (id.clone(), j)));
                 per_pool.extend(v.per_pool);
                 per_pool1.extend(v.per_pool1);
             }
@@ -880,6 +982,7 @@ pub async fn ukur_stats<P: Provider>(
     for pool in &mut kelompok.pools {
         let kunci = pool.id.to_lowercase();
         let quote_adalah_token1 = pool.token0.eq_ignore_ascii_case(&meta.address);
+        let jendela_detik = durasi.get(&kunci).copied().unwrap_or(0.0);
 
         // Jendela nol berarti pengukurannya tidak pernah berjalan, biasanya
         // karena poolnya V3. Melaporkan volume nol di situ akan terbaca sebagai
@@ -898,7 +1001,7 @@ pub async fn ukur_stats<P: Provider>(
         });
 
         let tvl = tvl_pool.get(&kunci).copied();
-    
+
         let apr = (!pool.dynamic_fee)
             .then_some(())
             .and(tvl)
@@ -908,7 +1011,7 @@ pub async fn ukur_stats<P: Provider>(
         pool.stats = Some(PoolStats {
             volume,
             jendela_menit: terukur_volume.then(|| jendela_detik / 60.0),
-            tvl: tvl.unwrap_or(0.0),
+            tvl,
             apr,
         });
     }
@@ -1550,7 +1653,6 @@ pub struct QuoteGroup {
     pub pools: Vec<PoolInfo>,
 }
 
-
 /// Kelompokkan pool menurut token lawan, lalu urutkan kelompoknya.
 ///
 /// `dikenal` berisi metadata token lawan yang tidak ada di `chain.toml`, hasil
@@ -1647,7 +1749,6 @@ fn kenali_quote(
         .get(&alamat.to_lowercase())
         .map(|m| (m.symbol.clone(), m.decimals, false))
 }
-
 
 /// Cari seluruh pool untuk sepasang token, V3 dan V4 sekaligus.
 ///
@@ -1758,6 +1859,78 @@ pub fn has_hook(p: &PoolInfo) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy::primitives::aliases::{I24, U160, U24};
+    use alloy::sol_types::SolCall;
+
+    fn registry_uji() -> Registry {
+        Registry::load_from(&Registry::default_path(&crate::config::repo_root())).unwrap()
+    }
+
+    #[tokio::test]
+    async fn refresh_v3_mengganti_seluruh_state_yang_kedaluwarsa_dalam_satu_batch() {
+        let rpc = alloy::transports::mock::Asserter::new();
+        let sqrt = U160::from(1u128 << 96);
+        let tick = I24::try_from(123).unwrap();
+        let liquidity = 456_789u128;
+        let slot =
+            abi::IUniswapV3Pool::slot0Call::abi_encode_returns(&abi::IUniswapV3Pool::slot0Return {
+                sqrtPriceX96: sqrt,
+                tick,
+                observationIndex: 0,
+                observationCardinality: 1,
+                observationCardinalityNext: 1,
+                feeProtocol: 0,
+                unlocked: true,
+            });
+        rpc.push_success(&crate::chain::multicall::respons_uji(vec![
+            Some(slot.into()),
+            Some(abi::IUniswapV3Pool::liquidityCall::abi_encode_returns(&liquidity).into()),
+        ]));
+        let provider = alloy::providers::ProviderBuilder::new().connect_mocked_client(rpc);
+        let lama = pool(&Address::repeat_byte(0x11).to_string(), 3_000, "1", 99.0);
+
+        let baru = refresh(&provider, &registry_uji(), &lama).await.unwrap();
+
+        assert_eq!(baru.sqrt_price_x96, U256::from(sqrt).to_string());
+        assert_eq!(baru.tick, 123);
+        assert_eq!(baru.liquidity, liquidity.to_string());
+        assert_eq!(baru.raw_price, 1.0);
+    }
+
+    #[tokio::test]
+    async fn refresh_v4_mengganti_harga_tick_dan_likuiditas_dalam_satu_batch() {
+        let rpc = alloy::transports::mock::Asserter::new();
+        let sqrt = U160::from(1u128 << 96);
+        let tick = I24::try_from(-321).unwrap();
+        let liquidity = 987_654u128;
+        let slot =
+            abi::IStateView::getSlot0Call::abi_encode_returns(&abi::IStateView::getSlot0Return {
+                sqrtPriceX96: sqrt,
+                tick,
+                protocolFee: U24::ZERO,
+                lpFee: U24::from(3_000),
+            });
+        rpc.push_success(&crate::chain::multicall::respons_uji(vec![
+            Some(slot.into()),
+            Some(abi::IStateView::getLiquidityCall::abi_encode_returns(&liquidity).into()),
+        ]));
+        let provider = alloy::providers::ProviderBuilder::new().connect_mocked_client(rpc);
+        let mut lama = pool(
+            &FixedBytes::<32>::repeat_byte(0x22).to_string(),
+            3_000,
+            "2",
+            42.0,
+        );
+        lama.version = PoolVersion::V4;
+        lama.hooks = Some(ZERO_ADDRESS.into());
+
+        let baru = refresh(&provider, &registry_uji(), &lama).await.unwrap();
+
+        assert_eq!(baru.sqrt_price_x96, U256::from(sqrt).to_string());
+        assert_eq!(baru.tick, -321);
+        assert_eq!(baru.liquidity, liquidity.to_string());
+        assert_eq!(baru.raw_price, 1.0);
+    }
 
     fn pool(id: &str, fee: u32, liquidity: &str, raw_price: f64) -> PoolInfo {
         PoolInfo {
@@ -1839,7 +2012,10 @@ mod tests {
         let wajar = pool("wajar", 80_000, "223191483590178319", 1.0);
 
         assert!(implausible_fee(&jebakan));
-        assert!(!implausible_fee(&wajar), "8 persen masih wajar di chain ini");
+        assert!(
+            !implausible_fee(&wajar),
+            "8 persen masih wajar di chain ini"
+        );
 
         let hasil = usable_pools(vec![jebakan, wajar]);
         assert_eq!(hasil.len(), 1);
@@ -1909,7 +2085,10 @@ mod tests {
         // Harga 1:1 berarti sqrtPriceX96 = 2^96.
         let satu = U256::from(1u8) << 96;
         let p = raw_price_from_sqrt_x96(satu);
-        assert!((p - 1.0).abs() < 1e-9, "harga 1:1 seharusnya 1.0, dapat {p}");
+        assert!(
+            (p - 1.0).abs() < 1e-9,
+            "harga 1:1 seharusnya 1.0, dapat {p}"
+        );
 
         // Harga 4:1 berarti sqrt-nya 2, jadi 2 * 2^96.
         let empat = U256::from(2u8) << 96;
@@ -1923,7 +2102,10 @@ mod tests {
         // hasilnya tetap terhingga, bukan panic atau NaN.
         let besar = U256::from(1u8) << 158;
         let p = raw_price_from_sqrt_x96(besar);
-        assert!(p.is_finite(), "harga dari sqrt besar harus terhingga, dapat {p}");
+        assert!(
+            p.is_finite(),
+            "harga dari sqrt besar harus terhingga, dapat {p}"
+        );
         assert!(p > 0.0);
     }
 
@@ -2017,7 +2199,10 @@ mod tests {
         let weth: Address = registry.tokens["weth"].address.parse().unwrap();
 
         let meta = token_meta(&provider, token).await.expect("metadata token");
-        println!("token  {} {} desimal, suplai {:.0}", meta.symbol, meta.decimals, meta.total_supply);
+        println!(
+            "token  {} {} desimal, suplai {:.0}",
+            meta.symbol, meta.decimals, meta.total_supply
+        );
         assert!(meta.decimals > 0, "desimal harus masuk akal");
         assert!(meta.total_supply > 0.0, "suplai harus positif");
 
@@ -2035,7 +2220,10 @@ mod tests {
             );
         }
 
-        assert!(!pools.is_empty(), "pasangan ini harus punya minimal satu pool");
+        assert!(
+            !pools.is_empty(),
+            "pasangan ini harus punya minimal satu pool"
+        );
         for p in &pools {
             assert!(p.raw_price > 0.0, "harga mentah harus positif");
             assert!(p.tick_spacing > 0, "tick spacing harus positif");
@@ -2075,7 +2263,10 @@ mod tests {
                 p.id
             );
         }
-        println!("tick math cocok dengan {} pool sungguhan di chain", pools.len());
+        println!(
+            "tick math cocok dengan {} pool sungguhan di chain",
+            pools.len()
+        );
     }
 
     #[test]
@@ -2084,7 +2275,11 @@ mod tests {
         let kecil = address!("0000000000000000000000000000000000000001");
         let besar = address!("ffffffffffffffffffffffffffffffffffffffff");
         // Logika yang sama dipakai discover_v4 saat menyusun topic.
-        let (c0, c1) = if kecil < besar { (kecil, besar) } else { (besar, kecil) };
+        let (c0, c1) = if kecil < besar {
+            (kecil, besar)
+        } else {
+            (besar, kecil)
+        };
         assert_eq!(c0, kecil);
         assert_eq!(c1, besar);
     }

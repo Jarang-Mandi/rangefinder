@@ -16,7 +16,7 @@ use alloy::primitives::{keccak256, Address, FixedBytes, U256};
 use alloy::providers::Provider;
 use alloy::rpc::types::TransactionRequest;
 use alloy::sol_types::{SolCall, SolValue};
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::chain::multicall;
 use crate::chain::registry::Registry;
@@ -25,13 +25,6 @@ use crate::exec::v4::abi::{IPositionManagerV4 as PmV4, IStateViewV4};
 use crate::pools::PoolVersion;
 
 use super::{fees, Posisi};
-
-/// Berapa posisi terbanyak yang dimuat sekaligus.
-///
-/// Wallet dengan ratusan posisi akan membuat satu batch multicall melewati batas
-/// gas node. Batasnya dipasang di sini alih alih membiarkan permintaannya
-/// ditolak seluruhnya.
-pub const MAKS_POSISI: usize = 60;
 
 /// Muat seluruh posisi V3 milik sebuah wallet.
 ///
@@ -53,13 +46,13 @@ pub async fn muat_v3<P: Provider>(
     )
     .await?;
     let jumlah = multicall::decode::<Npm::balanceOfCall>(jumlah.first().and_then(|x| x.as_ref()))
-        .unwrap_or(U256::ZERO)
-        .to::<u64>() as usize;
+        .context("jumlah NFT V3 tidak terbaca")?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("jumlah NFT V3 terlalu besar"))?;
 
     if jumlah == 0 {
         return Ok(Vec::new());
     }
-    let jumlah = jumlah.min(MAKS_POSISI);
 
     let calls: Vec<_> = (0..jumlah)
         .map(|i| {
@@ -78,6 +71,7 @@ pub async fn muat_v3<P: Provider>(
         .iter()
         .filter_map(|x| multicall::decode::<Npm::tokenOfOwnerByIndexCall>(x.as_ref()))
         .collect();
+    anyhow::ensure!(ids.len() == jumlah, "enumerasi NFT V3 tidak lengkap");
 
     baca_v3(provider, registry, owner, &ids).await
 }
@@ -105,7 +99,8 @@ async fn baca_v3<P: Provider>(
     let mut gagal = 0usize;
 
     for (i, id) in ids.iter().enumerate() {
-        let Some(p) = multicall::decode::<Npm::positionsCall>(hasil.get(i).and_then(|x| x.as_ref()))
+        let Some(p) =
+            multicall::decode::<Npm::positionsCall>(hasil.get(i).and_then(|x| x.as_ref()))
         else {
             gagal += 1;
             continue;
@@ -121,23 +116,26 @@ async fn baca_v3<P: Provider>(
         //
         // Tidak bisa lewat Multicall3, karena `collect` menuntut pemanggilnya
         // adalah pemilik NFT, dan lewat multicall pemanggilnya jadi multicall.
-        let (fee0, fee1) = simulasi_collect(provider, npm, owner, *id)
-            .await
-            .unwrap_or((U256::ZERO, U256::ZERO));
+        let fees = simulasi_collect(provider, npm, owner, *id).await;
+        if let Err(error) = &fees {
+            tracing::warn!(token_id = %id, error = %error, "fee posisi V3 tidak terbaca");
+        }
 
         out.push(Posisi {
+            position_id: super::position_id(registry.chain.id, npm, *id),
             token_id: id.to_string(),
             version: PoolVersion::V3,
             token0: p.token0.to_string(),
             token1: p.token1.to_string(),
             fee: p.fee.to::<u32>(),
+            tick_spacing: 0,
             tick_lower: p.tickLower.as_i32(),
             tick_upper: p.tickUpper.as_i32(),
             liquidity: p.liquidity.to_string(),
             tick_sekarang: None,
             in_range: false,
-            fee0: fee0.to_string(),
-            fee1: fee1.to_string(),
+            fee0: fees.as_ref().ok().map(|(fee0, _)| fee0.to_string()),
+            fee1: fees.as_ref().ok().map(|(_, fee1)| fee1.to_string()),
             hooks: None,
             sqrt_price_x96: None,
             amount0: "0".into(),
@@ -148,7 +146,7 @@ async fn baca_v3<P: Provider>(
     }
 
     if gagal > 0 {
-        tracing::warn!(gagal, "sebagian posisi V3 tidak terbaca, dilewati");
+        anyhow::bail!("{gagal} posisi V3 tidak terbaca lengkap");
     }
     Ok(out)
 }
@@ -215,7 +213,6 @@ pub async fn muat_v4<P: Provider>(
                 .is_some_and(|a| a == owner)
         })
         .map(|(_, id)| *id)
-        .take(MAKS_POSISI)
         .collect();
 
     if milik.is_empty() {
@@ -245,7 +242,7 @@ pub async fn muat_v4<P: Provider>(
             hasil.get(n * 2 + 1).and_then(|x| x.as_ref()),
         );
         let (Some(info), Some(liq)) = (info, liq) else {
-            continue;
+            anyhow::bail!("metadata posisi V4 #{id} tidak terbaca lengkap");
         };
         let (tick_lower, tick_upper) = crate::exec::v4::verify::bongkar_tick(info._1);
         dasar.push((*id, info._0, tick_lower, tick_upper, liq));
@@ -320,13 +317,21 @@ async fn baca_fee_v4<P: Provider>(
 
         let (fee0, fee1) = match (&tumbuh, &posisi_pool) {
             (Some(t), Some(p)) => (
-                fees::fee_belum_diklaim(t.feeGrowthInside0X128, p.feeGrowthInside0LastX128, *liq),
-                fees::fee_belum_diklaim(t.feeGrowthInside1X128, p.feeGrowthInside1LastX128, *liq),
+                Some(fees::fee_belum_diklaim(
+                    t.feeGrowthInside0X128,
+                    p.feeGrowthInside0LastX128,
+                    *liq,
+                )),
+                Some(fees::fee_belum_diklaim(
+                    t.feeGrowthInside1X128,
+                    p.feeGrowthInside1LastX128,
+                    *liq,
+                )),
             ),
             // Kegagalan membaca TIDAK dipalsukan jadi nol tanpa jejak.
             _ => {
                 tracing::warn!(token_id = %id, "pertumbuhan fee posisi V4 tidak terbaca");
-                (U256::ZERO, U256::ZERO)
+                (None, None)
             }
         };
 
@@ -334,19 +339,25 @@ async fn baca_fee_v4<P: Provider>(
         let sqrt = slot0.as_ref().map(|s| s.sqrtPriceX96.to_string());
 
         out.push(Posisi {
+            position_id: super::position_id(
+                registry.chain.id,
+                registry.contract("uniswap_v4", "position_manager")?,
+                *id,
+            ),
             token_id: id.to_string(),
             version: PoolVersion::V4,
             token0: key.currency0.to_string(),
             token1: key.currency1.to_string(),
             fee: key.fee.to::<u32>(),
+            tick_spacing: key.tickSpacing.as_i32(),
             tick_lower: *lower,
             tick_upper: *upper,
             liquidity: liq.to_string(),
             tick_sekarang: tick,
             // Range Uniswap setengah terbuka: batas atas sudah di luar.
             in_range: tick.is_some_and(|t| t >= *lower && t < *upper),
-            fee0: fee0.to_string(),
-            fee1: fee1.to_string(),
+            fee0: fee0.map(|v| v.to_string()),
+            fee1: fee1.map(|v| v.to_string()),
             hooks: Some(key.hooks.to_string()),
             sqrt_price_x96: sqrt,
             amount0: "0".into(),
@@ -410,9 +421,9 @@ pub async fn lengkapi_tick_v3<P: Provider>(
 
     let mut alamat: HashMap<usize, Address> = HashMap::new();
     for (n, i) in perlu.iter().enumerate() {
-        if let Some(a) =
-            multicall::decode::<IUniswapV3Factory::getPoolCall>(hasil.get(n).and_then(|x| x.as_ref()))
-        {
+        if let Some(a) = multicall::decode::<IUniswapV3Factory::getPoolCall>(
+            hasil.get(n).and_then(|x| x.as_ref()),
+        ) {
             if !a.is_zero() {
                 alamat.insert(*i, a);
             }
@@ -423,17 +434,27 @@ pub async fn lengkapi_tick_v3<P: Provider>(
     }
 
     let urut: Vec<(usize, Address)> = alamat.into_iter().collect();
-    let calls: Vec<_> = urut
-        .iter()
-        .map(|(_, a)| multicall::encode(*a, &IUniswapV3Pool::slot0Call {}))
-        .collect();
+    let mut calls = Vec::with_capacity(urut.len() * 2);
+    for (_, address) in &urut {
+        calls.push(multicall::encode(*address, &IUniswapV3Pool::slot0Call {}));
+        calls.push(multicall::encode(
+            *address,
+            &IUniswapV3Pool::tickSpacingCall {},
+        ));
+    }
     let hasil = multicall::batch_call(provider, mc, calls).await?;
 
     for (n, (i, _)) in urut.iter().enumerate() {
-        if let Some(s) =
-            multicall::decode::<IUniswapV3Pool::slot0Call>(hasil.get(n).and_then(|x| x.as_ref()))
-        {
+        if let (Some(s), Some(spacing)) = (
+            multicall::decode::<IUniswapV3Pool::slot0Call>(
+                hasil.get(n * 2).and_then(|x| x.as_ref()),
+            ),
+            multicall::decode::<IUniswapV3Pool::tickSpacingCall>(
+                hasil.get(n * 2 + 1).and_then(|x| x.as_ref()),
+            ),
+        ) {
             let tick = s.tick.as_i32();
+            posisi[*i].tick_spacing = spacing.as_i32();
             posisi[*i].sqrt_price_x96 = Some(s.sqrtPriceX96.to_string());
             posisi[*i].tick_sekarang = Some(tick);
             posisi[*i].in_range = tick >= posisi[*i].tick_lower && tick < posisi[*i].tick_upper;
@@ -452,26 +473,77 @@ pub async fn muat_semua<P: Provider>(
     store: Option<&crate::store::Store>,
     owner: Address,
 ) -> Vec<Posisi> {
+    muat_snapshot_internal(provider, registry, store, owner, false)
+        .await
+        .positions
+}
+
+pub struct SnapshotPosisi {
+    pub positions: Vec<Posisi>,
+    pub errors: Vec<String>,
+}
+
+pub async fn muat_snapshot<P: Provider>(
+    provider: &P,
+    registry: &Registry,
+    store: Option<&crate::store::Store>,
+    owner: Address,
+) -> SnapshotPosisi {
+    muat_snapshot_internal(provider, registry, store, owner, true).await
+}
+
+/// Snapshot segar untuk gate eksekusi yang tidak memerlukan histori PnL.
+pub async fn muat_snapshot_operasional<P: Provider>(
+    provider: &P,
+    registry: &Registry,
+    store: Option<&crate::store::Store>,
+    owner: Address,
+) -> SnapshotPosisi {
+    muat_snapshot_internal(provider, registry, store, owner, false).await
+}
+
+async fn muat_snapshot_internal<P: Provider>(
+    provider: &P,
+    registry: &Registry,
+    store: Option<&crate::store::Store>,
+    owner: Address,
+    rekonstruksi_pnl: bool,
+) -> SnapshotPosisi {
     let mut out = Vec::new();
+    let mut errors = Vec::new();
 
     match muat_v3(provider, registry, owner).await {
         Ok(mut v) => {
             if let Err(e) = lengkapi_tick_v3(provider, registry, &mut v).await {
-                tracing::warn!(error = %e, "tick pool V3 tidak terbaca");
+                errors.push(format!("tick pool V3 tidak terbaca: {e}"));
             }
             out.append(&mut v);
         }
-        Err(e) => tracing::warn!(error = %e, "pemuatan posisi V3 gagal"),
+        Err(e) => errors.push(format!("pemuatan posisi V3 gagal: {e}")),
     }
 
     match muat_v4(provider, registry, store, owner).await {
         Ok(mut v) => out.append(&mut v),
-        Err(e) => tracing::warn!(error = %e, "pemuatan posisi V4 gagal"),
+        Err(e) => errors.push(format!("pemuatan posisi V4 gagal: {e}")),
     }
 
-    lengkapi_pnl(&mut out, registry, store);
+    if let Some(store) = store.filter(|_| rekonstruksi_pnl) {
+        if let Err(e) = super::history::rekonstruksi_basis_v3(provider, registry, store, &out).await
+        {
+            errors.push(format!("rekonstruksi cost basis V3 gagal: {e}"));
+        }
+        if let Err(e) = super::history::rekonstruksi_basis_v4(provider, registry, store, &out).await
+        {
+            errors.push(format!("rekonstruksi cost basis V4 gagal: {e}"));
+        }
+    }
+
+    lengkapi_pnl(&mut out, registry, store, owner);
     urutkan(&mut out);
-    out
+    SnapshotPosisi {
+        positions: out,
+        errors,
+    }
 }
 
 /// Kenali token kutipan sebuah pool beserta desimalnya.
@@ -486,21 +558,33 @@ pub async fn muat_semua<P: Provider>(
 /// Mengembalikan `None` kalau tidak ada sisi yang merupakan kutipan yang
 /// dikenal. Dalam keadaan itu PnL memang tidak bisa dinyatakan, dan kartunya
 /// mengatakan begitu.
-fn kutipan_pool(
+pub(crate) fn kutipan_pool(
     registry: &Registry,
     token0: &str,
     token1: &str,
-) -> Option<(bool, u8)> {
+) -> Option<(bool, u8, crate::pnl::Currency)> {
+    let currency = |address: &str, symbol: &str| crate::pnl::Currency {
+        id: format!("{}:{}", registry.chain.id, address.to_lowercase()),
+        symbol: symbol.to_string(),
+    };
     // ETH asli selalu berdesimal 18 dan selalu currency0 karena alamatnya nol.
     if token0.eq_ignore_ascii_case(crate::pools::ZERO_ADDRESS) {
-        return Some((true, 18));
+        return Some((true, 18, currency(token0, "ETH")));
     }
-    for entry in registry.tokens.values() {
+    for (symbol, entry) in &registry.tokens {
         if entry.address.eq_ignore_ascii_case(token0) {
-            return Some((true, entry.decimals));
+            return Some((
+                true,
+                entry.decimals,
+                currency(token0, &symbol.to_uppercase()),
+            ));
         }
         if entry.address.eq_ignore_ascii_case(token1) {
-            return Some((false, entry.decimals));
+            return Some((
+                false,
+                entry.decimals,
+                currency(token1, &symbol.to_uppercase()),
+            ));
         }
     }
     None
@@ -521,6 +605,7 @@ pub fn lengkapi_pnl(
     posisi: &mut [Posisi],
     registry: &Registry,
     store: Option<&crate::store::Store>,
+    owner: Address,
 ) {
     use crate::math::{liquidity_math, tick_math};
 
@@ -552,7 +637,9 @@ pub fn lengkapi_pnl(
             continue;
         }
 
-        let Some((kutipan_token0, desimal)) = kutipan_pool(registry, &p.token0, &p.token1) else {
+        let Some((kutipan_token0, desimal, currency)) =
+            kutipan_pool(registry, &p.token0, &p.token1)
+        else {
             // Pasangan memecoin melawan memecoin. Tidak ada satuan yang berarti,
             // dan angka dalam satuan salah satunya akan menyesatkan.
             continue;
@@ -574,31 +661,104 @@ pub fn lengkapi_pnl(
 
         let posisi0 = f(&p.amount0);
         let posisi1 = f(&p.amount1);
-        let fee_kutipan = ke_kutipan(f(&p.fee0), f(&p.fee1));
+        let ledger = match store {
+            Some(store) => crate::exec::journal::position_ledger(
+                store,
+                registry.chain.id,
+                owner,
+                &p.position_id,
+            )
+            .unwrap_or_else(|error| {
+                tracing::warn!(position_id = %p.position_id, error = %error, "ledger posisi tidak terbaca");
+                crate::exec::journal::PositionLedger {
+                    complete: false,
+                    ..Default::default()
+                }
+            }),
+            None => crate::exec::journal::PositionLedger::default(),
+        };
+        let catatan = store.and_then(|s| crate::pnl::ambil(s, &p.position_id));
+        let fee_kutipan = p
+            .fee0
+            .as_deref()
+            .and_then(|value| value.parse::<U256>().ok())
+            .zip(
+                p.fee1
+                    .as_deref()
+                    .and_then(|value| value.parse::<U256>().ok()),
+            )
+            .and_then(|(current0, current1)| {
+                let catatan = catatan.as_ref()?;
+                if let Some(log) = catatan.rekonstruksi_log.as_ref() {
+                    let (fee0, fee1) = crate::pnl::total_fee_dari_log(current0, current1, log)?;
+                    Some((
+                        fee0.checked_add(ledger.claimed0)?,
+                        fee1.checked_add(ledger.claimed1)?,
+                    ))
+                } else if catatan.rekonstruksi_v4.is_some() {
+                    None
+                } else {
+                    Some((
+                        current0.checked_add(ledger.claimed0)?,
+                        current1.checked_add(ledger.claimed1)?,
+                    ))
+                }
+            })
+            .filter(|_| ledger.complete)
+            .map(|(fee0, fee1)| ke_kutipan(f(&fee0.to_string()), f(&fee1.to_string())));
 
-        let catatan = store.and_then(|s| crate::pnl::ambil(s, &p.token_id));
-        let (setor0, setor1, gas, slippage, perkiraan) = match &catatan {
-            Some(c) => (
-                f(&c.setor0),
-                f(&c.setor1),
-                c.gas_kutipan,
-                c.slippage_kutipan,
-                false,
-            ),
+        let (setor0, setor1, gas, slippage) = match &catatan {
+            Some(c) => {
+                let gas = match (store, c.flow_id.as_deref()) {
+                    (Some(store), Some(flow_id))
+                        if currency.symbol == "ETH" || currency.symbol == "WETH" =>
+                    {
+                        crate::exec::journal::flow_costs(store, registry.chain.id, owner, flow_id)
+                            .ok()
+                            .filter(|costs| {
+                                costs.complete && costs.transaction_count > 0 && ledger.complete
+                            })
+                            .and_then(|costs| {
+                                costs
+                                    .gas_wei
+                                    .checked_add(ledger.action_gas_wei)
+                                    .map(|total| total.to_string())
+                            })
+                            .and_then(|total| total.parse::<f64>().ok())
+                            .map(|wei| wei / 1e18)
+                    }
+                    _ => c.gas_kutipan,
+                };
+                (f(&c.setor0), f(&c.setor1), gas, c.slippage_kutipan)
+            }
             // Tanpa catatan, yang disetor dianggap sama dengan yang ada
             // sekarang. Impermanent loss-nya jadi nol, dan itu ditandai.
-            None => (posisi0, posisi1, 0.0, 0.0, true),
+            None => (posisi0, posisi1, None, None),
         };
+
+        let perkiraan = catatan.as_ref().is_none_or(|c| !c.setoran_aktual)
+            || !ledger.complete
+            || fee_kutipan.is_none()
+            || gas.is_none()
+            || slippage.is_none();
 
         let il = ke_kutipan(setor0, setor1) - ke_kutipan(posisi0, posisi1);
 
         p.pnl = Some(crate::pnl::Hasil {
+            currency,
             fee: fee_kutipan,
             impermanent_loss: il,
             gas,
             slippage,
-            net: fee_kutipan - il - gas - slippage,
-            perkiraan,
+            net: if perkiraan {
+                None
+            } else {
+                fee_kutipan
+                    .zip(gas)
+                    .zip(slippage)
+                    .map(|((fee, gas), slippage)| fee - il - gas - slippage)
+            },
+            perkiraan: perkiraan || fee_kutipan.is_none(),
         });
     }
 }
@@ -631,18 +791,20 @@ mod tests {
 
     fn p(nama: &str, in_range: bool, kosong: bool, liq: &str) -> Posisi {
         Posisi {
+            position_id: format!("4663:uji:{nama}"),
             token_id: nama.into(),
             version: PoolVersion::V4,
             token0: "0x0".into(),
             token1: "0x1".into(),
             fee: 3000,
+            tick_spacing: 60,
             tick_lower: 0,
             tick_upper: 100,
             liquidity: liq.into(),
             tick_sekarang: Some(50),
             in_range,
-            fee0: "0".into(),
-            fee1: "0".into(),
+            fee0: Some("0".into()),
+            fee1: Some("0".into()),
             hooks: None,
             sqrt_price_x96: None,
             amount0: "0".into(),

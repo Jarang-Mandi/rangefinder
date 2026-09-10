@@ -6,6 +6,8 @@
 node_modules/
 extension/dist/
 .vite/
+.playwright-cli/
+output/playwright/
 
 # Rahasia dan state lokal. Tidak boleh ada satu pun dari ini yang ter-commit.
 *.keystore

@@ -153,7 +153,8 @@ pub fn hitung_jumlah(
         );
     }
 
-    let (butuh0, butuh1) = liquidity_math::amounts_for_liquidity(sqrt_p, sqrt_a, sqrt_b, liquidity)?;
+    let (butuh0, butuh1) =
+        liquidity_math::amounts_for_liquidity(sqrt_p, sqrt_a, sqrt_b, liquidity)?;
 
     // Penjaga terakhir. Kalau ini pernah menyala, ada yang salah pada
     // matematikanya, bukan pada masukan user.
@@ -280,13 +281,20 @@ pub async fn plan_open<P: Provider>(
     };
 
     plan.liquidity = liquidity.to_string();
+    // Kebutuhan izin tetap ada walau eth_call mint ditolak karena allowance.
+    plan.amount0 = butuh0.to_string();
+    plan.amount1 = butuh1.to_string();
 
     // ─── G2, builder calldata ─────────────────────────────────────
     let mint_req = MintRequest {
         token0: match req.pool.token0.parse() {
             Ok(a) => a,
             Err(_) => {
-                gates.push(GateResult::gagal("G2", "builder calldata", "token0 tidak valid"));
+                gates.push(GateResult::gagal(
+                    "G2",
+                    "builder calldata",
+                    "token0 tidak valid",
+                ));
                 plan.gates = gates;
                 plan.warnings = warnings;
                 return plan;
@@ -295,7 +303,11 @@ pub async fn plan_open<P: Provider>(
         token1: match req.pool.token1.parse() {
             Ok(a) => a,
             Err(_) => {
-                gates.push(GateResult::gagal("G2", "builder calldata", "token1 tidak valid"));
+                gates.push(GateResult::gagal(
+                    "G2",
+                    "builder calldata",
+                    "token1 tidak valid",
+                ));
                 plan.gates = gates;
                 plan.warnings = warnings;
                 return plan;
@@ -317,7 +329,11 @@ pub async fn plan_open<P: Provider>(
             gates.push(GateResult::lolos(
                 "G2",
                 "builder calldata",
-                format!("{} byte, tick pas di grid {}", c.len(), req.pool.tick_spacing),
+                format!(
+                    "{} byte, tick pas di grid {}",
+                    c.len(),
+                    req.pool.tick_spacing
+                ),
             ));
             c
         }
@@ -329,39 +345,38 @@ pub async fn plan_open<P: Provider>(
         }
     };
 
-    // G3 tidak dijalankan di sini. Ia adalah uji saat build yang membandingkan
-    // builder ini terhadap transaksi sungguhan, jadi kalau build lewat, gate
-    // ini sudah terpenuhi untuk seluruh jalur mint.
+    if let Err(e) = super::golden::verify_embedded() {
+        gates.push(GateResult::gagal("G3", "golden vector", e));
+        plan.gates = gates;
+        plan.warnings = warnings;
+        return plan;
+    }
     gates.push(GateResult::lolos(
         "G3",
         "golden vector",
-        "terpenuhi saat build, lihat exec/golden.rs",
+        "builder cocok byte per byte dengan transaksi acuan tertanam",
     ));
 
     // ─── G4, simulasi ─────────────────────────────────────────────
-    let sim = match simulate::simulate_mint(
-        provider,
-        position_manager,
-        req.recipient,
-        calldata.clone(),
-    )
-    .await
-    {
-        Ok(s) => {
-            gates.push(GateResult::lolos(
-                "G4",
-                "simulasi",
-                format!("likuiditas {} tercipta", s.liquidity),
-            ));
-            s
-        }
-        Err(e) => {
-            gates.push(GateResult::gagal("G4", "simulasi", e.to_string()));
-            plan.gates = gates;
-            plan.warnings = warnings;
-            return plan;
-        }
-    };
+    let sim =
+        match simulate::simulate_mint(provider, position_manager, req.recipient, calldata.clone())
+            .await
+        {
+            Ok(s) => {
+                gates.push(GateResult::lolos(
+                    "G4",
+                    "simulasi",
+                    format!("likuiditas {} tercipta", s.liquidity),
+                ));
+                s
+            }
+            Err(e) => {
+                gates.push(GateResult::gagal("G4", "simulasi", e.to_string()));
+                plan.gates = gates;
+                plan.warnings = warnings;
+                return plan;
+            }
+        };
 
     plan.amount0 = sim.amount0.to_string();
     plan.amount1 = sim.amount1.to_string();
@@ -443,6 +458,27 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn simulasi_revert_tetap_menyediakan_jumlah_untuk_approval_pertama() {
+        let rpc = alloy::transports::mock::Asserter::new();
+        rpc.push_failure_msg("execution reverted: allowance");
+        let provider = alloy::providers::ProviderBuilder::new().connect_mocked_client(rpc);
+        let sqrt = tick_math::get_sqrt_ratio_at_tick(0).unwrap().to_string();
+        let req = permintaan(pool(0, &sqrt));
+        let plan = plan_open(
+            &provider,
+            req.recipient,
+            &req,
+            &LimitsConfig::default(),
+            &ExecutionConfig::default(),
+        )
+        .await;
+        assert!(plan.failed_gates().iter().any(|g| g.id == "G4"));
+        assert!(plan.amount0.parse::<U256>().unwrap() > U256::ZERO);
+        assert!(plan.amount1.parse::<U256>().unwrap() > U256::ZERO);
+        assert!(plan.calldata.is_none());
+    }
+
     /// Provider tiruan tidak dibutuhkan: G0 berhenti sebelum jaringan disentuh.
     fn rencana_v4() -> OpenPlan {
         let sqrt = tick_math::get_sqrt_ratio_at_tick(0).unwrap().to_string();
@@ -513,7 +549,10 @@ mod tests {
         let sqrt = tick_math::get_sqrt_ratio_at_tick(0).unwrap().to_string();
         let p = pool(0, &sqrt);
         let e = hitung_jumlah(&p, -600, 600, U256::ZERO, U256::ZERO).unwrap_err();
-        assert!(e.contains("terlalu kecil") || e.contains("nol"), "pesan: {e}");
+        assert!(
+            e.contains("terlalu kecil") || e.contains("nol"),
+            "pesan: {e}"
+        );
     }
 
     #[test]
@@ -550,7 +589,10 @@ mod tests {
             request: None,
             v4_request: None,
         };
-        assert!(!plan.is_sendable(), "tanpa calldata tidak boleh bisa dikirim");
+        assert!(
+            !plan.is_sendable(),
+            "tanpa calldata tidak boleh bisa dikirim"
+        );
     }
 
     #[test]
@@ -655,6 +697,9 @@ mod tests {
     fn address_alamat_dipakai_apa_adanya() {
         // Menjaga supaya alamat contoh di uji lain tetap valid.
         let a: Address = address!("0bd7d308f8e1639fab988df18a8011f41eacad73");
-        assert_eq!(a.to_string().to_lowercase(), "0x0bd7d308f8e1639fab988df18a8011f41eacad73");
+        assert_eq!(
+            a.to_string().to_lowercase(),
+            "0x0bd7d308f8e1639fab988df18a8011f41eacad73"
+        );
     }
 }

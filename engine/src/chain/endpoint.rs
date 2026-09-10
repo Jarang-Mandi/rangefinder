@@ -49,10 +49,7 @@ pub fn aman(url: &str) -> String {
 
     // Buang query dan fragmen lebih dulu. Keduanya tempat lazim menaruh kunci,
     // dan tidak ada yang perlu dilihat user di sana.
-    let sisa = sisa
-        .split(['?', '#'])
-        .next()
-        .unwrap_or_default();
+    let sisa = sisa.split(['?', '#']).next().unwrap_or_default();
 
     // Info pengguna berbentuk `user:sandi@host`. Sandi di situ jelas rahasia,
     // dan menampilkan nama penggunanya pun tidak berguna.

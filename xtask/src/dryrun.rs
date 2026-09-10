@@ -115,12 +115,24 @@ pub async fn run(repo_root: &Path, token_arg: &str, from_arg: Option<&str>) -> R
     let (tick_lower, tick_upper, bentuk) = if saldo0.is_zero() && !saldo1.is_zero() {
         // Hanya token1. Range harus seluruhnya DI BAWAH harga pool sekarang,
         // karena di bawah range posisi hanya berisi token1.
-        (tengah - lebar * 2, tengah - spacing, "satu sisi, hanya token1")
+        (
+            tengah - lebar * 2,
+            tengah - spacing,
+            "satu sisi, hanya token1",
+        )
     } else if saldo1.is_zero() && !saldo0.is_zero() {
         // Hanya token0. Range seluruhnya di atas harga pool.
-        (tengah + spacing, tengah + lebar * 2, "satu sisi, hanya token0")
+        (
+            tengah + spacing,
+            tengah + lebar * 2,
+            "satu sisi, hanya token0",
+        )
     } else {
-        (tengah - lebar, tengah + lebar, "dua sisi, mengelilingi harga")
+        (
+            tengah - lebar,
+            tengah + lebar,
+            "dua sisi, mengelilingi harga",
+        )
     };
 
     println!("  range     {tick_lower} sampai {tick_upper} ({bentuk})");

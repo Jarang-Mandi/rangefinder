@@ -250,8 +250,8 @@ pub fn tulis_rpc(http: &[String]) -> Result<PathBuf> {
     let path = data_dir()?.join("config.toml");
     let teks = std::fs::read_to_string(&path)
         .with_context(|| format!("gagal membaca {}", path.display()))?;
-    let mut doc: toml::Value = toml::from_str(&teks)
-        .with_context(|| format!("{} tidak valid", path.display()))?;
+    let mut doc: toml::Value =
+        toml::from_str(&teks).with_context(|| format!("{} tidak valid", path.display()))?;
 
     let rpc = doc
         .get_mut("rpc")
@@ -263,8 +263,7 @@ pub fn tulis_rpc(http: &[String]) -> Result<PathBuf> {
     );
 
     let keluaran = toml::to_string_pretty(&doc)?;
-    std::fs::write(&path, keluaran)
-        .with_context(|| format!("gagal menulis {}", path.display()))?;
+    std::fs::write(&path, keluaran).with_context(|| format!("gagal menulis {}", path.display()))?;
 
     Ok(path)
 }

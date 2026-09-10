@@ -77,7 +77,11 @@ pub fn peringkat(pools: &[PoolInfo], volume: &[VolumePool]) -> Vec<Peringkat> {
             // Fee dinamis dipakai dengan perkiraan konservatif, dan ditandai.
             // Menebaknya lebih tinggi akan menaikkan peringkat pool yang justru
             // paling tidak kita ketahui.
-            let fee_efektif = if p.dynamic_fee { ASSUMED_DYNAMIC_FEE } else { p.fee };
+            let fee_efektif = if p.dynamic_fee {
+                ASSUMED_DYNAMIC_FEE
+            } else {
+                p.fee
+            };
 
             let proyeksi = if likuiditas == 0 {
                 // Pool tanpa likuiditas seharusnya sudah tersaring lebih awal.
@@ -138,7 +142,9 @@ pub fn peringkat(pools: &[PoolInfo], volume: &[VolumePool]) -> Vec<Peringkat> {
 /// sama, hasilnya `None` dan tidak ada yang perlu dijelaskan.
 pub fn keunggulan_terhadap_paling_likuid(hasil: &[Peringkat]) -> Option<(String, f64)> {
     let teratas = hasil.first()?;
-    let paling_likuid = hasil.iter().max_by_key(|p| p.liquidity.parse::<u128>().unwrap_or(0))?;
+    let paling_likuid = hasil
+        .iter()
+        .max_by_key(|p| p.liquidity.parse::<u128>().unwrap_or(0))?;
 
     if teratas.pool_id == paling_likuid.pool_id {
         return None;
@@ -182,7 +188,10 @@ mod tests {
         // Pool 0,3 persen punya volume sepuluh kali lipat, tapi likuiditasnya
         // seratus kali lebih tebal. Pool 1 persen memberi lebih banyak fee per
         // satuan modal, dan itu yang benar benar diterima LP.
-        let pools = vec![pool("0xtipis", 10_000, "1000"), pool("0xtebal", 3_000, "100000")];
+        let pools = vec![
+            pool("0xtipis", 10_000, "1000"),
+            pool("0xtebal", 3_000, "100000"),
+        ];
         let volume = vec![
             VolumePool {
                 pool_id: "0xtipis",
@@ -222,7 +231,10 @@ mod tests {
     fn pool_tanpa_volume_turun_ke_bawah_dan_ditandai() {
         // Nol di sini berarti belum ada perdagangan pada jendela yang diukur,
         // dan itu berbeda dari pool yang ramai tapi likuiditasnya terlalu tebal.
-        let pools = vec![pool("0xsepi", 10_000, "1"), pool("0xramai", 3_000, "100000")];
+        let pools = vec![
+            pool("0xsepi", 10_000, "1"),
+            pool("0xramai", 3_000, "100000"),
+        ];
         let volume = vec![VolumePool {
             pool_id: "0xramai",
             volume: 1_000,
@@ -249,7 +261,8 @@ mod tests {
         assert!(hasil[0].dynamic_fee);
         assert!(hasil[0].catatan.contains("hook"));
         // Proyeksinya memakai perkiraan konservatif, bukan penanda 0x800000.
-        let dengan_penanda = 1_000_000.0 * (crate::pools::DYNAMIC_FEE_FLAG as f64 / 1_000_000.0) / 1000.0;
+        let dengan_penanda =
+            1_000_000.0 * (crate::pools::DYNAMIC_FEE_FLAG as f64 / 1_000_000.0) / 1000.0;
         assert!(hasil[0].proyeksi < dengan_penanda / 100.0);
     }
 
@@ -267,7 +280,10 @@ mod tests {
 
     #[test]
     fn keunggulan_dilaporkan_kalau_bukan_yang_paling_likuid() {
-        let pools = vec![pool("0xtipis", 10_000, "1000"), pool("0xtebal", 3_000, "100000")];
+        let pools = vec![
+            pool("0xtipis", 10_000, "1000"),
+            pool("0xtebal", 3_000, "100000"),
+        ];
         let volume = vec![
             VolumePool {
                 pool_id: "0xtipis",

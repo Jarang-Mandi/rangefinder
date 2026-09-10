@@ -1,5 +1,27 @@
 /* Tata letak side panel. Lebar kerja 320 sampai 480 piksel. */
 
+.histogram { margin-top: var(--s3); }
+.histogram-tools { display: flex; align-items: center; justify-content: space-between; color: var(--text-muted); font-size: 11px; }
+.histogram-zoom { display: flex; gap: 2px; }
+.histogram-zoom button { min-width: 27px; padding: 3px 6px; font-size: 11px; }
+.histogram-chart { display: block; width: 100%; overflow: visible; touch-action: none; user-select: none; }
+.histogram-selection { fill: var(--accent); opacity: .08; }
+.histogram-bar { fill: var(--accent); opacity: .45; }
+.histogram-bar.current { opacity: .85; }
+.histogram-grid { stroke: var(--border); stroke-width: .5; }
+.histogram-axis { fill: var(--text-muted); font-size: 9px; font-variant-numeric: tabular-nums; }
+.histogram-spot { stroke: var(--text); stroke-width: 1; stroke-dasharray: 3 4; opacity: .65; }
+.histogram-handle { cursor: ns-resize; outline: none; }
+.histogram-handle.lower { color: var(--lower); }
+.histogram-handle.upper { color: var(--upper); }
+.histogram-handle line { stroke: currentColor; stroke-width: 1.5; }
+.histogram-handle .histogram-grip { fill: var(--surface); stroke: currentColor; stroke-width: 1.5; }
+.histogram-handle text { fill: currentColor; font-size: 8px; font-weight: 700; pointer-events: none; }
+.histogram-handle:focus-visible .histogram-grip { stroke-width: 3; }
+.histogram-bounds { display: flex; justify-content: space-between; font-size: 11px; }
+.histogram-bounds span:first-child { color: var(--lower); }
+.histogram-bounds span:last-child { color: var(--upper); }
+
 .app {
   display: flex;
   flex-direction: column;
@@ -331,6 +353,23 @@
   margin-left: -1px;
   border-radius: 1px;
   background: var(--accent);
+}
+
+/* Aksi posisi tetap punya target sentuh yang terbaca pada panel 320 piksel.
+ * Rebalance mengubah seluruh range, jadi ia menempati satu baris sendiri;
+ * klaim dan tutup berbagi baris kedua. */
+.position-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--s2);
+}
+
+.position-actions button {
+  min-width: 0;
+}
+
+.position-actions-primary {
+  grid-column: 1 / -1;
 }
 
 /* Arah nilai pada kartu PnL. Warna datar tanpa latar, supaya angkanya tetap

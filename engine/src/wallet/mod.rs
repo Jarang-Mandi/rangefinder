@@ -60,16 +60,15 @@ pub struct WalletStatus {
 impl Wallet {
     pub fn open(dir: &Path, auto_lock_minutes: u64) -> Result<Self> {
         let path = dir.join("wallet.keystore.json");
-        let address = if path.exists() {
-            let file = read_keystore(&path)?;
-            Some(
-                file.address
-                    .parse::<Address>()
-                    .with_context(|| format!("alamat `{}` di keystore tidak valid", file.address))?,
-            )
-        } else {
-            None
-        };
+        let address =
+            if path.exists() {
+                let file = read_keystore(&path)?;
+                Some(file.address.parse::<Address>().with_context(|| {
+                    format!("alamat `{}` di keystore tidak valid", file.address)
+                })?)
+            } else {
+                None
+            };
 
         Ok(Self {
             path,
@@ -134,8 +133,8 @@ impl Wallet {
             }
         };
 
-        let signer =
-            PrivateKeySigner::from_bytes(&key).context("kunci privat tidak valid untuk secp256k1")?;
+        let signer = PrivateKeySigner::from_bytes(&key)
+            .context("kunci privat tidak valid untuk secp256k1")?;
         let address = signer.address();
 
         let file = keystore::encrypt(passphrase, key.as_slice(), &address.to_string())?;
@@ -232,7 +231,8 @@ mod tests {
     use super::*;
 
     fn dir_sementara(nama: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("rangefinder-test-{nama}-{}", std::process::id()));
+        let d =
+            std::env::temp_dir().join(format!("rangefinder-test-{nama}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d

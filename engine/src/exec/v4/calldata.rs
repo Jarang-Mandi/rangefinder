@@ -148,6 +148,80 @@ pub fn mint(req: &MintV4Request) -> Result<Bytes, CalldataV4Error> {
     ))
 }
 
+/// Tambah likuiditas ke NFT V4 yang sudah ada.
+pub fn increase_liquidity(
+    token_id: U256,
+    liquidity: u128,
+    amount0_max: u128,
+    amount1_max: u128,
+    currency0: Address,
+    currency1: Address,
+    deadline: U256,
+) -> Result<Bytes, CalldataV4Error> {
+    if liquidity == 0 {
+        return Err(CalldataV4Error::LikuiditasNol);
+    }
+    if amount0_max == 0 && amount1_max == 0 {
+        return Err(CalldataV4Error::BatasJumlahNol);
+    }
+    if deadline.is_zero() {
+        return Err(CalldataV4Error::DeadlineNol);
+    }
+    let aksi = vec![
+        actions::increase_liquidity(token_id, liquidity, amount0_max, amount1_max, Bytes::new()),
+        actions::settle_pair(currency0, currency1),
+    ];
+    let unlock = actions::unlock_data(&aksi).expect("increase selalu berpasangan dengan settle");
+    Ok(Bytes::from(
+        Pm::modifyLiquiditiesCall {
+            unlockData: unlock,
+            deadline,
+        }
+        .abi_encode(),
+    ))
+}
+
+/// Bakar NFT lama dan mint range baru dalam satu `modifyLiquidities`.
+pub fn rebalance_position(
+    old_token_id: U256,
+    amount0_min_ditarik: u128,
+    amount1_min_ditarik: u128,
+    new_position: &MintV4Request,
+) -> Result<Bytes, CalldataV4Error> {
+    new_position.validate()?;
+    let mint_new = MintPosition {
+        pool_key: new_position.pool_key.clone(),
+        tick_lower: new_position.tick_lower,
+        tick_upper: new_position.tick_upper,
+        liquidity: new_position.liquidity,
+        amount0_max: new_position.amount0_max,
+        amount1_max: new_position.amount1_max,
+        owner: new_position.owner,
+        hook_data: Bytes::new(),
+    };
+    let c0 = new_position.pool_key.currency0;
+    let c1 = new_position.pool_key.currency1;
+    let aksi = vec![
+        actions::burn_position(
+            old_token_id,
+            amount0_min_ditarik,
+            amount1_min_ditarik,
+            Bytes::new(),
+        ),
+        actions::take_pair(c0, c1, new_position.owner),
+        mint_new.encode(),
+        actions::settle_pair(c0, c1),
+    ];
+    let unlock = actions::unlock_data(&aksi).expect("rebalance menyelesaikan take dan settle");
+    Ok(Bytes::from(
+        Pm::modifyLiquiditiesCall {
+            unlockData: unlock,
+            deadline: new_position.deadline,
+        }
+        .abi_encode(),
+    ))
+}
+
 /// Ambil fee yang terkumpul tanpa menyentuh likuiditasnya.
 ///
 /// V4 tidak punya `collect`. Fee diambil dengan mengurangi likuiditas sebanyak
@@ -217,68 +291,76 @@ pub fn close_position(
     ))
 }
 
+use alloy::primitives::address;
+use alloy::primitives::aliases::{I24, U24};
+
+fn key() -> PoolKey {
+    PoolKey {
+        currency0: address!("5fc5360d0400a0fd4f2af552add042d716f1d168"),
+        currency1: address!("791e750fa8b2237288a6fe6c47ea81c50093449a"),
+        fee: U24::from(100_000u32),
+        tickSpacing: I24::try_from(1000i32).unwrap(),
+        hooks: Address::ZERO,
+    }
+}
+
+fn req() -> MintV4Request {
+    MintV4Request {
+        pool_key: key(),
+        tick_lower: 357_000,
+        tick_upper: 367_000,
+        liquidity: 14_279_001_511_288_904,
+        amount0_max: 100_000_000,
+        amount1_max: 0,
+        owner: address!("420ac1fcca78c4cdfed3216201216ed80e7b2680"),
+        deadline: U256::from(1_788_785_927u64),
+    }
+}
+
+/// Calldata apa adanya dari transaksi
+/// 0x92acbe0bc669fbdff06263646d45399825c1a398090fbe42e8530bde610f1ccd.
+const CALLDATA_ASLI: &str = concat!(
+    "dd46508f",
+    "0000000000000000000000000000000000000000000000000000000000000040",
+    "000000000000000000000000000000000000000000000000000000006a9eb507",
+    "0000000000000000000000000000000000000000000000000000000000000300",
+    "0000000000000000000000000000000000000000000000000000000000000040",
+    "0000000000000000000000000000000000000000000000000000000000000080",
+    "0000000000000000000000000000000000000000000000000000000000000002",
+    "020d000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000002",
+    "0000000000000000000000000000000000000000000000000000000000000040",
+    "0000000000000000000000000000000000000000000000000000000000000200",
+    "00000000000000000000000000000000000000000000000000000000000001a0",
+    "0000000000000000000000005fc5360d0400a0fd4f2af552add042d716f1d168",
+    "000000000000000000000000791e750fa8b2237288a6fe6c47ea81c50093449a",
+    "00000000000000000000000000000000000000000000000000000000000186a0",
+    "00000000000000000000000000000000000000000000000000000000000003e8",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000057288",
+    "0000000000000000000000000000000000000000000000000000000000059998",
+    "0000000000000000000000000000000000000000000000000032baad1cd3e048",
+    "0000000000000000000000000000000000000000000000000000000005f5e100",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "000000000000000000000000420ac1fcca78c4cdfed3216201216ed80e7b2680",
+    "0000000000000000000000000000000000000000000000000000000000000180",
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0000000000000000000000000000000000000000000000000000000000000040",
+    "0000000000000000000000005fc5360d0400a0fd4f2af552add042d716f1d168",
+    "000000000000000000000000791e750fa8b2237288a6fe6c47ea81c50093449a",
+);
+
+pub(crate) fn golden_matches() -> Result<(), String> {
+    if hex::encode(mint(&req()).map_err(|e| e.to_string())?) == CALLDATA_ASLI {
+        Ok(())
+    } else {
+        Err("calldata berbeda dari transaksi acuan".into())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy::primitives::address;
-    use alloy::primitives::aliases::{I24, U24};
-
-    fn key() -> PoolKey {
-        PoolKey {
-            currency0: address!("5fc5360d0400a0fd4f2af552add042d716f1d168"),
-            currency1: address!("791e750fa8b2237288a6fe6c47ea81c50093449a"),
-            fee: U24::from(100_000u32),
-            tickSpacing: I24::try_from(1000i32).unwrap(),
-            hooks: Address::ZERO,
-        }
-    }
-
-    fn req() -> MintV4Request {
-        MintV4Request {
-            pool_key: key(),
-            tick_lower: 357_000,
-            tick_upper: 367_000,
-            liquidity: 14_279_001_511_288_904,
-            amount0_max: 100_000_000,
-            amount1_max: 0,
-            owner: address!("420ac1fcca78c4cdfed3216201216ed80e7b2680"),
-            deadline: U256::from(1_788_785_927u64),
-        }
-    }
-
-    /// Calldata apa adanya dari transaksi
-    /// 0x92acbe0bc669fbdff06263646d45399825c1a398090fbe42e8530bde610f1ccd.
-    const CALLDATA_ASLI: &str = concat!(
-        "dd46508f",
-        "0000000000000000000000000000000000000000000000000000000000000040",
-        "000000000000000000000000000000000000000000000000000000006a9eb507",
-        "0000000000000000000000000000000000000000000000000000000000000300",
-        "0000000000000000000000000000000000000000000000000000000000000040",
-        "0000000000000000000000000000000000000000000000000000000000000080",
-        "0000000000000000000000000000000000000000000000000000000000000002",
-        "020d000000000000000000000000000000000000000000000000000000000000",
-        "0000000000000000000000000000000000000000000000000000000000000002",
-        "0000000000000000000000000000000000000000000000000000000000000040",
-        "0000000000000000000000000000000000000000000000000000000000000200",
-        "00000000000000000000000000000000000000000000000000000000000001a0",
-        "0000000000000000000000005fc5360d0400a0fd4f2af552add042d716f1d168",
-        "000000000000000000000000791e750fa8b2237288a6fe6c47ea81c50093449a",
-        "00000000000000000000000000000000000000000000000000000000000186a0",
-        "00000000000000000000000000000000000000000000000000000000000003e8",
-        "0000000000000000000000000000000000000000000000000000000000000000",
-        "0000000000000000000000000000000000000000000000000000000000057288",
-        "0000000000000000000000000000000000000000000000000000000000059998",
-        "0000000000000000000000000000000000000000000000000032baad1cd3e048",
-        "0000000000000000000000000000000000000000000000000000000005f5e100",
-        "0000000000000000000000000000000000000000000000000000000000000000",
-        "000000000000000000000000420ac1fcca78c4cdfed3216201216ed80e7b2680",
-        "0000000000000000000000000000000000000000000000000000000000000180",
-        "0000000000000000000000000000000000000000000000000000000000000000",
-        "0000000000000000000000000000000000000000000000000000000000000040",
-        "0000000000000000000000005fc5360d0400a0fd4f2af552add042d716f1d168",
-        "000000000000000000000000791e750fa8b2237288a6fe6c47ea81c50093449a",
-    );
-
     #[test]
     fn calldata_sama_persis_dengan_transaksi_sungguhan() {
         let hasil = mint(&req()).unwrap();
@@ -400,5 +482,28 @@ mod tests {
             hex.contains("0311000000000000000000000000000000000000000000000000000000000000"),
             "urutan aksi menutup posisi harus burn lalu take"
         );
+    }
+
+    #[test]
+    fn tambah_v4_memakai_increase_lalu_settle() {
+        let data = increase_liquidity(
+            U256::from(42u8),
+            100,
+            10,
+            20,
+            key().currency0,
+            key().currency1,
+            U256::from(1u8),
+        )
+        .unwrap();
+        let hex = hex::encode(data);
+        assert!(hex.contains("000d000000000000000000000000000000000000000000000000000000000000"));
+    }
+
+    #[test]
+    fn rebalance_v4_atomik_memakai_burn_take_mint_settle() {
+        let data = rebalance_position(U256::from(42u8), 9, 18, &req()).unwrap();
+        let hex = hex::encode(data);
+        assert!(hex.contains("0311020d00000000000000000000000000000000000000000000000000000000"));
     }
 }

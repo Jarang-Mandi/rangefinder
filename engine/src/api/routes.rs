@@ -38,7 +38,7 @@ pub async fn status(State(state): State<AppState>) -> Json<EngineStatus> {
 }
 
 pub async fn registry(State(state): State<AppState>) -> Json<super::protocol::RegistrySummary> {
-    Json(state.registry_summary())
+    Json(state.registry_summary().await)
 }
 
 #[derive(Deserialize)]
@@ -68,9 +68,8 @@ pub async fn wallet_create(
         None | Some("") => None,
         Some(hex_key) => {
             let cleaned = hex_key.strip_prefix("0x").unwrap_or(hex_key);
-            let bytes = hex::decode(cleaned).map_err(|_| {
-                EngineError::BadRequest("private_key bukan hex yang valid".into())
-            })?;
+            let bytes = hex::decode(cleaned)
+                .map_err(|_| EngineError::BadRequest("private_key bukan hex yang valid".into()))?;
             if bytes.len() != 32 {
                 return Err(EngineError::BadRequest(format!(
                     "private_key harus 32 byte, yang dikirim {} byte",

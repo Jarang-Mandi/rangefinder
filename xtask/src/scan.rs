@@ -158,12 +158,8 @@ pub async fn run(repo_root: &Path) -> Result<bool> {
     // bagian yang mengajari user membaca pasar, jadi ia tidak boleh dibuang
     // hanya karena tidak muat dalam satu baris.
     println!();
-    println!(
-        "  modal   kutipan yang dibutuhkan untuk menutup rentang yang harga lewati",
-    );
-    println!(
-        "  ?SIMBOL alamat kutipannya bukan yang ada di registry, simbol bisa ditiru",
-    );
+    println!("  modal   kutipan yang dibutuhkan untuk menutup rentang yang harga lewati",);
+    println!("  ?SIMBOL alamat kutipannya bukan yang ada di registry, simbol bisa ditiru",);
     println!(
         "  hasil   fee sepanjang jendela atas modal acuan {:.0} kutipan",
         kandidat::MODAL_ACUAN

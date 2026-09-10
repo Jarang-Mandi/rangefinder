@@ -182,10 +182,16 @@ pub async fn plan_open_v4<P: Provider>(
         ),
     ));
 
+    if let Err(e) = crate::exec::golden::verify_embedded() {
+        gates.push(GateResult::gagal_publik("G3", "golden vector", e));
+        plan.gates = gates;
+        plan.warnings = warnings;
+        return plan;
+    }
     gates.push(GateResult::lolos_publik(
         "G3",
         "golden vector",
-        "terpenuhi saat build terhadap transaksi V4 sungguhan, lihat exec/v4/calldata.rs",
+        "builder cocok byte per byte dengan transaksi acuan tertanam",
     ));
 
     // ─── G4, simulasi ─────────────────────────────────────────────

@@ -53,6 +53,13 @@ export function tokenFromPath(pathname: string): string | null {
   return m ? m[2] : null;
 }
 
+/** Pastikan API iframe sudah berpindah ke token yang terlihat di URL. */
+export function symbolMatchesToken(symbol: unknown, token: string): boolean {
+  if (typeof symbol !== "string") return false;
+  const expected = token.toLowerCase();
+  return symbol.split("/").some(part => part.toLowerCase() === expected);
+}
+
 /**
  * Tingkat degradasi berdasarkan method yang benar benar ada.
  *

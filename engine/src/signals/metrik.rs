@@ -47,10 +47,7 @@ pub fn parkinson(bars: &[Bar], w: usize) -> Option<f64> {
         return None;
     }
     let jendela = &bars[bars.len() - w..];
-    let jumlah: f64 = jendela
-        .iter()
-        .map(|b| (b.high / b.low).ln().powi(2))
-        .sum();
+    let jumlah: f64 = jendela.iter().map(|b| (b.high / b.low).ln().powi(2)).sum();
     let pembagi = 4.0 * w as f64 * std::f64::consts::LN_2;
     Some((jumlah / pembagi).sqrt())
 }
@@ -215,7 +212,10 @@ pub fn point_of_control(bars: &[Bar], kotak: usize) -> Option<f64> {
         return None;
     }
     let terendah = bars.iter().map(|b| b.low).fold(f64::INFINITY, f64::min);
-    let tertinggi = bars.iter().map(|b| b.high).fold(f64::NEG_INFINITY, f64::max);
+    let tertinggi = bars
+        .iter()
+        .map(|b| b.high)
+        .fold(f64::NEG_INFINITY, f64::max);
     if !(terendah.is_finite() && tertinggi.is_finite()) || tertinggi <= terendah {
         return None;
     }
@@ -282,7 +282,10 @@ mod tests {
     #[test]
     fn efficiency_ratio_tren_mendekati_satu() {
         let er = efficiency_ratio(&tren_naik(50), 40).unwrap();
-        assert!(er > 0.9, "tren bersih seharusnya mendekati satu, dapat {er}");
+        assert!(
+            er > 0.9,
+            "tren bersih seharusnya mendekati satu, dapat {er}"
+        );
     }
 
     #[test]
@@ -305,7 +308,9 @@ mod tests {
     fn harga_diam_total_bukan_chop_sempurna() {
         // Nol pada Efficiency Ratio berarti chop sempurna, dan harga yang sama
         // sekali tidak bergerak bukan itu. Ia berarti datanya tidak berguna.
-        let diam: Vec<Bar> = (0..20).map(|i| bar(i, 100.0, 100.0, 100.0, 100.0, 1.0)).collect();
+        let diam: Vec<Bar> = (0..20)
+            .map(|i| bar(i, 100.0, 100.0, 100.0, 100.0, 1.0))
+            .collect();
         assert_eq!(efficiency_ratio(&diam, 10), None);
     }
 
@@ -327,7 +332,11 @@ mod tests {
     #[test]
     fn kanal_menyamping_sangat_terkurung() {
         let k = kanal(&menyamping(60), 50).unwrap();
-        assert!(k.containment > 0.9, "chop harus terkurung, dapat {}", k.containment);
+        assert!(
+            k.containment > 0.9,
+            "chop harus terkurung, dapat {}",
+            k.containment
+        );
         assert!(k.bandwidth < 0.05);
     }
 
@@ -335,7 +344,9 @@ mod tests {
     fn volume_z_tidak_memasukkan_bar_terakhir_ke_pembanding() {
         // Kalau bar terakhir ikut menaikkan rata ratanya sendiri, lonjakan besar
         // akan terlihat lebih kecil daripada yang sebenarnya.
-        let mut bars: Vec<Bar> = (0..30).map(|i| bar(i, 100.0, 101.0, 99.0, 100.0, 10.0)).collect();
+        let mut bars: Vec<Bar> = (0..30)
+            .map(|i| bar(i, 100.0, 101.0, 99.0, 100.0, 10.0))
+            .collect();
         bars.push(bar(30, 100.0, 101.0, 99.0, 100.0, 100.0));
         // Pembandingnya seragam, jadi simpangannya nol dan hasilnya None.
         assert_eq!(volume_z(&bars, 20), None);
@@ -346,7 +357,10 @@ mod tests {
             .collect();
         bars2.push(bar(30, 100.0, 101.0, 99.0, 100.0, 100.0));
         let z = volume_z(&bars2, 20).unwrap();
-        assert!(z > 50.0, "lonjakan sepuluh kali harus terbaca besar, dapat {z}");
+        assert!(
+            z > 50.0,
+            "lonjakan sepuluh kali harus terbaca besar, dapat {z}"
+        );
     }
 
     #[test]

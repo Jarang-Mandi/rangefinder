@@ -292,18 +292,18 @@ pub async fn pindai<P: Provider>(provider: &P, registry: &Registry) -> Result<Ha
     })
 }
 
-/// Sisi mana dari sebuah kandidat yang merupakan memecoin, bukan kutipan.
-///
-/// Mengembalikan `None` kalau kedua sisinya kutipan yang dikenal, misalnya pool
-/// stablecoin terhadap ETH. Pool seperti itu bukan sasaran alat ini.
+/// Satu definisi untuk ETH native dan alamat token kutipan dari registry.
+pub fn kutipan_dikenal(a: &str, registry: &Registry) -> bool {
+    a.eq_ignore_ascii_case(super::ZERO_ADDRESS)
+        || registry
+            .tokens
+            .values()
+            .any(|e| e.address.eq_ignore_ascii_case(a))
+}
+
+/// Sisi memecoin, atau None untuk pasangan dua kutipan/dua token tak dikenal.
 pub fn sisi_memecoin(k: &Kandidat, registry: &Registry) -> Option<String> {
-    let kutipan = |a: &str| -> bool {
-        a.eq_ignore_ascii_case(super::ZERO_ADDRESS)
-            || registry
-                .tokens
-                .values()
-                .any(|e| e.address.eq_ignore_ascii_case(a))
-    };
+    let kutipan = |a: &str| kutipan_dikenal(a, registry);
 
     match (kutipan(&k.token0), kutipan(&k.token1)) {
         (true, false) => Some(k.token1.clone()),
@@ -364,8 +364,14 @@ mod tests {
             .expect("usdg ada di chain.toml");
         let meme = "0xdc4dd8839f02f2242e9552fe4652635fb7f95cc6";
 
-        assert_eq!(sisi_memecoin(&kandidat(&usdg, meme), &r).as_deref(), Some(meme));
-        assert_eq!(sisi_memecoin(&kandidat(meme, &usdg), &r).as_deref(), Some(meme));
+        assert_eq!(
+            sisi_memecoin(&kandidat(&usdg, meme), &r).as_deref(),
+            Some(meme)
+        );
+        assert_eq!(
+            sisi_memecoin(&kandidat(meme, &usdg), &r).as_deref(),
+            Some(meme)
+        );
     }
 
     #[test]
@@ -383,16 +389,16 @@ mod tests {
         // Pool stablecoin terhadap ETH bukan yang dicari alat ini.
         let r = registry_uji();
         let usdg = r.tokens.get("usdg").map(|e| e.address.clone()).unwrap();
-        assert_eq!(sisi_memecoin(&kandidat(super::super::ZERO_ADDRESS, &usdg), &r), None);
+        assert_eq!(
+            sisi_memecoin(&kandidat(super::super::ZERO_ADDRESS, &usdg), &r),
+            None
+        );
     }
 
     #[test]
     fn pool_dua_memecoin_tidak_bisa_dinilai() {
         // Tidak ada satuan yang berarti untuk menilai hasilnya.
         let r = registry_uji();
-        assert_eq!(
-            sisi_memecoin(&kandidat("0xaaa1", "0xbbb2"), &r),
-            None
-        );
+        assert_eq!(sisi_memecoin(&kandidat("0xaaa1", "0xbbb2"), &r), None);
     }
 }

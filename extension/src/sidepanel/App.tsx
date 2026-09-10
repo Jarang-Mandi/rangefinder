@@ -19,6 +19,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
+import { chartMatches, robinhoodToken } from "../shared/chart-messages";
 import {
   EngineClient,
   type ConnectionState,
@@ -28,6 +29,8 @@ import {
   gmgnTokenUrl,
   isEvmAddress,
   type EngineStatus,
+  type Deposit,
+  type ActionInput,
   type ActionPlanView,
   type AlertLevel,
   type BarisScan,
@@ -37,10 +40,10 @@ import {
   type JenisAksi,
   type Kriteria,
   type OpenPlanView,
-  type Pita,
   type PoolInfo,
   type PositionsView,
   type Posisi,
+  type PosisiTertutup,
   type PenilaianHook,
   type SaranPenempatan,
   type ScanView,
@@ -51,7 +54,10 @@ import {
   type RangeBound,
   type RangeView,
   type TokenState,
+  type TransactionsView,
 } from "../shared/protocol";
+
+import { Histogram } from "./Histogram";
 
 const TOKEN_KEY = "rangefinder.pairingToken";
 
@@ -86,9 +92,11 @@ export function App() {
   const [rangeView, setRangeView] = useState<RangeView | null>(null);
   const [openPlan, setOpenPlan] = useState<OpenPlanView | null>(null);
   const [sendResult, setSendResult] = useState<SendResultView | null>(null);
+  const [actionResult, setActionResult] = useState<SendResultView | null>(null);
   /** Menunggu jawaban engine. Mencegah tombol ditekan dua kali. */
   const [execBusy, setExecBusy] = useState(false);
   const [positions, setPositions] = useState<PositionsView | null>(null);
+  const [transactions, setTransactions] = useState<TransactionsView | null>(null);
   const [posBusy, setPosBusy] = useState(false);
   const [actionPlan, setActionPlan] = useState<ActionPlanView | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
@@ -148,6 +156,16 @@ export function App() {
   const gmgnTabRef = useRef<number | null>(null);
   /** Alamat token yang sedang aktif, dipakai saat meneruskan harga chart. */
   const addressRef = useRef<string | null>(null);
+  /** Pool tujuan untuk menolak hasil async dari pilihan sebelumnya. */
+  const selectedPoolRef = useRef("");
+  /**
+   * Nomor pemeriksaan halaman token yang paling baru.
+   *
+   * `chrome.tabs.query` bersifat async. Tanpa nomor ini, hasil pemeriksaan tab
+   * lama bisa selesai sesudah navigasi yang lebih baru lalu mengganti token
+   * aktif di panel.
+   */
+  const tokenPageRevisionRef = useRef(0);
   /** Garis terakhir yang dikirim, supaya tidak menggambar ulang tanpa alasan. */
   const drawnRef = useRef<string>("");
 
@@ -169,6 +187,7 @@ export function App() {
       },
       onStatus: setStatus,
       onTokenState: (t) => {
+        if (t.address.toLowerCase() !== addressRef.current?.toLowerCase()) return;
         // Satu token bisa mengirim beberapa kali: tahap cepat dari cache,
         // tahap penuh yang membawa statistik pool, lalu susulan saldo.
         // Mereset range pada setiap kiriman akan menghapus garis yang sudah
@@ -178,6 +197,7 @@ export function App() {
         const alamatBaru = (t.address ?? "").toLowerCase();
         const tokenBerganti = alamatBaru !== alamatTerakhirRef.current;
         alamatTerakhirRef.current = alamatBaru;
+        selectedPoolRef.current = t.selected_pool_id ?? "";
 
         setTokenState(t);
         setTokenLoading(false);
@@ -193,6 +213,7 @@ export function App() {
         }
       },
       onRangeView: (v) => {
+        if (!selectedPoolRef.current || v.pool_id !== selectedPoolRef.current) return;
         setRangeView((lama) => {
           // Distribusi diminta sekali per pool, bukan setiap geseran garis.
           // Bentuk pool tidak berubah secepat harganya, dan pembacaannya butuh
@@ -204,12 +225,18 @@ export function App() {
           return v;
         });
       },
-      onSignals: setSignals,
+      onSignals: (v) => {
+        if (v.address.toLowerCase() !== addressRef.current?.toLowerCase()) return;
+        setSignals(v);
+      },
       onScan: (v) => {
         setScan(v);
         setScanBusy(false);
       },
-      onDepth: setDepth,
+      onDepth: (v) => {
+        if (!selectedPoolRef.current || v.pool_id !== selectedPoolRef.current) return;
+        setDepth(v);
+      },
       onActionPlan: (p) => {
         setActionPlan(p);
         setActionBusy(false);
@@ -218,6 +245,7 @@ export function App() {
         setPositions(v);
         setPosBusy(false);
       },
+      onTransactions: setTransactions,
       onOpenPlan: (plan) => {
         setOpenPlan(plan);
         setExecBusy(false);
@@ -225,19 +253,24 @@ export function App() {
       },
       onSendResult: (result) => {
         setSendResult(result);
+        if (result.kind === "action") setActionResult(result);
         setExecBusy(false);
+        setActionBusy(false);
         // Rencana sudah dipakai engine dan dikeluarkan dari slotnya, jadi
         // menampilkannya lagi akan menawarkan tombol yang pasti ditolak.
         if (result.kind === "open") setOpenPlan(null);
+        if (result.kind === "action") setActionPlan(null);
         // Setelah zap, saldo berubah sehingga jumlah pada rencana lama tidak
         // lagi tepat. Rencananya dibuang supaya user menyusun ulang.
         if (result.kind === "zap" && result.status === "sukses") setOpenPlan(null);
         if (result.kind === "action") setActionPlan(null);
+        clientRef.current?.getTransactions();
       },
       onAlert: (level, code, message) => {
         // Kegagalan eksekusi datang sebagai alert, dan tanpa ini tombolnya
         // akan tetap mati sesudahnya.
         setExecBusy(false);
+        setActionBusy(false);
         // Toast di halaman gmgn menangani kejadian yang layak mengganggu user,
         // sesuai PRD 3.7. Yang di sini adalah jawaban langsung atas aksi yang
         // baru saja user tekan, dan itu harus terlihat di tempat ia menekannya.
@@ -263,19 +296,28 @@ export function App() {
   const loadToken = useCallback((address: string, navigate: boolean) => {
     const clean = address.trim();
     if (!isEvmAddress(clean)) return;
+    if (!navigate && clean.toLowerCase() === addressRef.current?.toLowerCase()) return;
 
+    // Membatalkan pemeriksaan `token_page` yang masih menunggu hasil tabs API.
+    tokenPageRevisionRef.current += 1;
     setTokenLoading(true);
     setTokenState(null);
     setRangeView(null);
+    selectedPoolRef.current = "";
+    setOpenPlan(null);
+    setSignals(null);
     drawnRef.current = "";
     addressRef.current = clean;
     clientRef.current?.subscribeToken(clean);
 
     if (navigate) {
+      gmgnTabRef.current = null;
       void chrome.runtime.sendMessage({
         target: "navigate-gmgn",
         url: gmgnTokenUrl(clean),
-      });
+      }).then(result => {
+        if (addressRef.current === clean && typeof result?.tabId === "number") gmgnTabRef.current = result.tabId;
+      }).catch(() => {});
     }
   }, []);
 
@@ -286,17 +328,35 @@ export function App() {
    * melaporkan harga terakhirnya, dan user menggeser garis.
    */
   useEffect(() => {
-    const listener = (message: unknown) => {
+    const listener = (message: unknown, sender: chrome.runtime.MessageSender) => {
       const m = message as Record<string, unknown> | null;
-      if (!m || m.target !== "sidepanel") return;
-
-      if (typeof m.tabId === "number") gmgnTabRef.current = m.tabId;
+      if (!m || m.target !== "sidepanel" || sender.tab || sender.id !== chrome.runtime.id) return;
+      if (m.kind !== "token_page" && !chartMatches(m, gmgnTabRef.current, addressRef.current)) return;
 
       switch (m.kind) {
         case "token_page": {
           const url = typeof m.url === "string" ? m.url : "";
-          const found = url.match(/\/token\/(0x[a-fA-F0-9]{40})/);
-          if (found) loadToken(found[1], false);
+          const found = robinhoodToken(url);
+          if (found && typeof m.tabId === "number") {
+            const tabId = m.tabId;
+            const revision = ++tokenPageRevisionRef.current;
+            void chrome.tabs
+              .query({ active: true, currentWindow: true })
+              .then(([activeTab]) => {
+                if (revision !== tokenPageRevisionRef.current) return;
+                if (activeTab?.id !== tabId) return;
+
+                const activeToken = robinhoodToken(activeTab.url ?? "");
+                if (activeToken?.toLowerCase() !== found.toLowerCase()) return;
+
+                gmgnTabRef.current = tabId;
+                loadToken(found, false);
+              })
+              .catch(() => {
+                // Ketika tab ditutup di tengah pemeriksaan, halaman itu memang
+                // tidak boleh lagi menjadi sumber token panel.
+              });
+          }
           break;
         }
         case "chart_bars": {
@@ -390,6 +450,8 @@ export function App() {
    * Mencarinya sendiri membuat panel pulih tanpa user perlu tahu apa apa.
    */
   const gambar = useCallback(async (lowerPrice: number, upperPrice: number) => {
+    const expectedToken = addressRef.current?.toLowerCase();
+    if (!expectedToken) return;
     let tabId = gmgnTabRef.current;
     if (tabId === null) {
       try {
@@ -398,8 +460,8 @@ export function App() {
         // halaman gmgn sekaligus, menggambar di tab yang tidak dilihat akan
         // terlihat seperti garisnya tidak pernah muncul.
         const ketemu =
-          tabs.find((t) => t.active && typeof t.id === "number") ??
-          tabs.find((t) => typeof t.id === "number");
+          tabs.find((t) => t.active && typeof t.id === "number" && robinhoodToken(t.url ?? "") === addressRef.current?.toLowerCase()) ??
+          tabs.find((t) => typeof t.id === "number" && robinhoodToken(t.url ?? "") === addressRef.current?.toLowerCase());
         if (ketemu?.id !== undefined) {
           tabId = ketemu.id;
           gmgnTabRef.current = tabId;
@@ -408,12 +470,13 @@ export function App() {
         // Izin tab tidak ada atau tab tidak bisa dibaca. Bukan kondisi error.
       }
     }
-    if (tabId === null) return;
+    if (tabId === null || addressRef.current?.toLowerCase() !== expectedToken) return;
 
     try {
       await chrome.tabs.sendMessage(tabId, {
         target: "gmgn-chart",
         kind: "draw_lines",
+        token: expectedToken,
         upperPrice,
         lowerPrice,
       });
@@ -451,7 +514,10 @@ export function App() {
           <button
             key={t.id}
             class={`tab${tab === t.id ? " active" : ""}`}
-            onClick={() => setTab(t.id)}
+            onClick={() => {
+              setTab(t.id);
+              if (t.id === "pnl") clientRef.current?.getTransactions();
+            }}
           >
             {t.label}
           </button>
@@ -480,29 +546,61 @@ export function App() {
             onLoadToken={loadToken}
             rangeView={rangeView}
             depth={depth}
-            onSetRange={(lo, hi) => clientRef.current?.setRange(lo, hi)}
-            onSetFullRange={() => clientRef.current?.setFullRange()}
+            onSetRange={(lo, hi) => {
+              setOpenPlan(null);
+              clientRef.current?.invalidatePlan();
+              clientRef.current?.setRange(lo, hi);
+            }}
+            onSetFullRange={() => {
+              setOpenPlan(null);
+              clientRef.current?.invalidatePlan();
+              clientRef.current?.setFullRange();
+            }}
             onMuatDepth={() => clientRef.current?.getDepth()}
-            onSelectPool={(id) => clientRef.current?.selectPool(id)}
-            onSelectQuote={(q) => clientRef.current?.selectQuote(q)}
+            onSelectPool={(id) => {
+              selectedPoolRef.current = id;
+              setRangeView(null);
+              setDepth(null);
+              setOpenPlan(null);
+              clientRef.current?.invalidatePlan();
+              clientRef.current?.selectPool(id);
+            }}
+            onSelectQuote={(q) => {
+              selectedPoolRef.current = "";
+              setRangeView(null);
+              setDepth(null);
+              setOpenPlan(null);
+              clientRef.current?.invalidatePlan();
+              clientRef.current?.selectQuote(q);
+            }}
             openPlan={openPlan}
             sendResult={sendResult}
             execBusy={execBusy}
-            onQuoteRange={(usd) => {
+            onQuoteRange={(deposit) => {
+              setOpenPlan(null);
+              setSendResult(null);
+              if (!deposit) {
+                clientRef.current?.invalidatePlan();
+                setExecBusy(false);
+                return;
+              }
               setExecBusy(true);
-              clientRef.current?.quoteRange(usd);
+              clientRef.current?.quoteRange(deposit);
             }}
             onApproveToken={(t) => {
+              if (!openPlan) return;
               setExecBusy(true);
-              clientRef.current?.approveToken(t);
+              clientRef.current?.approveToken(openPlan.plan_id, t);
             }}
             onSwapZap={() => {
+              if (!openPlan) return;
               setExecBusy(true);
-              clientRef.current?.swapZap();
+              clientRef.current?.swapZap(openPlan.plan_id);
             }}
             onOpenPosition={() => {
+              if (!openPlan) return;
               setExecBusy(true);
-              clientRef.current?.openPosition();
+              clientRef.current?.openPosition(openPlan.plan_id);
             }}
           />
         ) : tab === "signals" ? (
@@ -526,10 +624,12 @@ export function App() {
         ) : tab === "pnl" ? (
           <PnlTab
             view={positions}
+            transactions={transactions}
             busy={posBusy}
             onMuat={() => {
               setPosBusy(true);
               clientRef.current?.getPositions();
+              clientRef.current?.getTransactions();
             }}
           />
         ) : tab === "settings" ? (
@@ -544,18 +644,26 @@ export function App() {
             busy={posBusy}
             plan={actionPlan}
             actionBusy={actionBusy}
+            result={actionResult}
             onMuat={() => {
               setPosBusy(true);
               clientRef.current?.getPositions();
             }}
-            onPlanAction={(id, a) => {
-              setActionBusy(true);
+            onPlanAction={(id, a, input) => {
               setActionPlan(null);
-              clientRef.current?.planAction(id, a);
+              setActionResult(null);
+              setActionBusy(true);
+              clientRef.current?.planAction(id, a, input);
+            }}
+            onApproveAction={(stepId) => {
+              if (!actionPlan) return;
+              setActionBusy(true);
+              clientRef.current?.approveToken(actionPlan.plan_id, stepId);
             }}
             onExecuteAction={() => {
+              if (!actionPlan) return;
               setActionBusy(true);
-              clientRef.current?.executeAction();
+              clientRef.current?.executeAction(actionPlan.plan_id);
             }}
           />
         ) : (
@@ -673,7 +781,7 @@ function RangeTab({
   openPlan: OpenPlanView | null;
   sendResult: SendResultView | null;
   execBusy: boolean;
-  onQuoteRange: (sizeUsd: number) => void;
+  onQuoteRange: (deposit: Deposit | null) => void;
   onApproveToken: (token: string) => void;
   onSwapZap: () => void;
   onOpenPosition: () => void;
@@ -1101,11 +1209,8 @@ const TANDA_KRITERIA: Record<Kriteria, string> = {
  * Penilaian hook beserta jalan keluarnya, PRD 5.4.
  *
  * KENAPA SETIAP KRITERIA DITAMPILKAN, BUKAN HANYA KESIMPULANNYA
- * Dua dari lima syarat belum bisa diukur alat ini, sehingga tidak ada hook yang
- * lolos otomatis. Kalau yang tampil hanya kesimpulannya, setiap hook terlihat
- * sama buruknya, dan user tidak punya dasar untuk memutuskan. Yang membedakan
- * hook yang dipakai ribuan pool selama setahun dari hook yang dibuat kemarin
- * justru ada di rinciannya.
+ * Lima syarat diukur dari rantai. Pemindaian histori berlangsung bertahap,
+ * sehingga angka TVL dan LP dapat berupa batas bawah sampai cakupannya lengkap.
  *
  * `belum diukur` sengaja ditulis berbeda dari `tidak`. Yang pertama berarti kita
  * belum tahu, yang kedua berarti kita sudah tahu dan jawabannya tidak.
@@ -1135,6 +1240,8 @@ function HookPanel({
           <span class="hook-fakta">
             {h.jumlah_pool} pool
             {h.umur_hari === null ? "" : `, ${h.umur_hari.toFixed(0)} hari`}
+            {h.tvl_usd === null ? "" : `, $${ringkas(h.tvl_usd)} TVL`}
+            {h.lp_unik === null ? "" : `, ${h.lp_unik} LP`}
           </span>
         )}
       </div>
@@ -1149,9 +1256,9 @@ function HookPanel({
 
       {lengkap ? null : (
         <p class="scan-alasan">
-          Sejarah rantai belum selesai dipindai, jadi jumlah pool dan umur di
-          atas adalah batas bawah: angkanya hanya bisa naik, tidak pernah turun.
-          Pindai lagi beberapa kali dan keduanya akan mengendap.
+          Sejarah pool dan posisi belum selesai dipindai. Angka yang sudah
+          terlihat adalah batas bawah dan hanya bisa bertambah. Pindai lagi
+          beberapa kali sampai seluruh kriteria mengendap.
         </p>
       )}
 
@@ -1161,12 +1268,17 @@ function HookPanel({
           dibaca. Ini penolakan mutlak dan tidak bisa disetujui, karena kode yang
           diperiksa sekarang bukan kode yang akan berjalan nanti.
         </p>
+      ) : h.lolos_otomatis ? (
+        <p class="scan-alasan">
+          Kelima kriteria lolos. Hook ini masuk allowlist otomatis selama 24
+          jam dan akan diperiksa ulang pada pemindaian berikutnya.
+        </p>
       ) : (
         <>
           <p class="scan-alasan">
-            TVL dan jumlah LP unik belum bisa diukur alat ini, jadi hook ini tidak
-            bisa lolos otomatis. Anda tetap boleh memakainya sebagai pilihan sadar,
-            dan persetujuannya dicatat beserta angka di atas.
+            Seluruh kriteria harus lolos agar hook disetujui otomatis. Anda tetap
+            boleh memakainya sebagai pilihan sadar, dan persetujuannya dicatat
+            beserta hasil pengukuran di atas.
           </p>
           <button class="toggle" onClick={() => onSetujui(h.hook)}>
             setujui hook ini
@@ -1491,13 +1603,16 @@ function BarisMetrik({ nama, nilai, ket }: { nama: string; nilai: string; ket: s
  */
 function PnlTab({
   view,
+  transactions,
   busy,
   onMuat,
 }: {
   view: PositionsView | null;
+  transactions: TransactionsView | null;
   busy: boolean;
   onMuat: () => void;
 }) {
+  const [versionFilter, setVersionFilter] = useState("all");
   if (!view) {
     return (
       <div class="stack">
@@ -1518,13 +1633,39 @@ function PnlTab({
             {busy ? "Membaca rantai" : "Muat posisi"}
           </button>
         </section>
+        <TransactionHistory view={transactions} />
       </div>
     );
   }
 
-  const r = view.ringkasan;
-  const berhasil = view.positions.filter((p) => p.pnl !== null);
-  const tanpaSatuan = view.positions.length - berhasil.length;
+  const versions = Array.from(
+    new Set(Object.values(view.learning.position_versions)),
+  ).sort();
+  const selectedVersion =
+    versionFilter === "all" || versions.includes(versionFilter)
+      ? versionFilter
+      : "all";
+  const milikVersi = (positionId: string) =>
+    selectedVersion === "all" ||
+    view.learning.position_versions[positionId.toLowerCase()] === selectedVersion;
+  const r =
+    selectedVersion === "all"
+      ? view.ringkasan
+      : view.learning.summaries.find((item) => item.version === selectedVersion)
+          ?.summary ?? {
+            jumlah: 0,
+            total_net: null,
+            total_fee: null,
+            total_biaya: null,
+            currencies: [],
+            win_rate_bps: null,
+            perkiraan: 0,
+          };
+  const posisiTerlihat = view.positions.filter((p) => milikVersi(p.position_id));
+  const tertutupTerlihat = view.tertutup.filter((p) => milikVersi(p.position_id));
+  const berhasil = posisiTerlihat.filter((p) => p.pnl !== null);
+  const belumDinilai =
+    posisiTerlihat.length - berhasil.length + tertutupTerlihat.filter((p) => p.pnl === null).length;
 
   return (
     <div class="stack">
@@ -1534,37 +1675,58 @@ function PnlTab({
           <span class="chip">{r.jumlah} posisi</span>
         </div>
 
+        <label class="field" style="margin-top: var(--s2)">
+          <span>Versi kalibrasi</span>
+          <select
+            value={selectedVersion}
+            onChange={(event) => setVersionFilter(event.currentTarget.value)}
+          >
+            <option value="all">Semua versi</option>
+            {versions.map((version) => (
+              <option value={version} key={version}>{version}</option>
+            ))}
+          </select>
+        </label>
+
+        <p class="hint">
+          {view.learning.closed_records} dari {view.learning.records} rekaman
+          self-improvement sudah memiliki hasil penutupan.
+        </p>
+
         <div class="stack" style="margin-top: var(--s2)">
-          <div class="row">
-            <span class="label">Net</span>
-            <span class={`value num ${r.total_net >= 0 ? "naik" : "turun"}`}>
-              {angka(r.total_net)}
-            </span>
-          </div>
-          <div class="row">
-            <span class="label">Fee diperoleh</span>
-            <span class="value num">{angka(r.total_fee)}</span>
-          </div>
-          <div class="row">
-            <span class="label">Total biaya</span>
-            <span class="value num">{angka(r.total_biaya)}</span>
-          </div>
+          {r.currencies.map(c => (
+            <div class="stack" key={c.currency.id}>
+              <div class="row">
+                <span class="label">Net {c.currency.symbol}</span>
+                <span class={`value num ${c.total_net == null ? "" : c.total_net >= 0 ? "naik" : "turun"}`}>{angka(c.total_net)}</span>
+              </div>
+              <div class="row">
+                <span class="label">Fee {c.currency.symbol}</span>
+                <span class="value num">{angka(c.total_fee)}</span>
+              </div>
+              <div class="row">
+                <span class="label">Biaya {c.currency.symbol}</span>
+                <span class="value num">{angka(c.total_biaya)}</span>
+              </div>
+            </div>
+          ))}
           <div class="row">
             <span class="label">Win rate</span>
-            <span class="value num">{(r.win_rate_bps / 100).toFixed(1)}%</span>
+            <span class="value num">{r.win_rate_bps == null ? "Belum lengkap" : `${(r.win_rate_bps / 100).toFixed(1)}%`}</span>
           </div>
         </div>
 
         {r.perkiraan > 0 ? (
           <p class="hint">
-            {r.perkiraan} dari {r.jumlah} perkiraan: dibuka di luar Rangefinder,
-            jadi impermanent loss-nya tidak tercatat.
+            {r.perkiraan} dari {r.jumlah} posisi belum memiliki catatan modal, fee,
+            atau biaya lengkap. Net menunggu rekonsiliasi.
           </p>
         ) : null}
 
-        {tanpaSatuan > 0 ? (
+        {belumDinilai > 0 ? (
           <p class="hint">
-            {tanpaSatuan} posisi tanpa satuan: kedua sisinya memecoin.
+            {belumDinilai} posisi belum dapat dinilai karena satuan atau bukti
+            akuntansinya belum lengkap.
           </p>
         ) : null}
 
@@ -1579,9 +1741,111 @@ function PnlTab({
       </section>
 
       {berhasil.map((p) => (
-        <PnlCard key={`${p.version}:${p.token_id}`} pos={p} />
+        <PnlCard key={p.position_id} pos={p} />
       ))}
+      {tertutupTerlihat.map((p) => (
+        <ClosedPnlCard key={p.position_id} pos={p} />
+      ))}
+      <TransactionHistory view={transactions} />
     </div>
+  );
+}
+
+function ClosedPnlCard({ pos }: { pos: PosisiTertutup }) {
+  const h = pos.pnl;
+  return (
+    <section class="card">
+      <div class="section-title">
+        <h2>Posisi tertutup · {shortAddress(pos.position_id)}</h2>
+        <span class="chip">{h?.perkiraan ? "perkiraan" : h ? "tercatat" : "belum lengkap"}</span>
+      </div>
+      <p class="muted" style="margin: var(--s2) 0 0">
+        {new Date(pos.ditutup_pada).toLocaleString("id-ID")} · tx {shortAddress(pos.tx_hash)}
+      </p>
+      <div class="row" style="margin-top: var(--s2)">
+        <span class="label">Diterima token0 / token1</span>
+        <span class="value num">{pos.diterima0 || "?"} / {pos.diterima1 || "?"}</span>
+      </div>
+      {h ? (
+        <div class="stack" style="margin-top: var(--s2)">
+          <div class="row">
+            <span class="label">Fee {h.currency.symbol}</span>
+            <span class="value num naik">{angka(h.fee)}</span>
+          </div>
+          <div class="row">
+            <span class="label">Impermanent loss</span>
+            <span class="value num turun">{angka(-h.impermanent_loss)}</span>
+          </div>
+          <div class="row">
+            <span class="label">Gas tercatat</span>
+            <span class="value num turun">{angka(h.gas == null ? null : -h.gas)}</span>
+          </div>
+          <div class="row">
+            <span class="label">Slippage zap</span>
+            <span class="value num turun">{angka(h.slippage == null ? null : -h.slippage)}</span>
+          </div>
+          <div class="row pnl-net">
+            <span class="label">Net</span>
+            <span class={`value num ${h.net == null ? "" : h.net >= 0 ? "naik" : "turun"}`}>{angka(h.net)}</span>
+          </div>
+        </div>
+      ) : null}
+      {pos.error ? <p class="hint">{pos.error}</p> : null}
+    </section>
+  );
+}
+
+function TransactionHistory({ view }: { view: TransactionsView | null }) {
+  return (
+    <section class="card">
+      <div class="section-title">
+        <h2>Jurnal transaksi</h2>
+        <span class="chip">{view?.items.length ?? 0}</span>
+      </div>
+      {view?.error ? <p class="hint">{view.error}</p> : null}
+      {!view ? (
+        <p class="muted" style="margin: var(--s2) 0 0">Belum dimuat.</p>
+      ) : view.items.length === 0 ? (
+        <p class="muted" style="margin: var(--s2) 0 0">Belum ada transaksi yang dicatat.</p>
+      ) : (
+        <div class="stack" style="margin-top: var(--s2)">
+          {view.items.map((item) => {
+            const nada = item.status === "succeeded"
+              ? "ok"
+              : item.status === "reverted"
+                ? "bad"
+                : "warn";
+            return (
+              <div class="stack" key={item.tx_hash}>
+                <div class="row">
+                  <span class="label">
+                    <span class={`dot ${nada}`} /> {item.operation}
+                  </span>
+                  <span class="value num">{shortAddress(item.tx_hash)}</span>
+                </div>
+                <div class="row">
+                  <span class="label">Status · nonce {item.nonce}</span>
+                  <span class="value">{item.status}{item.confirmed ? " · final" : ""}</span>
+                </div>
+                {item.gas_used !== null ? (
+                  <div class="row">
+                    <span class="label">Gas terpakai</span>
+                    <span class="value num">{item.gas_used.toLocaleString("id-ID")}</span>
+                  </div>
+                ) : null}
+                {item.received ? (
+                  <div class="row">
+                    <span class="label">Diterima token0 / token1</span>
+                    <span class="value num">{item.received.amount0} / {item.received.amount1}</span>
+                  </div>
+                ) : null}
+                {item.error ? <p class="hint">{item.error}</p> : null}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -1593,10 +1857,10 @@ function PnlCard({ pos }: { pos: Posisi }) {
     <section class="card">
       <div class="section-title">
         <h2>
-          {pos.version.toUpperCase()} #{pos.token_id}
+          {pos.version.toUpperCase()} #{pos.token_id} · {h.currency.symbol}
         </h2>
         <span class="chip">
-          <span class={`dot ${h.net >= 0 ? "ok" : "bad"}`} />
+          <span class={`dot ${h.net == null ? "" : h.net >= 0 ? "ok" : "bad"}`} />
           {h.perkiraan ? "perkiraan" : "tercatat"}
         </span>
       </div>
@@ -1611,16 +1875,16 @@ function PnlCard({ pos }: { pos: Posisi }) {
           <span class="value num turun">{angka(-h.impermanent_loss)}</span>
         </div>
         <div class="row">
-          <span class="label">Gas</span>
-          <span class="value num turun">{angka(-h.gas)}</span>
+          <span class="label">Gas tercatat</span>
+          <span class="value num turun">{angka(h.gas == null ? null : -h.gas)}</span>
         </div>
         <div class="row">
           <span class="label">Slippage zap</span>
-          <span class="value num turun">{angka(-h.slippage)}</span>
+          <span class="value num turun">{angka(h.slippage == null ? null : -h.slippage)}</span>
         </div>
         <div class="row pnl-net">
           <span class="label">Net</span>
-          <span class={`value num ${h.net >= 0 ? "naik" : "turun"}`}>{angka(h.net)}</span>
+          <span class={`value num ${h.net == null ? "" : h.net >= 0 ? "naik" : "turun"}`}>{angka(h.net)}</span>
         </div>
       </div>
     </section>
@@ -1634,7 +1898,8 @@ function PnlCard({ pos }: { pos: Posisi }) {
  * stablecoin keduanya memang berdekatan, tapi menyebutnya dolar berarti
  * mengklaim ketepatan yang tidak kita punya.
  */
-function angka(v: number): string {
+function angka(v: number | null): string {
+  if (v == null) return "Belum diketahui";
   if (!Number.isFinite(v)) return "?";
   const tanda = v > 0 ? "+" : "";
   return `${tanda}${v.toLocaleString("id-ID", {
@@ -1660,16 +1925,20 @@ function PositionsTab({
   busy,
   plan,
   actionBusy,
+  result,
   onMuat,
   onPlanAction,
+  onApproveAction,
   onExecuteAction,
 }: {
   view: PositionsView | null;
   busy: boolean;
   plan: ActionPlanView | null;
   actionBusy: boolean;
+  result: SendResultView | null;
   onMuat: () => void;
-  onPlanAction: (tokenId: string, action: JenisAksi) => void;
+  onPlanAction: (tokenId: string, action: JenisAksi, input?: ActionInput) => void;
+  onApproveAction: (stepId: string) => void;
   onExecuteAction: () => void;
 }) {
   if (!view) {
@@ -1735,15 +2004,17 @@ function PositionsTab({
         >
           {busy ? "Membaca rantai" : "Muat ulang"}
         </button>
+        {result ? <SendResultRow result={result} /> : null}
       </section>
 
       {view.positions.map((p) => (
         <PositionCard
-          key={`${p.version}:${p.token_id}`}
+          key={p.position_id}
           pos={p}
-          plan={plan?.token_id === p.token_id ? plan : null}
+          plan={plan?.position_id === p.position_id ? plan : null}
           busy={actionBusy}
           onPlanAction={onPlanAction}
+          onApproveAction={onApproveAction}
           onExecuteAction={onExecuteAction}
         />
       ))}
@@ -1772,14 +2043,18 @@ function PositionCard({
   plan,
   busy,
   onPlanAction,
+  onApproveAction,
   onExecuteAction,
 }: {
   pos: Posisi;
   plan: ActionPlanView | null;
   busy: boolean;
-  onPlanAction: (tokenId: string, action: JenisAksi) => void;
+  onPlanAction: (tokenId: string, action: JenisAksi, input?: ActionInput) => void;
+  onApproveAction: (stepId: string) => void;
   onExecuteAction: () => void;
 }) {
+  const [amount0, setAmount0] = useState("");
+  const [amount1, setAmount1] = useState("");
   const porsi = porsiDalamRange(pos);
   const nada = pos.kosong ? "" : pos.in_range ? "ok" : "bad";
   const status = pos.kosong ? "kosong" : pos.in_range ? "di dalam" : "di luar";
@@ -1808,7 +2083,7 @@ function PositionCard({
         <div class="row">
           <span class="label">Tick</span>
           <span class="value num">
-            {pos.tick_lower} sampai {pos.tick_upper}
+            {pos.tick_lower} sampai {pos.tick_upper} · grid {pos.tick_spacing}
           </span>
         </div>
         <div class="row">
@@ -1828,28 +2103,90 @@ function PositionCard({
       ) : null}
 
       <div class="stack" style="margin-top: var(--s3)">
-        <div class="row" style="gap: var(--s2)">
+        <div class="setoran">
+          <div class="section-title">
+            <h3>Tambah ke range ini</h3>
+          </div>
+          <div class="kotak-setor">
+            <div class="kotak-atas">
+              <span class="kotak-nama">Token 0</span>
+              <span class="kotak-saldo num">{shortAddress(pos.token0)}</span>
+            </div>
+            <input
+              class="kotak-input num"
+              type="number"
+              min="0"
+              step="any"
+              placeholder="0"
+              value={amount0}
+              onInput={(event) => {
+                setAmount0((event.target as HTMLInputElement).value);
+              }}
+            />
+          </div>
+          <div class="kotak-setor">
+            <div class="kotak-atas">
+              <span class="kotak-nama">Token 1</span>
+              <span class="kotak-saldo num">{shortAddress(pos.token1)}</span>
+            </div>
+            <input
+              class="kotak-input num"
+              type="number"
+              min="0"
+              step="any"
+              placeholder="0"
+              value={amount1}
+              onInput={(event) => {
+                setAmount1((event.target as HTMLInputElement).value);
+              }}
+            />
+          </div>
           <button
             type="button"
-            style="flex: 1"
+            class="lebar"
+            disabled={busy || !(Number(amount0) > 0 || Number(amount1) > 0)}
+            onClick={() =>
+              onPlanAction(pos.position_id, "tambah_likuiditas", { amount0, amount1 })
+            }
+          >
+            Susun tambah likuiditas
+          </button>
+        </div>
+
+        <div class="position-actions">
+          <button
+            type="button"
+            class="position-actions-primary"
+            disabled={busy || pos.kosong || pos.tick_sekarang === null}
+            onClick={() => onPlanAction(pos.position_id, "rebalance")}
+          >
+            Rebalance
+          </button>
+          <button
+            type="button"
             disabled={busy || !punyaFee(pos)}
-            onClick={() => onPlanAction(pos.token_id, "klaim_fee")}
+            onClick={() => onPlanAction(pos.position_id, "klaim_fee")}
           >
             Klaim fee
           </button>
           <button
             type="button"
-            style="flex: 1"
             disabled={busy}
-            onClick={() => onPlanAction(pos.token_id, "tutup_posisi")}
+            onClick={() => onPlanAction(pos.position_id, "tutup_posisi")}
           >
             Tutup posisi
           </button>
         </div>
 
-        {plan ? <ActionPlanCard plan={plan} busy={busy} onKirim={onExecuteAction} /> : null}
+        {plan ? (
+          <ActionPlanCard
+            plan={plan}
+            busy={busy}
+            onApprove={onApproveAction}
+            onKirim={onExecuteAction}
+          />
+        ) : null}
       </div>
-
     </section>
   );
 }
@@ -1864,10 +2201,12 @@ function PositionCard({
 function ActionPlanCard({
   plan,
   busy,
+  onApprove,
   onKirim,
 }: {
   plan: ActionPlanView;
   busy: boolean;
+  onApprove: (stepId: string) => void;
   onKirim: () => void;
 }) {
   return (
@@ -1884,6 +2223,41 @@ function ActionPlanCard({
         <span class="label">Gas perkiraan</span>
         <span class="value num">{plan.gas_estimate.toLocaleString("id-ID")}</span>
       </div>
+
+      {plan.amounts ? (
+        <div class="stack">
+          <div class="row">
+            <span class="label">Maksimum token0</span>
+            <span class="value num">{plan.amounts.amount0} {plan.amounts.symbol0}</span>
+          </div>
+          <div class="row">
+            <span class="label">Maksimum token1</span>
+            <span class="value num">{plan.amounts.amount1} {plan.amounts.symbol1}</span>
+          </div>
+        </div>
+      ) : null}
+      {plan.tick_lower_baru !== null && plan.tick_upper_baru !== null ? (
+        <div class="row">
+          <span class="label">Range baru</span>
+          <span class="value num">{plan.tick_lower_baru} sampai {plan.tick_upper_baru}</span>
+        </div>
+      ) : null}
+
+      {plan.allowances.length > 0 ? (
+        <div class="stack">
+          <p class="hint">Izin token harus selesai berurutan sebelum simulasi dapat lolos.</p>
+          {plan.allowances.map((allowance) => (
+            <button
+              key={allowance.step_id}
+              type="button"
+              disabled={busy}
+              onClick={() => onApprove(allowance.step_id)}
+            >
+              {allowance.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
 
       <button
         type="button"
@@ -1962,7 +2336,6 @@ function SetoranCard({
   plan,
   view,
   token,
-  setSize,
   busy,
   canExecute,
   onQuote,
@@ -1970,10 +2343,9 @@ function SetoranCard({
   plan: OpenPlanView | null;
   view: RangeView | null;
   token: TokenState | null;
-  setSize: (v: string) => void;
   busy: boolean;
   canExecute: boolean;
-  onQuote: (sizeUsd: number) => void;
+  onQuote: (deposit: Deposit | null) => void;
 }) {
   const setor = plan?.setor ?? null;
   const saldo = token?.saldo ?? null;
@@ -1992,6 +2364,8 @@ function SetoranCard({
   const [isiQuote, setIsiQuote] = useState("");
   const [zap, setZap] = useState(true);
   const [sisiAktif, setSisiAktif] = useState<"meme" | "quote">("quote");
+  const versi = token?.pools.find(p => p.id === token.selected_pool_id)?.version;
+  useEffect(() => { if (versi === "v3") setZap(false); }, [versi]);
 
   // Kotak diisi ulang dari rencana begitu ia datang, karena angka engine yang
   // benar, bukan yang diketik. Sisi yang sedang disunting tidak ditimpa.
@@ -2002,15 +2376,18 @@ function SetoranCard({
     if (sisiAktif !== "meme") setIsiMeme(String(jm));
     if (sisiAktif !== "quote") setIsiQuote(String(jq));
   }, [jm, jq]);
+  useEffect(() => {
+    if (plan && zap && !plan.deposit.zap && jm !== undefined && jq !== undefined) {
+      setZap(false); setIsiMeme(String(jm)); setIsiQuote(String(jq));
+    }
+  }, [plan?.plan_id]);
 
   const susun = (sisi: "meme" | "quote") => {
     const teks = sisi === "meme" ? isiMeme : isiQuote;
     const harga = sisi === "meme" ? hargaMeme : hargaQuote;
     const n = Number(teks);
     if (!Number.isFinite(n) || n <= 0 || harga <= 0) return;
-    const usd = n * harga;
-    setSize(String(usd));
-    onQuote(usd);
+    onQuote({ side: sisi, amount: teks, zap });
   };
 
   const cukup =
@@ -2036,7 +2413,8 @@ function SetoranCard({
         <button
           type="button"
           class={`sakelar${zap ? " nyala" : ""}`}
-          onClick={() => setZap(!zap)}
+          disabled={versi === "v3"}
+          onClick={() => { setZap(!zap); onQuote(null); }}
           aria-pressed={zap}
         >
           <span class="sakelar-tuas" />
@@ -2044,49 +2422,44 @@ function SetoranCard({
         </button>
       </div>
 
-      {/* Zap menyala berarti satu aset saja: engine menukar sebagiannya
-          sendiri supaya cocok rasio range. Kotak sisi yang lain disembunyikan,
-          bukan dinonaktifkan, karena kotak mati yang tetap terlihat mengundang
-          pertanyaan kenapa ia tidak bisa diisi. */}
-      {zap && sisiAktif !== "meme" ? null : (
+      {/* Kedua aset tetap terlihat. Sisi yang terakhir disunting menjadi
+          sumber anggaran saat Zap aktif. */}
       <KotakSetor
         simbol={simbolMeme}
         nilai={isiMeme}
         usd={Number(isiMeme) * hargaMeme}
         saldo={saldo ? saldo.memecoin : null}
         onInput={(v) => {
+          onQuote(null);
           setSisiAktif("meme");
           setIsiMeme(v);
         }}
         onSelesai={() => susun("meme")}
       />
-      )}
-
-      {zap && sisiAktif !== "quote" ? null : (
       <KotakSetor
         simbol={simbolQuote}
         nilai={isiQuote}
         usd={Number(isiQuote) * hargaQuote}
         saldo={saldo ? saldo.quote : null}
         onInput={(v) => {
+          onQuote(null);
           setSisiAktif("quote");
           setIsiQuote(v);
         }}
         onSelesai={() => susun("quote")}
       />
-      )}
 
       {zap ? (
         <div class="setor-sisi" style="margin-top: var(--s2)">
           <button
             class={`preset${sisiAktif === "meme" ? " aktif" : ""}`}
-            onClick={() => setSisiAktif("meme")}
+            onClick={() => { setSisiAktif("meme"); onQuote(null); }}
           >
             setor {simbolMeme}
           </button>
           <button
             class={`preset${sisiAktif === "quote" ? " aktif" : ""}`}
-            onClick={() => setSisiAktif("quote")}
+            onClick={() => { setSisiAktif("quote"); onQuote(null); }}
           >
             setor {simbolQuote}
           </button>
@@ -2201,15 +2574,11 @@ function ExecuteCard({
   busy: boolean;
   canExecute: boolean;
   blockedReasons: string[];
-  onQuote: (sizeUsd: number) => void;
+  onQuote: (deposit: Deposit | null) => void;
   onApprove: (token: string) => void;
   onZap: () => void;
   onOpen: () => void;
 }) {
-  // Nominal terakhir yang dikirim, disimpan supaya kartu setoran bisa
-  // menyebutkannya kembali tanpa menghitung ulang dari kedua kotak.
-  const [, setSize] = useState("");
-
   // Engine sudah menyaring: daftar ini hanya berisi langkah yang memang
   // masih kurang. Panel tidak menyaring ulang, karena dua tempat yang
   // memutuskan hal yang sama pasti menyimpang.
@@ -2249,7 +2618,6 @@ function ExecuteCard({
         plan={plan}
         view={view}
         token={token}
-        setSize={setSize}
         busy={busy}
         canExecute={canExecute}
         onQuote={onQuote}
@@ -2307,7 +2675,7 @@ function ExecuteCard({
                   key={`${a.jenis}:${a.token}`}
                   type="button"
                   disabled={busy}
-                  onClick={() => onApprove(a.token)}
+                  onClick={() => onApprove(a.step_id)}
                 >
                   {a.label}
                 </button>
@@ -2510,7 +2878,7 @@ function PoolRow({
         </span>
         <span>
           <i>TVL</i>
-          {s ? formatCompact(s.tvl) : "-"}
+          {s?.tvl != null ? formatCompact(s.tvl) : "-"}
         </span>
         <span>
           <i>vol</i>
@@ -2665,6 +3033,8 @@ function DepthCard({
         </p>
       ) : (
         <Histogram
+          key={depth.pool_id}
+          onCommit={(lo, hi) => onSetRange(mcapSekarang * lo, mcapSekarang * hi)}
           depth={depth}
           kelipatanBawah={kelipatanBawah}
           kelipatanAtas={kelipatanAtas}
@@ -2676,116 +3046,6 @@ function DepthCard({
 
     </section>
   );
-}
-
-/**
- * Berapa baris paling banyak digambar histogram.
- *
- * Pool V3 yang ramai bisa punya ratusan tick terinisialisasi, dan menggambar
- * satu baris per tick menghasilkan dinding batang yang tidak bisa dibaca.
- * Dua puluh empat baris cukup untuk melihat bentuk poolnya, dan cukup sedikit
- * untuk setiap barisnya tetap punya label harga yang terbaca.
- */
-const MAKS_BARIS_HISTOGRAM = 24;
-
-/**
- * Gabungkan pita yang berdekatan sampai jumlah barisnya masuk akal.
- *
- * Nilainya dijumlahkan dan rentang harganya disatukan, sehingga total modal
- * yang tergambar tetap sama persis. Pita yang memuat harga sekarang tidak
- * pernah digabung dengan tetangganya, karena letaknya itulah yang paling
- * ingin dilihat user.
- */
-function ringkasPita(pita: Pita[], maks: number): Pita[] {
-  if (pita.length <= maks) return pita;
-
-  const per = Math.ceil(pita.length / maks);
-  const keluar: Pita[] = [];
-  let kelompok: Pita[] = [];
-
-  const dorong = () => {
-    if (kelompok.length === 0) return;
-    const pertama = kelompok[0];
-    const terakhir = kelompok[kelompok.length - 1];
-    keluar.push({
-      tick_bawah: Math.min(...kelompok.map((p) => p.tick_bawah)),
-      tick_atas: Math.max(...kelompok.map((p) => p.tick_atas)),
-      harga_bawah: Math.min(pertama.harga_bawah, terakhir.harga_bawah),
-      harga_atas: Math.max(pertama.harga_atas, terakhir.harga_atas),
-      liquidity: pertama.liquidity,
-      nilai_quote: kelompok.reduce((t, p) => t + p.nilai_quote, 0),
-      aktif: kelompok.some((p) => p.aktif),
-    });
-    kelompok = [];
-  };
-
-  for (const p of pita) {
-    if (p.aktif) {
-      dorong();
-      keluar.push(p);
-      continue;
-    }
-    kelompok.push(p);
-    if (kelompok.length >= per) dorong();
-  }
-  dorong();
-
-  return keluar;
-}
-
-function Histogram({
-  depth,
-  kelipatanBawah,
-  kelipatanAtas,
-}: {
-  depth: Distribusi;
-  kelipatanBawah: number;
-  kelipatanAtas: number;
-}) {
-  const puncak = depth.pita.reduce((m, p) => Math.max(m, p.nilai_quote), 0);
-
-  // Diurutkan menurut HARGA, bukan menurut tick, lalu digambar dari yang
-  // tertinggi ke terendah supaya searah dengan chart. Mengurutkan menurut tick
-  // akan menggambar terbalik pada pool yang memecoinnya token1.
-  const urut = [...depth.pita].sort((a, b) => b.harga_bawah - a.harga_bawah);
-  const baris = ringkasPita(urut, MAKS_BARIS_HISTOGRAM);
-
-  const dalamRange = (p: { harga_bawah: number; harga_atas: number }) => {
-    const bawah = p.harga_bawah / depth.harga_sekarang;
-    const atas = p.harga_atas / depth.harga_sekarang;
-    return atas > kelipatanBawah && bawah < kelipatanAtas;
-  };
-
-  return (
-    <div class="depth">
-      {baris.map((p) => (
-        <div
-          key={`${p.tick_bawah}:${p.tick_atas}`}
-          class={`depth-row${dalamRange(p) ? " terpilih" : ""}${p.aktif ? " aktif" : ""}`}
-        >
-          <span class="depth-harga num">{formatHargaKecil(p.harga_atas)}</span>
-          <span class="depth-bar-wrap">
-            <span
-              class="depth-bar"
-              style={`width: ${puncak > 0 ? (p.nilai_quote / puncak) * 100 : 0}%`}
-            />
-          </span>
-          <span class="depth-nilai num">{formatCompact(p.nilai_quote)}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-/**
- * Harga memecoin biasanya jauh di bawah satu, dan pembulatan biasa akan
- * menampilkan seluruh baris sebagai 0.00.
- */
-function formatHargaKecil(v: number): string {
-  if (!Number.isFinite(v)) return "-";
-  if (v === 0) return "0";
-  if (Math.abs(v) >= 1) return v.toFixed(4);
-  return v.toPrecision(4);
 }
 
 /**

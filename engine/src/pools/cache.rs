@@ -94,7 +94,12 @@ pub fn gabung(
         // Gagal menyimpan hanya berarti pemuatan berikutnya lambat lagi.
         tracing::warn!(token, error = %e, "cache kunci pool gagal disimpan");
     } else if ditambah > 0 {
-        tracing::debug!(token, ditambah, total = lama.keys.len(), "cache kunci pool diperbarui");
+        tracing::debug!(
+            token,
+            ditambah,
+            total = lama.keys.len(),
+            "cache kunci pool diperbarui"
+        );
     }
 
     lama
@@ -110,10 +115,8 @@ mod tests {
     use super::*;
 
     fn store_sementara(nama: &str) -> (Store, std::path::PathBuf) {
-        let d = std::env::temp_dir().join(format!(
-            "rangefinder-cache-{nama}-{}",
-            std::process::id()
-        ));
+        let d =
+            std::env::temp_dir().join(format!("rangefinder-cache-{nama}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         (Store::open(&d).unwrap(), d)
     }
@@ -143,14 +146,30 @@ mod tests {
     fn kunci_bertahan_dan_tidak_terduplikasi() {
         let (store, dir) = store_sementara("gabung");
         let awal = baca(&store, "0xTOKEN");
-        let setelah = gabung(&store, "0xTOKEN", awal, vec![rekaman("0x1"), rekaman("0x2")], 100);
+        let setelah = gabung(
+            &store,
+            "0xTOKEN",
+            awal,
+            vec![rekaman("0x1"), rekaman("0x2")],
+            100,
+        );
         assert_eq!(setelah.keys.len(), 2);
         assert_eq!(setelah.scanned_to, 100);
 
         // Pemindaian berikutnya menemukan satu pool lama dan satu pool baru.
         let lagi = baca(&store, "0xTOKEN");
-        let setelah = gabung(&store, "0xTOKEN", lagi, vec![rekaman("0x2"), rekaman("0x3")], 200);
-        assert_eq!(setelah.keys.len(), 3, "pool yang sudah ada tidak boleh dobel");
+        let setelah = gabung(
+            &store,
+            "0xTOKEN",
+            lagi,
+            vec![rekaman("0x2"), rekaman("0x3")],
+            200,
+        );
+        assert_eq!(
+            setelah.keys.len(),
+            3,
+            "pool yang sudah ada tidak boleh dobel"
+        );
         assert_eq!(setelah.scanned_to, 200);
 
         drop(store);
@@ -187,7 +206,13 @@ mod tests {
     #[test]
     fn alamat_token_tidak_peduli_besar_kecil_huruf() {
         let (store, dir) = store_sementara("token-huruf");
-        gabung(&store, "0xAbCd", baca(&store, "0xAbCd"), vec![rekaman("0x1")], 10);
+        gabung(
+            &store,
+            "0xAbCd",
+            baca(&store, "0xAbCd"),
+            vec![rekaman("0x1")],
+            10,
+        );
         assert_eq!(
             baca(&store, "0xABCD").keys.len(),
             1,

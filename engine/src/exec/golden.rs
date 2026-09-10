@@ -30,6 +30,41 @@ pub const MINT_SELECTOR: [u8; 4] = [0x88, 0x31, 0x64, 0x56];
 /// Selector `multicall(bytes[])`.
 pub const MULTICALL_SELECTOR: [u8; 4] = [0xac, 0x96, 0x50, 0xd8];
 
+/// G3 juga berjalan pada binary biasa. `cargo build` sendiri tidak menjalankan
+/// test, sehingga status ini harus berasal dari pembandingan byte saat runtime.
+pub fn verify_embedded() -> Result<(), String> {
+    static HASIL: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+    HASIL
+        .get_or_init(|| {
+            let fixtures = [
+                include_str!("../../fixtures/golden/mint-df58534df56ca1e4.json"),
+                include_str!("../../fixtures/golden/mint-e2c817fbf54fb2d4.json"),
+                include_str!("../../fixtures/golden/mint-ea01dc8b3e993817.json"),
+            ];
+            for raw in fixtures {
+                let vector: GoldenVector = serde_json::from_str(raw).map_err(|e| e.to_string())?;
+                let req = vector.params.to_request()?;
+                let actual: Bytes = vector
+                    .calldata
+                    .parse()
+                    .map_err(|_| "fixture hex tidak valid")?;
+                let built = super::calldata::mint(&req, 0).map_err(|e| e.to_string())?;
+                if built != actual {
+                    return Err(format!("mint V3 berbeda dari {}", vector.source_tx));
+                }
+            }
+            super::v4::calldata::golden_matches()?;
+            super::router_rbh::golden_matches()?;
+            Ok(())
+        })
+        .clone()
+}
+
+#[test]
+fn golden_di_binary_biasa_mencocokkan_v3_v4_dan_router() {
+    verify_embedded().unwrap();
+}
+
 /// Satu golden vector, seperti yang tersimpan di berkas.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoldenVector {
@@ -100,9 +135,10 @@ pub fn extract_mint_calldata(input: &Bytes) -> Option<Bytes> {
 
     if selector == MULTICALL_SELECTOR {
         let decoded = Npm::multicallCall::abi_decode(input).ok()?;
-        return decoded.data.into_iter().find(|call| {
-            call.len() >= 4 && call[..4] == MINT_SELECTOR
-        });
+        return decoded
+            .data
+            .into_iter()
+            .find(|call| call.len() >= 4 && call[..4] == MINT_SELECTOR);
     }
 
     None
@@ -149,8 +185,8 @@ pub fn load_all(repo_root: &std::path::Path) -> Result<Vec<GoldenVector>, String
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("gagal membaca {path:?}: {e}"))?;
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| format!("gagal membaca {path:?}: {e}"))?;
         let vector: GoldenVector = serde_json::from_str(&text)
             .map_err(|e| format!("{path:?} bukan golden vector yang sah: {e}"))?;
         out.push(vector);
@@ -209,7 +245,10 @@ mod tests {
             );
         }
 
-        println!("gate G3: {} golden vector cocok byte per byte", vectors.len());
+        println!(
+            "gate G3: {} golden vector cocok byte per byte",
+            vectors.len()
+        );
     }
 
     #[test]
@@ -237,10 +276,8 @@ mod tests {
             d.extend_from_slice(&[0u8; 32 * 11]);
             Bytes::from(d)
         };
-        let bungkus = calldata::multicall(vec![
-            calldata::burn(U256::from(1u8)),
-            mint_palsu.clone(),
-        ]);
+        let bungkus =
+            calldata::multicall(vec![calldata::burn(U256::from(1u8)), mint_palsu.clone()]);
 
         assert_eq!(extract_mint_calldata(&bungkus), Some(mint_palsu));
     }
@@ -248,8 +285,12 @@ mod tests {
     #[test]
     fn parameter_bolak_balik_lewat_teks() {
         let req = MintRequest {
-            token0: "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73".parse().unwrap(),
-            token1: "0x39dbed3a2bd333467115de45665cc57f813c4571".parse().unwrap(),
+            token0: "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"
+                .parse()
+                .unwrap(),
+            token1: "0x39dbed3a2bd333467115de45665cc57f813c4571"
+                .parse()
+                .unwrap(),
             fee: 3_000,
             tick_lower: -60,
             tick_upper: 60,
@@ -257,7 +298,9 @@ mod tests {
             amount1_desired: U256::from(2_000u32),
             amount0_min: U256::from(900u32),
             amount1_min: U256::from(1_800u32),
-            recipient: "0x48958E7e35b96fb58fCa9198436C3CB00d81b3Cb".parse().unwrap(),
+            recipient: "0x48958E7e35b96fb58fCa9198436C3CB00d81b3Cb"
+                .parse()
+                .unwrap(),
             deadline: U256::from(1_788_700_000u64),
         };
 

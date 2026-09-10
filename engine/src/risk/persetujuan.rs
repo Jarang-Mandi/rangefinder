@@ -1,10 +1,8 @@
 //! Persetujuan sadar user atas hook yang belum lolos otomatis, PRD 5.4.
 //!
 //! KENAPA INI ADA
-//! Kriteria adopsi di `hook` sengaja ketat, dan dua dari lima syaratnya belum
-//! bisa diukur alat ini. Akibatnya tidak ada hook yang lolos otomatis, dan
-//! tanpa jalan keluar, setiap pool berhook akan tertahan selamanya. Di Robinhood
-//! Chain porsi pool berhook cukup besar, jadi itu bukan sekadar merepotkan.
+//! Kriteria adopsi di `hook` sengaja ketat. Hook yang memenuhi kelimanya dicatat
+//! otomatis selama 24 jam; hook lain tetap punya jalan persetujuan sadar user.
 //!
 //! PRD 5.4 sudah menyediakan jalan keluarnya: hook yang belum lolos tetap bisa
 //! dipakai lewat pilihan sadar per hook, yang menampilkan peringatan dan
@@ -34,6 +32,10 @@ const AWALAN: &str = "risk/hook-disetujui/";
 pub struct Persetujuan {
     pub hook: String,
     pub pada: String,
+    /// Benar jika kelima kriteria adopsi yang membuat catatan ini, bukan klik
+    /// persetujuan user. Catatan otomatis harus dinilai ulang secara berkala.
+    #[serde(default)]
+    pub otomatis: bool,
     /// Penilaian saat persetujuan diberikan.
     ///
     /// Disimpan utuh, bukan hanya kesimpulannya, supaya keputusannya bisa
@@ -60,10 +62,42 @@ pub fn setujui(store: &Store, penilaian: &PenilaianHook) -> Result<Persetujuan> 
             penilaian.hook
         );
     }
+    if penilaian
+        .code_hash
+        .as_ref()
+        .and_then(|hash| hash.parse::<alloy::primitives::B256>().ok())
+        .is_none()
+    {
+        bail!("bytecode hook belum dibuktikan, nilai ulang sebelum menyetujui");
+    }
 
     let catatan = Persetujuan {
         hook: penilaian.hook.to_lowercase(),
         pada: chrono::Utc::now().to_rfc3339(),
+        otomatis: false,
+        penilaian: penilaian.clone(),
+    };
+    store.put(&kunci(&penilaian.hook), &catatan)?;
+    Ok(catatan)
+}
+
+/// Catat hook yang memenuhi seluruh syarat adopsi tanpa meminta persetujuan.
+pub fn catat_otomatis(store: &Store, penilaian: &PenilaianHook) -> Result<Persetujuan> {
+    if !penilaian.lolos_otomatis || penilaian.terlarang {
+        bail!("hook belum memenuhi seluruh syarat allowlist otomatis");
+    }
+    if penilaian
+        .code_hash
+        .as_ref()
+        .and_then(|hash| hash.parse::<alloy::primitives::B256>().ok())
+        .is_none()
+    {
+        bail!("bytecode hook belum dibuktikan");
+    }
+    let catatan = Persetujuan {
+        hook: penilaian.hook.to_lowercase(),
+        pada: chrono::Utc::now().to_rfc3339(),
+        otomatis: true,
         penilaian: penilaian.clone(),
     };
     store.put(&kunci(&penilaian.hook), &catatan)?;
@@ -81,7 +115,7 @@ pub fn disetujui(store: &Store, hook: &str) -> bool {
         .get::<Persetujuan>(&kunci(hook))
         .ok()
         .flatten()
-        .is_some()
+        .is_some_and(|p| p.penilaian.code_hash.is_some() && p.penilaian.boleh_disetujui_manual())
 }
 
 /// Baca catatan persetujuan sebuah hook.
@@ -113,7 +147,8 @@ mod tests {
         // adanya. Pencocokan yang sensitif huruf akan diam diam tidak pernah
         // cocok, dan akibatnya persetujuan user seolah olah hilang.
         let store = store_uji("bertahan");
-        let p = hook::susun(HOOK, Some(100), Some(30.0), Some(false), true).unwrap();
+        let mut p = hook::susun(HOOK, Some(100), Some(30.0), Some(false), true).unwrap();
+        p.code_hash = Some(format!("{:#x}", alloy::primitives::keccak256([0x60, 0x00])));
 
         assert!(!disetujui(&store, HOOK));
         setujui(&store, &p).expect("harus bisa disetujui");
@@ -128,7 +163,8 @@ mod tests {
         // satu bug di panel cukup untuk menaruh modal di hook yang isinya bisa
         // diganti sewaktu waktu.
         let store = store_uji("upgrade");
-        let p = hook::susun(HOOK, Some(10_000), Some(365.0), Some(true), true).unwrap();
+        let mut p = hook::susun(HOOK, Some(10_000), Some(365.0), Some(true), true).unwrap();
+        p.code_hash = Some(format!("{:#x}", alloy::primitives::keccak256([0x60, 0x00])));
 
         let hasil = setujui(&store, &p);
         assert!(hasil.is_err(), "harus ditolak");
@@ -141,7 +177,8 @@ mod tests {
         // keliru, dan meninjaunya butuh angka yang user lihat saat menyetujui,
         // bukan angka hari ini.
         let store = store_uji("penilaian");
-        let p = hook::susun(HOOK, Some(7), Some(2.0), Some(false), true).unwrap();
+        let mut p = hook::susun(HOOK, Some(7), Some(2.0), Some(false), true).unwrap();
+        p.code_hash = Some(format!("{:#x}", alloy::primitives::keccak256([0x60, 0x00])));
         setujui(&store, &p).unwrap();
 
         let catatan = baca(&store, HOOK).expect("catatan harus ada");
@@ -152,9 +189,37 @@ mod tests {
     #[test]
     fn persetujuan_bisa_dicabut() {
         let store = store_uji("cabut");
-        let p = hook::susun(HOOK, Some(100), Some(30.0), Some(false), true).unwrap();
+        let mut p = hook::susun(HOOK, Some(100), Some(30.0), Some(false), true).unwrap();
+        p.code_hash = Some(format!("{:#x}", alloy::primitives::keccak256([0x60, 0x00])));
         setujui(&store, &p).unwrap();
         assert!(cabut(&store, HOOK));
         assert!(!disetujui(&store, HOOK));
+    }
+
+    #[test]
+    fn allowlist_otomatis_hanya_menerima_lima_kriteria_lolos() {
+        let store = store_uji("otomatis");
+        let mut belum = hook::susun(HOOK, Some(100), Some(30.0), Some(false), true).unwrap();
+        belum.code_hash = Some(format!("{:#x}", alloy::primitives::keccak256([0x60, 0x00])));
+        assert!(catat_otomatis(&store, &belum).is_err());
+
+        let mut lolos = hook::susun_dengan_metrik(
+            HOOK,
+            Some(100),
+            Some(30.0),
+            Some(false),
+            true,
+            hook::MetrikAdopsi {
+                tvl_usd: Some(300_000.0),
+                tvl_lengkap: true,
+                lp_unik: Some(250),
+                lp_lengkap: true,
+            },
+        )
+        .unwrap();
+        lolos.code_hash = belum.code_hash;
+        let catatan = catat_otomatis(&store, &lolos).unwrap();
+        assert!(catatan.otomatis);
+        assert!(catatan.penilaian.lolos_otomatis);
     }
 }

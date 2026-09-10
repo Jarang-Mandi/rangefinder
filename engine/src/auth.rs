@@ -40,8 +40,9 @@ impl PairingToken {
         if path.exists() {
             let text = std::fs::read_to_string(&path)
                 .with_context(|| format!("gagal membaca token pairing di {}", path.display()))?;
-            let bytes = hex::decode(text.trim())
-                .context("token pairing di disk bukan hex yang valid, hapus berkasnya untuk membuat ulang")?;
+            let bytes = hex::decode(text.trim()).context(
+                "token pairing di disk bukan hex yang valid, hapus berkasnya untuk membuat ulang",
+            )?;
             let value: [u8; TOKEN_BYTES] = bytes.as_slice().try_into().map_err(|_| {
                 anyhow::anyhow!(
                     "token pairing di disk panjangnya {} byte, seharusnya {}. Hapus berkasnya untuk membuat ulang",

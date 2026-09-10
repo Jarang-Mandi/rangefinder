@@ -226,7 +226,14 @@ mod tests {
         (0..n)
             .map(|i| {
                 let p = 100.0 + i as f64 * 0.5;
-                bar(i as i64, p, p + 0.5, p - 0.2, p + 0.4, 10.0 + (i % 5) as f64)
+                bar(
+                    i as i64,
+                    p,
+                    p + 0.5,
+                    p - 0.2,
+                    p + 0.4,
+                    10.0 + (i % 5) as f64,
+                )
             })
             .collect()
     }
@@ -299,7 +306,10 @@ mod tests {
         let n = bars.len();
         bars[n - 1].volume = 1_000_000.0;
         let s = ukur(&bars, &aturan_uji()).unwrap();
-        assert!(!s.lolos(), "tren tetap harus ditolak meski volumenya meledak");
+        assert!(
+            !s.lolos(),
+            "tren tetap harus ditolak meski volumenya meledak"
+        );
     }
 
     #[test]

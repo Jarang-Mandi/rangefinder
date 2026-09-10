@@ -40,12 +40,7 @@ pub async fn capture(repo_root: &Path, target: usize) -> Result<bool> {
     let cfg = Config::load().context("gagal memuat config untuk URL RPC")?;
     let npm = registry.contract("uniswap_v3", "position_manager")?;
 
-    let url = cfg
-        .rpc
-        .http
-        .first()
-        .cloned()
-        .context("rpc.http kosong")?;
+    let url = cfg.rpc.http.first().cloned().context("rpc.http kosong")?;
     let provider = ProviderBuilder::new().connect_http(url.parse()?);
 
     let latest = provider
@@ -130,11 +125,7 @@ pub async fn capture(repo_root: &Path, target: usize) -> Result<bool> {
     Ok(true)
 }
 
-async fn ambil_satu<P: Provider>(
-    provider: &P,
-    tx_hash: TxHash,
-    dir: &Path,
-) -> Result<bool> {
+async fn ambil_satu<P: Provider>(provider: &P, tx_hash: TxHash, dir: &Path) -> Result<bool> {
     let tx = provider
         .get_transaction_by_hash(tx_hash)
         .await?

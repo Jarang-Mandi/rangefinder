@@ -33,7 +33,11 @@ pub async fn run(repo_root: &Path, alamat_arg: &str) -> Result<bool> {
 
     let jam = std::time::Instant::now();
     let posisi = muat::muat_semua(&provider, &registry, None, owner).await;
-    println!("  {} posisi, dimuat dalam {} ms", posisi.len(), jam.elapsed().as_millis());
+    println!(
+        "  {} posisi, dimuat dalam {} ms",
+        posisi.len(),
+        jam.elapsed().as_millis()
+    );
 
     if posisi.is_empty() {
         println!();
@@ -61,7 +65,9 @@ pub async fn run(repo_root: &Path, alamat_arg: &str) -> Result<bool> {
         );
         println!(
             "         likuiditas {}  fee belum diklaim {} dan {}",
-            p.liquidity, p.fee0, p.fee1
+            p.liquidity,
+            p.fee0.as_deref().unwrap_or("belum diketahui"),
+            p.fee1.as_deref().unwrap_or("belum diketahui")
         );
         if let Some(t) = p.tick_sekarang {
             println!(
@@ -72,13 +78,19 @@ pub async fn run(repo_root: &Path, alamat_arg: &str) -> Result<bool> {
             println!("         tick pool tidak terbaca");
         }
         if let Some(h) = &p.pnl {
+            let angka = |value: Option<f64>| {
+                value
+                    .map(|n| format!("{n:.4}"))
+                    .unwrap_or_else(|| "belum diketahui".into())
+            };
             println!(
-                "         hasil fee {:.4}  IL {:.4}  gas {:.4}  slippage {:.4}  net {:.4}{}",
-                h.fee,
+                "         hasil ({}) fee {}  IL {:.4}  gas {}  slippage {}  net {}{}",
+                h.currency.symbol,
+                angka(h.fee),
                 h.impermanent_loss,
-                h.gas,
-                h.slippage,
-                h.net,
+                angka(h.gas),
+                angka(h.slippage),
+                angka(h.net),
                 if h.perkiraan { "  (perkiraan)" } else { "" }
             );
         }

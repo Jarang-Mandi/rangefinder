@@ -370,7 +370,14 @@ mod tests {
             } else {
                 (dasar, dasar + 0.2)
             };
-            v.push(bar(t, o, dasar + 0.35, dasar - 0.15, c, 20.0 + (i % 5) as f64));
+            v.push(bar(
+                t,
+                o,
+                dasar + 0.35,
+                dasar - 0.15,
+                c,
+                20.0 + (i % 5) as f64,
+            ));
             t += 60;
         }
         v
@@ -484,7 +491,10 @@ mod tests {
     fn jangkar_masuk_akal() {
         let h = cari(&dump_lalu_basis(), &Aturan::default()).unwrap();
         let j = h.jangkar;
-        assert!(j.h_basis > j.l_basis, "batas atas harus di atas batas bawah");
+        assert!(
+            j.h_basis > j.l_basis,
+            "batas atas harus di atas batas bawah"
+        );
         assert!(
             j.poc >= j.l_basis && j.poc <= j.h_basis,
             "POC {} harus di dalam basis {} sampai {}",

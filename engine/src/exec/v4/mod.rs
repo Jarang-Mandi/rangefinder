@@ -17,6 +17,6 @@ pub mod abi;
 pub mod actions;
 pub mod calldata;
 pub mod permit;
-pub mod quote;
 pub mod pipeline;
+pub mod quote;
 pub mod verify;

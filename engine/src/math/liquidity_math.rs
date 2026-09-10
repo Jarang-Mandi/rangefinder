@@ -281,7 +281,10 @@ mod tests {
         assert!(besar > kecil);
         // Skalanya harus mendekati linear.
         let rasio = besar as f64 / kecil as f64;
-        assert!((rasio - 10.0).abs() < 0.01, "rasio {rasio} tidak mendekati 10");
+        assert!(
+            (rasio - 10.0).abs() < 0.01,
+            "rasio {rasio} tidak mendekati 10"
+        );
     }
 
     #[test]
@@ -289,8 +292,8 @@ mod tests {
         // Inti dari concentrated liquidity, dan dasar angka faktor konsentrasi
         // yang ditampilkan panel. Lihat PRD 5.7.
         let p = sqrt(0);
-        let lebar = liquidity_for_amounts(p, sqrt(-6000), sqrt(6000), satu_token(), satu_token())
-            .unwrap();
+        let lebar =
+            liquidity_for_amounts(p, sqrt(-6000), sqrt(6000), satu_token(), satu_token()).unwrap();
         let rapat =
             liquidity_for_amounts(p, sqrt(-600), sqrt(600), satu_token(), satu_token()).unwrap();
         assert!(
