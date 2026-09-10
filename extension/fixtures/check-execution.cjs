@@ -5,6 +5,9 @@ async (page) => {
 
   if (await page.locator('.range-glyph').count() !== 0) throw Error('Header masih memuat ikon range');
   if (await page.locator('.token-emblem').count() !== 0) throw Error('Token masih memakai logo pengganti');
+  if (await page.getByRole('button', { name: 'Susun rencana' }).count() !== 0) {
+    throw Error('Setoran masih meminta langkah Susun rencana');
+  }
 
   for (const width of [320, 360, 480]) {
     await page.setViewportSize({ width, height: 700 });
@@ -15,7 +18,11 @@ async (page) => {
   if (await page.locator('.kotak-setor').count() !== 1) throw Error('Zap aktif harus menampilkan satu input');
   const quote = page.getByRole('spinbutton', { name: 'USDG Amount' });
   await quote.fill('7500');
-  await quote.press('Enter');
+  await page.waitForFunction(() => {
+    const value = document.querySelector('output')?.textContent ?? 'null';
+    const deposit = JSON.parse(value);
+    return deposit?.side === 'quote' && deposit?.amount === '7500' && deposit?.zap === true;
+  });
   const deposit = await state();
   if (deposit.side !== 'quote' || deposit.amount !== '7500' || deposit.zap !== true) {
     throw Error('Jumlah zap tidak diteruskan dengan benar');

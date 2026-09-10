@@ -216,14 +216,15 @@ dry_run = false
 
 ## Membuka posisi pertama
 
-Tiga langkah, dan sengaja tidak digabung jadi satu tombol. Yang disetujui di
-langkah ketiga memindahkan uang sungguhan.
+Rencana dihitung otomatis dari input. Aksi on-chain tetap tampil sebagai
+langkah eksplisit, karena aksi itulah yang memindahkan uang sungguhan.
 
-### 1. Susun rencana
+### 1. Periksa rencana
 
-Muat token, atur garis range di chart gmgn, lalu isi nominal dolar di kartu
-Eksekusi dan tekan **Susun rencana**. Engine menjalankan seluruh gate dan
-mengembalikan hasilnya. Tidak ada apa pun yang dikirim ke rantai.
+Muat token, atur garis range di chart gmgn, lalu isi nominal pada kartu
+Eksekusi. Setelah input berhenti berubah sebentar, engine otomatis menjalankan
+seluruh gate dan menampilkan rencananya. Tidak ada apa pun yang dikirim ke
+rantai pada tahap ini.
 
 Yang perlu diperiksa di kartu itu:
 

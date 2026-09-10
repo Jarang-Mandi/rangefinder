@@ -877,23 +877,6 @@ button.token-pill {
   text-align: right;
 }
 
-/* Tombol utama: satu aksi yang jelas tepat di bawah input. */
-.lebar.utama {
-  width: 100%;
-  min-height: 38px;
-  margin-top: var(--s2);
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
-  font-weight: 700;
-}
-
-.lebar.utama:disabled {
-  background: var(--surface-raised);
-  border-color: var(--border);
-  color: var(--text-muted);
-}
-
 .execution-blocked,
 .execution-plan-status,
 .execution-plan-meta,

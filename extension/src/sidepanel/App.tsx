@@ -2304,9 +2304,9 @@ function porsiDalamRange(p: Posisi): number {
 /**
  * Kartu eksekusi: susun rencana, beri izin, buka posisi.
  *
- * Tiga langkah sengaja terpisah dan berurutan. Menggabungkannya jadi satu
- * tombol berarti user menyetujui sesuatu yang belum pernah ia lihat, dan yang
- * disetujui di sini memindahkan uang sungguhan.
+ * Penyusunan rencana berjalan otomatis setelah input berhenti berubah. Aksi
+ * on-chain tetap terpisah dan eksplisit, karena aksi itulah yang memindahkan
+ * uang sungguhan.
  *
  * Panel tidak menyimpulkan apa pun sendiri. Boleh tidaknya mengirim, izin mana
  * yang kurang, dan gate mana yang gagal, semuanya datang dari engine. Panel
@@ -2317,7 +2317,9 @@ function porsiDalamRange(p: Posisi): number {
  *
  * Zap aktif memperlihatkan satu kotak dan pilihan token berada di dalam kotak.
  * Zap mati memperlihatkan kedua sisi karena user perlu mengisi rasio sendiri.
- * Di bawahnya satu tombol besar menyusun rencana dari input terakhir.
+ * Rencana disusun otomatis setelah input berhenti berubah sebentar. Dengan
+ * begitu nominal dan range adalah input; tombol berikutnya langsung menjadi
+ * aksi on-chain yang memang dibutuhkan (izin, zap, atau buka posisi).
  *
  * KENAPA MENGISI SATU KOTAK MENGISI YANG LAIN
  * Rasio antara kedua sisi ditentukan range, bukan oleh user. Range yang
@@ -2363,6 +2365,7 @@ export function SetoranCard({
   const [isiQuote, setIsiQuote] = useState("");
   const [zap, setZap] = useState(true);
   const [sisiAktif, setSisiAktif] = useState<"meme" | "quote">("quote");
+  const kutipanTerakhir = useRef("");
   const versi = token?.pools.find(p => p.id === token.selected_pool_id)?.version;
   useEffect(() => { if (versi === "v3") setZap(false); }, [versi]);
 
@@ -2381,29 +2384,45 @@ export function SetoranCard({
     }
   }, [plan?.plan_id]);
 
-  const susun = (sisi: "meme" | "quote") => {
+  const susun = (sisi: "meme" | "quote", paksa = false) => {
     const teks = sisi === "meme" ? isiMeme : isiQuote;
     const harga = sisi === "meme" ? hargaMeme : hargaQuote;
     const n = Number(teks);
-    if (!Number.isFinite(n) || n <= 0 || harga <= 0) return;
+    if (!canExecute || busy || !Number.isFinite(n) || n <= 0 || harga <= 0) return;
+    const sidikJari = [
+      sisi,
+      teks,
+      zap,
+      view?.pool_id ?? "",
+      view?.lower.tick ?? "",
+      view?.upper.tick ?? "",
+    ].join(":");
+    if (!paksa && kutipanTerakhir.current === sidikJari) return;
+    kutipanTerakhir.current = sidikJari;
     onQuote({ side: sisi, amount: teks, zap });
   };
 
-  const cukup =
-    saldo === null ||
-    setor === null ||
-    (saldo.memecoin >= setor.jumlah_memecoin && saldo.quote >= setor.jumlah_quote);
-
-  const adaIsi = Number(isiMeme) > 0 || Number(isiQuote) > 0;
-  const label = !canExecute
-    ? "Engine belum siap"
-    : busy
-      ? "Menyusun"
-      : !adaIsi
-        ? "Isi jumlahnya"
-        : !cukup
-          ? "Saldo kurang"
-          : "Susun rencana";
+  // Mengetik dan menggeser range bisa menghasilkan banyak perubahan dalam
+  // satu detik. Debounce menunggu input stabil, sedangkan sidik jari mencegah
+  // jawaban engine memicu permintaan identik berulang tanpa akhir.
+  useEffect(() => {
+    const teks = sisiAktif === "meme" ? isiMeme : isiQuote;
+    const harga = sisiAktif === "meme" ? hargaMeme : hargaQuote;
+    const n = Number(teks);
+    if (!canExecute || busy || !Number.isFinite(n) || n <= 0 || harga <= 0) return;
+    const timer = window.setTimeout(() => susun(sisiAktif), 400);
+    return () => window.clearTimeout(timer);
+  }, [
+    isiMeme,
+    isiQuote,
+    sisiAktif,
+    zap,
+    canExecute,
+    busy,
+    view?.pool_id,
+    view?.lower.tick,
+    view?.upper.tick,
+  ]);
 
   return (
     <div class="setoran">
@@ -2433,7 +2452,7 @@ export function SetoranCard({
               onQuote(null);
               setIsiMeme(v);
             }}
-            onSelesai={() => susun("meme")}
+            onSelesai={() => susun("meme", plan === null)}
           />
         ) : (
           <KotakSetor
@@ -2446,7 +2465,7 @@ export function SetoranCard({
               onQuote(null);
               setIsiQuote(v);
             }}
-            onSelesai={() => susun("quote")}
+            onSelesai={() => susun("quote", plan === null)}
           />
         )
       ) : (
@@ -2461,7 +2480,7 @@ export function SetoranCard({
               setSisiAktif("meme");
               setIsiMeme(v);
             }}
-            onSelesai={() => susun("meme")}
+            onSelesai={() => susun("meme", plan === null)}
           />
           <KotakSetor
             simbol={simbolQuote}
@@ -2473,18 +2492,10 @@ export function SetoranCard({
               setSisiAktif("quote");
               setIsiQuote(v);
             }}
-            onSelesai={() => susun("quote")}
+            onSelesai={() => susun("quote", plan === null)}
           />
         </>
       )}
-
-      <button
-        class="lebar utama"
-        disabled={!canExecute || busy || !adaIsi}
-        onClick={() => susun(sisiAktif)}
-      >
-        {label}
-      </button>
 
       <div class="row" style="margin-top: var(--s2)">
         <span class="label">Perkiraan gas</span>

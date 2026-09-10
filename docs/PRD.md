@@ -1337,6 +1337,13 @@ range atau mengarang likuiditas di luar data yang sudah dibaca. Setiap commit
 range membatalkan rencana setoran lama. Pengujian browser fixture memakai
 komponen produksi pada lebar 320, 360, dan 480 piksel.
 
+**Input setoran menyusun rencana secara otomatis setelah stabil 400 ms.**
+Mengubah nominal, aset setoran, zap, pool, atau tick membatalkan rencana lama,
+lalu panel meminta rencana baru tanpa tombol antara. Sidik jari input menahan
+permintaan identik agar jawaban engine tidak membentuk loop. Approval, zap,
+dan pembukaan posisi tetap berupa klik terpisah karena masing masing adalah
+aksi on-chain.
+
 **Preset range menandai dirinya dari lebar yang sebenarnya berlaku**, bukan dari
 tombol mana yang terakhir ditekan. Engine membulatkan batas ke grid tick,
 sehingga lebarnya bisa bergeser sedikit, dan menandai tombol menurut ingatan
