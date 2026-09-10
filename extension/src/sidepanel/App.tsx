@@ -2325,7 +2325,8 @@ function porsiDalamRange(p: Posisi): number {
  * Setoran satu aset saat zap aktif, mengikuti tata letak acuan MMT Finance.
  *
  * Zap aktif memperlihatkan satu kotak dan pilihan token berada di dalam kotak.
- * Zap mati memperlihatkan kedua sisi karena user perlu mengisi rasio sendiri.
+ * Zap mati memperlihatkan kedua sisi; user boleh mengetik salah satunya dan
+ * engine mengisi sisi pasangan dengan rasio range yang sama.
  * Rencana disusun otomatis setelah input berhenti berubah sebentar. Dengan
  * begitu nominal dan range adalah input; tombol berikutnya langsung menjadi
  * aksi on-chain yang memang dibutuhkan (izin, zap, atau buka posisi).

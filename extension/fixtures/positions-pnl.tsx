@@ -83,6 +83,13 @@ function Preview() {
   const onPlan = (_id: string, action: JenisAksi, input?: ActionInput) => {
     if (action !== "tambah_likuiditas") return;
     const fromPons = Boolean(input?.amount1);
+    const ethPerPons = 0.00029931;
+    const amount0 = fromPons
+      ? String(Number(input?.amount1 ?? "0") * ethPerPons)
+      : input?.amount0 ?? "0";
+    const amount1 = fromPons
+      ? input?.amount1 ?? "0"
+      : String(Number(input?.amount0 ?? "0") / ethPerPons);
     setPlan({
       plan_id: crypto.randomUUID(),
       position_id: position.position_id,
@@ -99,9 +106,7 @@ function Preview() {
       fee0: null,
       fee1: null,
       allowances: [],
-      amounts: fromPons
-        ? { symbol0: "ETH", amount0: "0.00029931", symbol1: "PONS", amount1: input?.amount1 ?? "1" }
-        : { symbol0: "ETH", amount0: input?.amount0 ?? "0.00029931", symbol1: "PONS", amount1: "1" },
+      amounts: { symbol0: "ETH", amount0, symbol1: "PONS", amount1 },
       tick_lower_baru: null,
       tick_upper_baru: null,
     });

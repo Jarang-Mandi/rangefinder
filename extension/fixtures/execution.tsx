@@ -1,7 +1,7 @@
 import { render } from "preact";
 import { useState } from "preact/hooks";
 import { SetoranCard } from "../src/sidepanel/App";
-import type { Deposit, RangeView, TokenState } from "../src/shared/protocol";
+import type { Deposit, OpenPlanView, RangeView, TokenState } from "../src/shared/protocol";
 import "../src/shared/tokens.css";
 import "../src/sidepanel/panel.css";
 
@@ -53,11 +53,46 @@ const view: RangeView = {
 
 function Preview() {
   const [deposit, setDeposit] = useState<Deposit | null>(null);
+  const modal = Number(deposit?.amount ?? "0");
+  const jumlahMeme = deposit?.side === "meme" ? modal : modal / view.current.price_usd;
+  const jumlahQuote = deposit?.side === "quote" ? modal : modal * view.current.price_usd;
+  // Fixture menirukan jawaban engine supaya perilaku kedua arah bisa diuji
+  // tanpa RPC. Produksi tetap memakai angka integer dari engine.
+  const plan: OpenPlanView | null = deposit ? {
+    deposit,
+    plan_id: "fixture-plan",
+    request_id: "fixture-request",
+    pool_id: poolId,
+    tick_lower: view.lower.tick,
+    tick_upper: view.upper.tick,
+    amount0: "0",
+    amount1: "0",
+    liquidity: "1",
+    token_id_simulasi: "1",
+    gas_estimate: 180_000,
+    dry_run: false,
+    gates: [],
+    warnings: [],
+    allowances: [],
+    version: "v4",
+    zap: null,
+    setor: {
+      simbol_memecoin: "PONS",
+      jumlah_memecoin: jumlahMeme,
+      simbol_quote: "USDG",
+      jumlah_quote: jumlahQuote,
+      nilai_quote: jumlahQuote,
+    },
+    apr_estimasi: null,
+    gas_biaya: 0.00004,
+    gas_gwei: 1,
+    expires_at: new Date(Date.now() + 180_000).toISOString(),
+  } : null;
   return (
     <main class="content" style="width:100%;max-width:480px;margin:0 auto">
       <section class="card execution-card">
         <SetoranCard
-          plan={null}
+          plan={plan}
           view={view}
           token={token}
           busy={false}

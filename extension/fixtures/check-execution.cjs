@@ -36,5 +36,21 @@ async (page) => {
   await toggle.click();
   if (await page.locator('.kotak-setor').count() !== 2) throw Error('Zap mati harus menampilkan dua input');
 
-  return { widths: [320, 360, 480], zapInputs: 1, manualInputs: 2, deposit };
+  const meme = page.getByRole('spinbutton', { name: 'PONS Amount' });
+  const quoteManual = page.getByRole('spinbutton', { name: 'USDG Amount' });
+  await meme.fill('1');
+  await page.waitForFunction(() => {
+    const fields = [...document.querySelectorAll('.kotak-setor input')];
+    return fields.some(field => field.value === '0.0000042');
+  });
+  const dariMeme = [await meme.inputValue(), await quoteManual.inputValue()];
+
+  await quoteManual.fill('0.0000084');
+  await page.waitForFunction(() => {
+    const fields = [...document.querySelectorAll('.kotak-setor input')];
+    return fields.some(field => field.value === '2');
+  });
+  const dariQuote = [await meme.inputValue(), await quoteManual.inputValue()];
+
+  return { widths: [320, 360, 480], zapInputs: 1, manualInputs: 2, deposit, dariMeme, dariQuote };
 }
