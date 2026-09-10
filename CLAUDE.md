@@ -78,18 +78,19 @@ rencana beserta seluruh gate, memberi izin token, menjalankan zap, membuka
 posisi, melihat posisi dan PnL, mengklaim fee, menutup posisi, memindai pool
 paling ramai di rantai, dan menilai hook terhadap kriteria adopsi.
 
-**Belum pernah ada satu pun transaksi sungguhan.** `execution.dry_run` menyala
-secara bawaan, dan mematikannya adalah keputusan sadar user. Jangan pernah
-mematikannya atas inisiatif sendiri.
+**Transaksi sungguhan pertama berhasil 10 September 2026.** Dengan izin user,
+pool V4 PONS/ETH menjalankan zap, approval, dan mint posisi `2339246`; receipt
+mint `0xfd2a...2170` lulus G7. `execution.dry_run` tetap menyala secara bawaan
+pada instalasi bersih dan hanya boleh dimatikan atas keputusan sadar user.
 
 ### Batas pembuktian saat ini
 
-Transaksi dengan dana nyata belum pernah dijalankan. `execution.dry_run` tetap
-menyala sampai user sendiri mematikannya. Deteksi upgrade hook membaca empat
-slot proxy standar dan tidak dapat membuktikan pola proxy nonstandar yang tidak
-menaruh alamat implementasi atau admin di slot tersebut. Data holder serta umur
-token belum tersedia pada semua sumber; vektor self-improvement menyimpannya
-sebagai `null`, bukan nol, sampai ada bukti.
+Jalur V4 open sudah terbukti dengan dana nyata, tetapi V3 live serta aksi
+claim, close, increase, dan rebalance belum diuji dengan dana nyata. Deteksi
+upgrade hook membaca empat slot proxy standar dan tidak dapat membuktikan pola
+proxy nonstandar yang tidak menaruh alamat implementasi atau admin di slot
+tersebut. Data holder serta umur token belum tersedia pada semua sumber; vektor
+self-improvement menyimpannya sebagai `null`, bukan nol, sampai ada bukti.
 
 Histogram sekarang memiliki handle batas bawah/atas, keyboard satu tick spacing
 (Shift sepuluh spacing), serta zoom 1x sampai 8x dan reset. `Histogram.tsx`
@@ -367,8 +368,8 @@ bytecode yang tidak cocok dengan yang dipin.
 | 1 | Engine: config, pairing, keystore, chain, api, xtask | **selesai dan terverifikasi jalan** |
 | 1 | Ekstensi: manifest, side panel, jembatan chart | selesai, typecheck bersih, build menghasilkan dist yang bisa dimuat |
 | 2 | Injeksi chart dan matematika satuan | **selesai**. Penemuan pool, kalibrasi kurs dari chart, konversi tiga satuan, snap tick beserta laporan drift, lingkaran penuh panel ke chart ke engine, dan uji integrasi terhadap snapshot gmgn |
-| 3 | Eksekusi V3 | **selesai**. Gate G0 sampai G7 terangkai dan terbukti jalan terhadap pool sungguhan lewat `cargo xtask dryrun`: versi protokol, pembatas nilai, builder calldata, golden vector, simulasi, asersi invarian, izin ERC20, pengiriman beserta penjaga chain id dan nonce, serta verifikasi pasca kirim. Jalur panel lengkap: `quote_range`, `approve_token`, `open_position`. Yang belum pernah terjadi: satu pengiriman sungguhan, karena `dry_run` menyala secara bawaan dan mematikannya adalah keputusan user |
-| 4 | Eksekusi V4 dan zap | **selesai**. ABI V4 dibuktikan ada di bytecode terpasang lewat `cargo xtask v4probe`, encoder aksi menghasilkan byte identik dengan transaksi V4 sungguhan sepanjang 868 byte, izin dua lapis lewat Permit2, gate G0 sampai G7 terangkai. Zap satu sisi memakai kutipan V4Quoter dan penyelesai bagi dua, dan encoder UniversalRouter fork membangun ulang transaksi swap sungguhan 1124 byte byte per byte termasuk field `minHopPriceX36`. `cargo xtask dryrun` dan `cargo xtask zap` hijau terhadap pool nyata |
+| 3 | Eksekusi V3 | **selesai**. Gate G0 sampai G7 terangkai dan terbukti jalan terhadap pool sungguhan lewat `cargo xtask dryrun`: versi protokol, pembatas nilai, builder calldata, golden vector, simulasi, asersi invarian, izin ERC20, pengiriman beserta penjaga chain id dan nonce, serta verifikasi pasca kirim. Jalur panel lengkap: `quote_range`, `approve_token`, `open_position`. Pengiriman V3 dengan dana nyata belum diuji |
+| 4 | Eksekusi V4 dan zap | **selesai dan terbukti live**. ABI V4 dibuktikan ada di bytecode terpasang lewat `cargo xtask v4probe`, encoder aksi menghasilkan byte identik dengan transaksi V4 sungguhan sepanjang 868 byte, izin dua lapis lewat Permit2, gate G0 sampai G7 terangkai. Zap satu sisi memakai kutipan V4Quoter dan penyelesai bagi dua, dan encoder UniversalRouter fork membangun ulang transaksi swap sungguhan 1124 byte byte per byte termasuk field `minHopPriceX36`. Uji live PONS/ETH membuka posisi `2339246`, receipt mint sukses dan G7 cocok |
 | 5 | Positions, PnL, notifikasi | **selesai**. Posisi V3 lewat ERC721Enumerable dan V4 lewat pemindaian Transfer. Fee dibaca dari pertumbuhan fee. PnL memisahkan fee, IL, gas, dan slippage, serta mempertahankan `null` untuk komponen yang belum terbukti. Histori eksternal V3 direkonstruksi dari event; V4 memakai batas calldata sebagai perkiraan. Klaim, close, tambah likuiditas, dan rebalance tersedia lewat rencana dan klik eksplisit |
 | 6 | Signals dan doktrin penempatan | **selesai**. Detektor sideways serta dump lalu basis, doktrin penempatan, optimizer fee tier, dan scan berlabel tersedia. Gate hook mengukur kelima kriteria on chain dan dapat membuat allowlist otomatis 24 jam. Transfer tax jalur LP dan jual kecil dibuktikan melalui simulasi kontrak nyata |
 | 6b | Perbaikan dari pemakaian | **selesai**. Distribusi likuiditas V3/V4, histogram interaktif tanpa lompatan setelah drag, statistik pool, kartu setoran bergaya MMT dengan satu aset saat Zap aktif, saldo wallet, perkiraan gas, Settings, snapshot konsisten, isolasi tab, Zap satu sisi terhubung dari panel sampai engine, serta penyusunan rencana otomatis 400 ms setelah input stabil |

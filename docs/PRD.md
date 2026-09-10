@@ -946,6 +946,14 @@ akan keliru mencocokkan kata `execution` pada hampir setiap revert.
 
 **Verifikasi pasca kirim membaca lebih banyak.** V4 tidak memancarkan `IncreaseLiquidity` di PositionManager, jadi penanda posisi baru adalah `Transfer` ERC721 dari alamat nol. Yang dibandingkan bukan hanya tick dan likuiditas, tapi PoolKey lengkap termasuk hook, karena poolId adalah hash dari kelimanya. Hook yang berbeda berarti pool yang berbeda, betapapun mirip sisanya.
 
+**Bukti live pertama, 10 September 2026.** Dengan batas posisi, harian, dan
+ukuran pertama pool masing masing US$5, setoran awal 0,0005 ETH menjalankan
+zap `0x94f3...ce01` lalu mint `0xfd2a...2170` pada pool PONS/ETH
+`0x5b940d...3780`. Receipt mint membuat posisi V4 `2339246`; pembacaan ulang
+menemukan tick 80400–88038, likuiditas `95279522151851660`, status in-range,
+dan G7 cocok. Seluruh arus keluar native termasuk gas adalah
+0,000589301266414847 ETH atau sekitar US$1,46 pada kurs saat uji.
+
 `PositionInfo` mengemas kedua tick sebagai int24 di dalam satu uint256: delapan bit terbawah flag, lalu `tickLower`, lalu `tickUpper`, lalu poolId terpotong. Pembacaannya diuji terhadap posisi V4 sungguhan, tokenId 2100029.
 
 ### 6.3b Pemilihan jalur

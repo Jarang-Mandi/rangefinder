@@ -41,3 +41,19 @@ Uji ini juga menemukan penerjemah revert yang mencari substring `ti`. Kata
 `0xd81b2f2e` (`AllowanceExpired`) dan `0xf96fb071`
 (`InsufficientAllowance`) ditampilkan sebagai error tick. Selector Permit2
 kini dikenali lebih dulu dan pola tick dipersempit menjadi `reverted: TI`.
+
+## Hasil live
+
+Setelah perbaikan, approval PositionManager memakai anggaran tetap
+0,9481957353647749 PONS. G4, G5, R1, dan R2 semuanya lulus, allowance kosong,
+dan mint `0xfd2a3b0cdaf6d1c664645f5084524403269a97df7d160d547747c14290342170`
+sukses di blok 59477846. Gate G7 membaca posisi V4 `2339246` dan membuktikan
+pool, tick 80400–88038, serta likuiditas `95279522151851660` cocok dengan
+rencana. Posisi terbaca aktif dan in-range.
+
+Tujuh transaksi dari zap sampai mint memakai total gas
+0,000080554555084 ETH. Saldo ETH turun persis 0,000589301266414847 ETH setelah
+menjumlahkan zap, ETH yang masuk posisi, dan gas. Pada kurs engine
+US$2.472,2269 per ETH, totalnya sekitar US$1,4569, sehingga uji berada jauh di
+bawah batas US$5. Sisa wallet setelah audit adalah sekitar 0,004718266 PONS
+dan 0,009540098 ETH.
