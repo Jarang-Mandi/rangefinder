@@ -51,6 +51,16 @@ Bridge chart mengikat attach dan createShape ke generasi navigasi. Hasil shape
 lama dibersihkan pada chart pemiliknya, antrean halaman baru tidak menunggu
 shape iframe lama, dan dataReady dibatasi 15 detik. Perintah gambar membawa
 token dan divalidasi lagi terhadap URL tujuan oleh relay serta bridge.
+Pembaruan range dari panel memindahkan kedua shape yang sudah ada lewat
+`setPoints`; membuat pasangan baru hanya jalur pemulihan kalau shape hilang.
+Event dari perpindahan terprogram dibedakan dari drag user supaya tidak
+memantul kembali ke engine.
+
+Kartu eksekusi mengikuti hierarki MMT Finance: header ringkas, sakelar Zap,
+satu input aset saat Zap aktif, dua input saat Zap mati, token pill, nilai fiat,
+saldo, lalu satu tombol utama. Fixture `fixtures/execution.html` menguji alur
+input serta lebar 320, 360, dan 480 piksel. Rancangan pengganti dry run bernama
+`Simulasi | Tx Asli` sudah ada di PRD 9.2.1, tetapi belum diimplementasikan.
 
 Setelah fase 6 ditutup, seluruh pekerjaan berikutnya adalah perbaikan yang
 datang dari user memakai panelnya sendiri. Itu tercatat di PRD 6.15, dan
@@ -80,8 +90,10 @@ sebagai `null`, bukan nol, sampai ada bukti.
 
 Histogram sekarang memiliki handle batas bawah/atas, keyboard satu tick spacing
 (Shift sepuluh spacing), serta zoom 1x sampai 8x dan reset. `Histogram.tsx`
-memakai geometri harga logaritmis di `shared/histogram.ts`. Pembulatan batas
-tetap dilakukan engine. Fixture terisolasi dapat dijalankan dengan
+memakai geometri harga logaritmis di `shared/histogram.ts`. Setelah drag,
+posisi handle dipertahankan sampai batas hasil engine tiba agar tidak kembali
+sesaat ke props lama. Pembulatan batas tetap dilakukan engine. Fixture
+terisolasi dapat dijalankan dengan
 `node extension/scripts/preview-histogram.mjs`; interaksi browser diperiksa
 oleh `extension/fixtures/check-histogram.cjs` melalui Playwright CLI.
 
@@ -356,7 +368,7 @@ bytecode yang tidak cocok dengan yang dipin.
 | 4 | Eksekusi V4 dan zap | **selesai**. ABI V4 dibuktikan ada di bytecode terpasang lewat `cargo xtask v4probe`, encoder aksi menghasilkan byte identik dengan transaksi V4 sungguhan sepanjang 868 byte, izin dua lapis lewat Permit2, gate G0 sampai G7 terangkai. Zap satu sisi memakai kutipan V4Quoter dan penyelesai bagi dua, dan encoder UniversalRouter fork membangun ulang transaksi swap sungguhan 1124 byte byte per byte termasuk field `minHopPriceX36`. `cargo xtask dryrun` dan `cargo xtask zap` hijau terhadap pool nyata |
 | 5 | Positions, PnL, notifikasi | **selesai**. Posisi V3 lewat ERC721Enumerable dan V4 lewat pemindaian Transfer. Fee dibaca dari pertumbuhan fee. PnL memisahkan fee, IL, gas, dan slippage, serta mempertahankan `null` untuk komponen yang belum terbukti. Histori eksternal V3 direkonstruksi dari event; V4 memakai batas calldata sebagai perkiraan. Klaim, close, tambah likuiditas, dan rebalance tersedia lewat rencana dan klik eksplisit |
 | 6 | Signals dan doktrin penempatan | **selesai**. Detektor sideways serta dump lalu basis, doktrin penempatan, optimizer fee tier, dan scan berlabel tersedia. Gate hook mengukur kelima kriteria on chain dan dapat membuat allowlist otomatis 24 jam. Transfer tax jalur LP dan jual kecil dibuktikan melalui simulasi kontrak nyata |
-| 6b | Perbaikan dari pemakaian | **selesai**. Distribusi likuiditas V3/V4, histogram interaktif, statistik pool, setoran dua sisi, saldo wallet, perkiraan gas, Settings, snapshot konsisten, isolasi tab, dan Zap satu sisi terhubung dari panel sampai engine |
+| 6b | Perbaikan dari pemakaian | **selesai**. Distribusi likuiditas V3/V4, histogram interaktif tanpa lompatan setelah drag, statistik pool, kartu setoran bergaya MMT dengan satu aset saat Zap aktif, saldo wallet, perkiraan gas, Settings, snapshot konsisten, isolasi tab, dan Zap satu sisi terhubung dari panel sampai engine |
 | 7 | Self improvement | **selesai**. Vektor fitur dan hasil tersimpan per posisi, kalibrasi per rezim memakai minimum 30 hasil, penantang 20 hasil, batas keras, filter PnL per versi, replay hasil/candle, serta rollback satu perintah |
 
 ### Bukti fase 1 selesai
@@ -367,7 +379,7 @@ Diverifikasi langsung, bukan diasumsikan:
 cargo test --workspace   511 lolos, 1 uji jaringan diabaikan, 3 uji xtask lolos
 cargo clippy             bersih dengan warnings sebagai error
 cargo xtask docs-check   dokumen dan kontrak pesan sinkron
-npm test  (extension)    39 lolos, typecheck dan build bersih
+npm test  (extension)    41 lolos, typecheck dan build bersih
 ```
 
 Bundle ekstensi juga dimuat sebagai ekstensi unpacked pada Chromium dan diuji

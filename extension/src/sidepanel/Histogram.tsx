@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "preact/hooks";
+import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import type { Distribusi } from "../shared/protocol";
 import { mergeBands, priceAt, priceY, zoomDomain } from "../shared/histogram";
 
@@ -25,8 +25,17 @@ export function Histogram({ depth, kelipatanBawah, kelipatanAtas, onCommit }: {
   const commit = (b: Bounds) => {
     const [lo, hi] = [...b].sort((a, b) => a - b);
     if (lo > 0 && hi > lo) onCommit(lo / depth.harga_sekarang, hi / depth.harga_sekarang);
-    setDraft(null);
+    // Pertahankan posisi optimistis sampai jawaban engine tiba. Mengosongkan
+    // draft di sini membuat handle kembali sesaat ke batas lama, lalu meloncat
+    // lagi ke tick hasil pembulatan setelah perjalanan WebSocket selesai.
+    setDraft([lo, hi]);
   };
+  useEffect(() => {
+    // Perubahan props adalah pengakuan dari engine. Jangan membatalkan draft
+    // ketika harga berkala datang di tengah drag; pointer masih memegang sumber
+    // kebenaran visual sampai dilepas.
+    if (!drag.current) setDraft(null);
+  }, [kelipatanBawah, kelipatanAtas, depth.harga_sekarang]);
   const move = (event: PointerEvent) => {
     if (!drag.current || !svg.current) return;
     const rect = svg.current.getBoundingClientRect();
@@ -93,6 +102,5 @@ export function Histogram({ depth, kelipatanBawah, kelipatanAtas, onCommit }: {
       </g>)}
     </svg>
     <div class="histogram-bounds num"><span>{label(sorted[0])}</span><span>{label(sorted[1])}</span></div>
-    <p class="hint">Geser batas atau gunakan tombol panah. Zoom memperbesar data yang sudah terbaca.</p>
   </div>;
 }

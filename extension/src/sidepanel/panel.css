@@ -750,79 +750,187 @@
   color: var(--text);
 }
 
-/* Ringkasan setoran di dalam kartu Eksekusi. */
+/* Kartu eksekusi dibuat sebagai satu permukaan utuh. Setoran, status rencana,
+ * dan pemeriksaan dipisahkan dengan garis tipis, bukan kartu bertumpuk. */
+.execution-card {
+  overflow: hidden;
+}
+
 .setoran {
-  margin-top: var(--s3);
-  padding: var(--s2) var(--s3);
-  border: 1px solid var(--border);
-  border-radius: var(--r-control);
-  background: var(--surface-raised);
+  min-width: 0;
 }
 
-.setoran .hint {
-  margin-bottom: 0;
-}
-
-.setor-sisi {
+.execution-deposit-header {
   display: flex;
-  gap: var(--s1);
-}
-
-/* Kotak setoran, mengikuti bentuk acuan: nama token dan saldo di atas, angka
- * besar di tengah, nilai USD di bawah. */
-.kotak-setor {
-  margin-top: var(--s2);
-  padding: var(--s2) var(--s3);
-  border: 1px solid var(--border);
-  border-radius: var(--r-control);
-  background: var(--surface);
-}
-
-.kotak-atas {
-  display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
-  font-size: 11px;
+  gap: var(--s2);
+  margin-bottom: var(--s3);
+}
+
+.execution-deposit-header h2 {
+  min-width: 0;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.execution-header-tools {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  flex: none;
+}
+
+.range-glyph {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  color: var(--accent);
+}
+
+.range-glyph svg {
+  width: 19px;
+  height: 19px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.5;
+}
+
+.execution-header-divider {
+  width: 1px;
+  height: 20px;
+  background: var(--border-strong);
+}
+
+/* Kotak setoran mengikuti hierarki acuan MMT: label kecil, angka utama besar,
+ * token berbentuk pil, lalu nilai fiat dan saldo pada garis dasar yang sama. */
+.kotak-setor {
+  min-width: 0;
+  margin-top: var(--s2);
+  padding: 10px 10px 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
 }
 
 .kotak-nama {
-  font-weight: 700;
-  color: var(--text);
-}
-
-.kotak-saldo {
+  display: block;
   color: var(--text-muted);
   font-size: 10px;
+  font-weight: 600;
+}
+
+.kotak-nilai-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+  min-height: 40px;
 }
 
 .kotak-input {
-  width: 100%;
-  margin-top: 2px;
-  padding: 0;
+  min-width: 0;
+  flex: 1;
+  width: auto;
+  margin: 0;
+  padding: 2px 0;
   border: none;
+  border-radius: 0;
   background: none;
   color: var(--text);
-  font-size: 20px;
-  font-weight: 700;
+  font-size: 22px;
+  font-weight: 500;
+  line-height: 1.15;
   font-variant-numeric: tabular-nums;
 }
 
 .kotak-input:focus {
   outline: none;
+  border: none;
 }
 
-.kotak-usd {
-  display: block;
-  font-size: 10px;
+.kotak-input::placeholder {
+  color: var(--text);
+  opacity: 1;
+}
+
+.token-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  max-width: 48%;
+  min-height: 30px;
+  padding: 4px 7px 4px 5px;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+button.token-pill {
+  cursor: pointer;
+}
+
+.token-emblem {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  flex: none;
+  place-items: center;
+  border: 1px solid var(--accent);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.token-swap {
   color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1;
 }
 
+.kotak-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  min-width: 0;
+}
 
-/* Tombol utama: satu aksi yang jelas di bawah kedua kotak, seperti acuan. */
+.kotak-usd,
+.kotak-saldo {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kotak-saldo {
+  text-align: right;
+}
+
+/* Tombol utama: satu aksi yang jelas tepat di bawah input. */
 .lebar.utama {
+  width: 100%;
+  min-height: 38px;
+  margin-top: var(--s2);
   background: var(--accent);
   border-color: var(--accent);
-  color: #0f1115;
+  color: #fff;
+  font-weight: 700;
 }
 
 .lebar.utama:disabled {
@@ -831,9 +939,75 @@
   color: var(--text-muted);
 }
 
-.setoran h3 {
-  margin: 0;
-  font-size: 13px;
+.execution-blocked,
+.execution-plan-status,
+.execution-plan-meta,
+.execution-gates,
+.execution-card > .stack:last-child {
+  margin-top: var(--s3);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--border);
+}
+
+.execution-blocked {
+  color: var(--warn);
+  font-size: 10px;
+}
+
+.execution-plan-status {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+}
+
+.execution-plan-status .chip {
+  padding: 2px 6px;
+  font-size: 9px;
+}
+
+.execution-plan-status .chip.warn {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.execution-expiry {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.execution-plan-meta {
+  font-size: 11px;
+}
+
+.execution-gates summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 10px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.execution-gates summary::-webkit-details-marker {
+  display: none;
+}
+
+.execution-gates summary::after {
+  content: "+";
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1;
+}
+
+.execution-gates[open] summary::after {
+  content: "\2212";
+}
+
+.execution-gates .stack {
+  margin-top: var(--s2);
 }
 
 /* Kabar dari engine, jawaban langsung atas aksi yang baru ditekan.

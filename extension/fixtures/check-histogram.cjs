@@ -10,11 +10,18 @@ async (page) => {
   await page.mouse.move(box.x + box.width - 12, box.y + box.height / 2 - 30);
   await page.mouse.up();
   await page.waitForFunction(() => JSON.parse(document.querySelector('output').textContent).commits === 1);
+  const optimisticY = (await lower.boundingBox()).y;
+  await page.waitForFunction(() => JSON.parse(document.querySelector('output').textContent).pending === null);
+  const acknowledgedY = (await lower.boundingBox()).y;
+  if (Math.abs(optimisticY - acknowledgedY) > 1) throw Error('Handle kembali ke batas lama sebelum engine mengakui drag');
   const before = await result();
   if (before.commits !== 1 || before.bounds[0] <= .9) throw Error('Drag tidak tersimpan');
   await lower.focus();
   await lower.press('ArrowUp');
-  await page.waitForFunction(() => JSON.parse(document.querySelector('output').textContent).commits === 2);
+  await page.waitForFunction(() => {
+    const state = JSON.parse(document.querySelector('output').textContent);
+    return state.commits === 2 && state.pending === null;
+  });
   const after = await result();
   if (after.commits !== 2 || Math.abs(after.bounds[0] / before.bounds[0] - 1.0001 ** 60) > 1e-12) throw Error('Keyboard tidak mengubah satu spacing');
   await page.getByRole('button', { name: 'Reset zoom histogram' }).click();
@@ -27,5 +34,5 @@ async (page) => {
     if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)) throw Error('Scroll horizontal pada ' + width);
     await page.screenshot({ path: `output/playwright/histogram-${width}.png` });
   }
-  console.log(JSON.stringify({ before, after, widths: [320, 360, 480], zoom: '1x sampai 8x, reset benar' }));
+  return { before, after, optimisticY, acknowledgedY, widths: [320, 360, 480], zoom: '1x sampai 8x, reset benar' };
 }

@@ -19,28 +19,57 @@ const B = "0x2222222222222222222222222222222222222222";
 const url = (token: string) => `https://gmgn.ai/robinhood/token/${token}`;
 const flush = () => new Promise<void>(resolve => setImmediate(resolve));
 
-function fakeChart(name: string, slowReady = false, slowShape = false) {
+function fakeChart(name: string, slowReady = false, slowShape = false, supportsUpdates = true) {
   const removed: string[] = [];
   const created: string[] = [];
+  const events: string[] = [];
+  const points = new Map<string, { time: number; price: number }[]>();
   let ready: (() => void) | null = null;
   let shape: ((id: string) => void) | null = null;
+  let drawing: ((id: string, type: string) => void) | null = null;
   const token = name === "A" ? A : B;
   const chart = {
     symbol: () => `robinhood/${token}/USD/MCAP`, resolution: () => "1", getSeries: () => null,
     dataReady: (callback: () => void) => { ready = callback; return !slowReady; },
     getVisibleRange: () => ({ from: 1, to: 2 }),
     getVisiblePriceRange: () => ({ from: 1, to: 2 }),
-    getShapeById: () => ({ getPoints: () => [{ time: 1, price: 2 }], setPoints: () => {} }),
+    getShapeById: (id: string) => {
+      if (!supportsUpdates || !points.has(id)) throw Error("shape tidak ada");
+      return {
+        getPoints: () => points.get(id)!,
+        setPoints: (next: { time: number; price: number }[]) => {
+          points.set(id, next);
+          events.push(`set:${id}:${next[0].price}`);
+        },
+      };
+    },
     getAllShapes: () => [],
-    removeEntity: (id: string) => removed.push(id),
-    createShape: () => {
+    removeEntity: (id: string) => { removed.push(id); events.push(`remove:${id}`); },
+    createShape: (point: { time: number; price: number }) => {
       const id = `${name}-${created.length}`;
       created.push(id);
+      points.set(id, [point]);
+      events.push(`create:${id}`);
       return slowShape ? new Promise<string>(resolve => { shape = resolve; }) : Promise.resolve(id);
     },
   };
-  const api = { activeChart: () => chart, subscribe: () => {}, unsubscribe: () => {} };
-  return { api, created, removed, ready: () => ready?.(), finish: () => shape?.(`${name}-0`) };
+  const api = {
+    activeChart: () => chart,
+    subscribe: (_event: string, handler: (id: string, type: string) => void) => { drawing = handler; },
+    unsubscribe: () => { drawing = null; },
+  };
+  return {
+    api,
+    created,
+    removed,
+    events,
+    ready: () => ready?.(),
+    finish: () => shape?.(`${name}-0`),
+    move: (id: string, price: number) => {
+      points.set(id, [{ time: 2, price }]);
+      drawing?.(id, "move");
+    },
+  };
 }
 
 function environment(initial: ReturnType<typeof fakeChart>) {
@@ -145,5 +174,45 @@ test("bundle bridge: shape lama tidak menahan antrean atau mencemari chart baru"
     assert.deepEqual(old.removed, ["A-0"]);
     assert.deepEqual(next.removed, []);
     assert.deepEqual(env.posted.filter(p => p.kind === "lines_drawn").map(p => p.token), [B]);
+  } finally { env.close(); }
+});
+
+test("bundle bridge: range panel memindahkan dua garis tanpa membuat ulang", async () => {
+  const chart = fakeChart("A");
+  const env = environment(chart);
+  try {
+    await flush();
+    env.draw(A);
+    await flush();
+    chart.events.length = 0;
+
+    env.draw(A);
+    await flush();
+
+    assert.deepEqual(chart.events, ["set:A-0:2", "set:A-1:1"]);
+    assert.deepEqual(chart.created, ["A-0", "A-1"]);
+    assert.deepEqual(chart.removed, []);
+
+    const before = env.posted.filter(p => p.kind === "chart_line_moved").length;
+    chart.move("A-0", 2);
+    assert.equal(env.posted.filter(p => p.kind === "chart_line_moved").length, before);
+    chart.move("A-0", 2.5);
+    assert.equal(env.posted.filter(p => p.kind === "chart_line_moved").length, before + 1);
+  } finally { env.close(); }
+});
+
+test("bundle bridge: fallback lengkap dibuat sebelum garis lama dibuang", async () => {
+  const chart = fakeChart("A", false, false, false);
+  const env = environment(chart);
+  try {
+    await flush();
+    env.draw(A);
+    await flush();
+    chart.events.length = 0;
+
+    env.draw(A);
+    await flush();
+
+    assert.deepEqual(chart.events, ["create:A-2", "create:A-3", "remove:A-0", "remove:A-1"]);
   } finally { env.close(); }
 });

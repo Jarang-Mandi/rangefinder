@@ -74,6 +74,8 @@ let generation = 0;
 let linesChart: ChartApi | null = null;
 let drawingHandler: ((id: string, type: string) => void) | null = null;
 let retryTimer: number | null = null;
+/** Harga yang baru saja dipasang lewat API, agar event-nya tidak dianggap drag user. */
+const programmaticPrices = new Map<string, number>();
 
 function post(payload: Record<string, unknown>) {
   if (currentToken !== tokenFromUrl()) return;
@@ -182,9 +184,32 @@ async function gambarSekarang(upperPrice: number, lowerPrice: number, request: n
   const source = api;
   const chart = source.activeChart();
   const token = currentToken;
-  clearLines(false);
   const current = () => ticket === generation && request === permintaanTerakhir && api === source && token === tokenFromUrl();
   const time = chart.getVisibleRange().to;
+
+  // Garis yang sudah ada dipindahkan di tempat. Ini jalur normal saat range
+  // digeser dari panel: tidak ada shape yang hilang atau berlipat sementara.
+  // Kalau GMGN sudah membuang salah satu shape, pembuatan pasangan baru di
+  // bawah menjadi pemulihan yang aman.
+  const upperId = lines.upper;
+  const lowerId = lines.lower;
+  if (linesChart === chart && upperId && lowerId) {
+    try {
+      const upper = chart.getShapeById(upperId);
+      const lower = chart.getShapeById(lowerId);
+      programmaticPrices.set(upperId, upperPrice);
+      programmaticPrices.set(lowerId, lowerPrice);
+      upper.setPoints([{ time, price: upperPrice }]);
+      lower.setPoints([{ time, price: lowerPrice }]);
+      if (!current()) return;
+      post({ kind: "lines_drawn", upperPrice, lowerPrice });
+      return;
+    } catch {
+      programmaticPrices.delete(upperId);
+      programmaticPrices.delete(lowerId);
+    }
+  }
+
   const pair = await drawOwnedPair(side => chart.createShape(
     { time, price: side === "upper" ? upperPrice : lowerPrice },
     { shape: "horizontal_line", disableSave: true, overrides: {
@@ -198,8 +223,19 @@ async function gambarSekarang(upperPrice: number, lowerPrice: number, request: n
     for (const id of Object.values(pair)) { try { chart.removeEntity(id); } catch { /* Iframe hilang. */ } }
     return;
   }
+
+  // Buat pasangan baru sampai lengkap sebelum membuang pasangan lama. Kalau
+  // garis lama dihapus lebih dulu, chart berkedip kosong lalu menampilkan satu
+  // garis selama Promise garis kedua belum selesai. Efeknya paling terlihat
+  // saat range diubah dari panel karena setiap commit menggambar ulang chart.
+  const chartLama = linesChart;
+  const idLama = Object.values(lines);
+  for (const side of ["upper", "lower"] as Side[]) delete lines[side];
   linesChart = chart;
   Object.assign(lines, pair);
+  for (const id of idLama) {
+    try { chartLama?.removeEntity(id); } catch { /* Chart lama sudah hilang. */ }
+  }
   post({ kind: "lines_drawn", upperPrice, lowerPrice });
 }
 
@@ -213,6 +249,7 @@ function clearLines(cancelPending = true) {
     const id = lines[side];
     if (!id) continue;
     try { chart?.removeEntity(id); } catch { /* Shape atau iframe sudah hilang. */ }
+    programmaticPrices.delete(id);
     delete lines[side];
   }
   linesChart = null;
@@ -227,6 +264,7 @@ function onDrawingEvent(id: string, type: string) {
   if (!side || !api) return;
 
   if (type === "remove") {
+    programmaticPrices.delete(id);
     delete lines[side];
     post({ kind: "line_removed", side });
     return;
@@ -234,6 +272,11 @@ function onDrawingEvent(id: string, type: string) {
 
   const price = safe(() => api!.activeChart().getShapeById(id).getPoints()[0].price);
   if (price !== null && price !== undefined) {
+    const expected = programmaticPrices.get(id);
+    programmaticPrices.delete(id);
+    if (expected !== undefined && Math.abs(price - expected) <= Math.max(1, Math.abs(expected)) * 1e-12) {
+      return;
+    }
     post({ kind: "chart_line_moved", side, price });
   }
 }

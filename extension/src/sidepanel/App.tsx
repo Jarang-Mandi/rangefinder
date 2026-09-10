@@ -908,7 +908,6 @@ function AddressInput({
         </button>
       </div>
       {kotor ? <p class="error">Bukan alamat EVM. Harus 0x diikuti 40 karakter heksadesimal.</p> : null}
-      <p class="hint">Membuka halaman token di gmgn juga memuatnya di sini otomatis.</p>
     </section>
   );
 }
@@ -2314,11 +2313,11 @@ function porsiDalamRange(p: Posisi): number {
  * hanya menampilkan dan meneruskan tekanan tombol.
  */
 /**
- * Setoran dua sisi, mengikuti tata letak acuan MMT Finance.
+ * Setoran satu aset saat zap aktif, mengikuti tata letak acuan MMT Finance.
  *
- * Dua kotak yang selalu terlihat, masing masing dengan nama token, nilainya
- * dalam USD, dan saldo wallet. Di bawahnya satu tombol besar yang labelnya
- * menyatakan keadaan, lalu baris estimasi APR.
+ * Zap aktif memperlihatkan satu kotak dan pilihan token berada di dalam kotak.
+ * Zap mati memperlihatkan kedua sisi karena user perlu mengisi rasio sendiri.
+ * Di bawahnya satu tombol besar menyusun rencana dari input terakhir.
  *
  * KENAPA MENGISI SATU KOTAK MENGISI YANG LAIN
  * Rasio antara kedua sisi ditentukan range, bukan oleh user. Range yang
@@ -2332,7 +2331,7 @@ function porsiDalamRange(p: Posisi): number {
  * berjalan. Saldo yang tidak terbaca ditulis sebagai garis, bukan nol, karena
  * wallet yang belum dibuka bukan wallet yang kosong.
  */
-function SetoranCard({
+export function SetoranCard({
   plan,
   view,
   token,
@@ -2408,71 +2407,85 @@ function SetoranCard({
 
   return (
     <div class="setoran">
-      <div class="section-title">
-        <h3>Set deposit amounts</h3>
-        <button
-          type="button"
-          class={`sakelar${zap ? " nyala" : ""}`}
-          disabled={versi === "v3"}
-          onClick={() => { setZap(!zap); onQuote(null); }}
-          aria-pressed={zap}
-        >
-          <span class="sakelar-tuas" />
-          <span class="sakelar-teks">Zap in</span>
-        </button>
-      </div>
-
-      {/* Kedua aset tetap terlihat. Sisi yang terakhir disunting menjadi
-          sumber anggaran saat Zap aktif. */}
-      <KotakSetor
-        simbol={simbolMeme}
-        nilai={isiMeme}
-        usd={Number(isiMeme) * hargaMeme}
-        saldo={saldo ? saldo.memecoin : null}
-        onInput={(v) => {
-          onQuote(null);
-          setSisiAktif("meme");
-          setIsiMeme(v);
-        }}
-        onSelesai={() => susun("meme")}
-      />
-      <KotakSetor
-        simbol={simbolQuote}
-        nilai={isiQuote}
-        usd={Number(isiQuote) * hargaQuote}
-        saldo={saldo ? saldo.quote : null}
-        onInput={(v) => {
-          onQuote(null);
-          setSisiAktif("quote");
-          setIsiQuote(v);
-        }}
-        onSelesai={() => susun("quote")}
-      />
-
-      {zap ? (
-        <div class="setor-sisi" style="margin-top: var(--s2)">
+      <div class="execution-deposit-header">
+        <h2>Set Deposit Amounts</h2>
+        <div class="execution-header-tools">
+          <span class="range-glyph" title="Range aktif" aria-hidden="true">
+            <svg viewBox="0 0 20 20">
+              <path d="M3 2.5v14.5h14.5" />
+              <path d="M6 13l3-4 3 2 4-6" />
+            </svg>
+          </span>
+          <span class="execution-header-divider" />
           <button
-            class={`preset${sisiAktif === "meme" ? " aktif" : ""}`}
-            onClick={() => { setSisiAktif("meme"); onQuote(null); }}
+            type="button"
+            class={`sakelar${zap ? " nyala" : ""}`}
+            disabled={versi === "v3"}
+            onClick={() => { setZap(!zap); onQuote(null); }}
+            aria-pressed={zap}
           >
-            setor {simbolMeme}
-          </button>
-          <button
-            class={`preset${sisiAktif === "quote" ? " aktif" : ""}`}
-            onClick={() => { setSisiAktif("quote"); onQuote(null); }}
-          >
-            setor {simbolQuote}
+            <span class="sakelar-tuas" />
+            <span class="sakelar-teks">Zap in</span>
           </button>
         </div>
-      ) : null}
+      </div>
 
-      {zap && setor ? (
-        <p class="hint">
-          Engine menukar sebagiannya supaya cocok rasio range. Hasilnya kira kira{" "}
-          {formatCompact(setor.jumlah_memecoin)} {simbolMeme} dan{" "}
-          {formatCompact(setor.jumlah_quote)} {simbolQuote}.
-        </p>
-      ) : null}
+      {zap ? (
+        sisiAktif === "meme" ? (
+          <KotakSetor
+            simbol={simbolMeme}
+            nilai={isiMeme}
+            usd={Number(isiMeme) * hargaMeme}
+            saldo={saldo ? saldo.memecoin : null}
+            onGanti={() => { onQuote(null); setSisiAktif("quote"); }}
+            onInput={(v) => {
+              onQuote(null);
+              setIsiMeme(v);
+            }}
+            onSelesai={() => susun("meme")}
+          />
+        ) : (
+          <KotakSetor
+            simbol={simbolQuote}
+            nilai={isiQuote}
+            usd={Number(isiQuote) * hargaQuote}
+            saldo={saldo ? saldo.quote : null}
+            onGanti={() => { onQuote(null); setSisiAktif("meme"); }}
+            onInput={(v) => {
+              onQuote(null);
+              setIsiQuote(v);
+            }}
+            onSelesai={() => susun("quote")}
+          />
+        )
+      ) : (
+        <>
+          <KotakSetor
+            simbol={simbolMeme}
+            nilai={isiMeme}
+            usd={Number(isiMeme) * hargaMeme}
+            saldo={saldo ? saldo.memecoin : null}
+            onInput={(v) => {
+              onQuote(null);
+              setSisiAktif("meme");
+              setIsiMeme(v);
+            }}
+            onSelesai={() => susun("meme")}
+          />
+          <KotakSetor
+            simbol={simbolQuote}
+            nilai={isiQuote}
+            usd={Number(isiQuote) * hargaQuote}
+            saldo={saldo ? saldo.quote : null}
+            onInput={(v) => {
+              onQuote(null);
+              setSisiAktif("quote");
+              setIsiQuote(v);
+            }}
+            onSelesai={() => susun("quote")}
+          />
+        </>
+      )}
 
       <button
         class="lebar utama"
@@ -2506,7 +2519,6 @@ function SetoranCard({
         </p>
       ) : null}
 
-      {saldo === null ? <p class="hint">Buka wallet untuk melihat saldo.</p> : null}
     </div>
   );
 }
@@ -2517,6 +2529,7 @@ function KotakSetor({
   nilai,
   usd,
   saldo,
+  onGanti,
   onInput,
   onSelesai,
 }: {
@@ -2524,33 +2537,57 @@ function KotakSetor({
   nilai: string;
   usd: number;
   saldo: number | null;
+  onGanti?: () => void;
   onInput: (v: string) => void;
   onSelesai: () => void;
 }) {
+  const tokenPill = (
+    <>
+      <span class="token-emblem" aria-hidden="true">{simbol.slice(0, 1).toUpperCase()}</span>
+      <span>{simbol}</span>
+      {onGanti ? <span class="token-swap" aria-hidden="true">⇆</span> : null}
+    </>
+  );
   return (
     <div class="kotak-setor">
-      <div class="kotak-atas">
-        <span class="kotak-nama">{simbol}</span>
+      <span class="kotak-nama">{simbol} Amount</span>
+      <div class="kotak-nilai-row">
+        <input
+          class="kotak-input num"
+          aria-label={`${simbol} Amount`}
+          type="number"
+          min="0"
+          step="any"
+          placeholder="0"
+          value={nilai}
+          onInput={(e) => onInput((e.target as HTMLInputElement).value)}
+          onBlur={onSelesai}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") onSelesai();
+          }}
+        />
+        {onGanti ? (
+          <button
+            type="button"
+            class="token-pill"
+            onClick={onGanti}
+            title="Ganti aset setoran"
+            aria-label={`Ganti aset setoran dari ${simbol}`}
+          >
+            {tokenPill}
+          </button>
+        ) : (
+          <span class="token-pill">{tokenPill}</span>
+        )}
+      </div>
+      <div class="kotak-meta">
+        <span class="kotak-usd num">
+          {Number.isFinite(usd) && usd > 0 ? formatUsd(usd) : "$0.00"}
+        </span>
         <span class="kotak-saldo num">
-          {saldo === null ? "saldo -" : "saldo " + formatCompact(saldo)}
+          Bal: {saldo === null ? "-" : formatCompact(saldo)} {simbol}
         </span>
       </div>
-      <input
-        class="kotak-input num"
-        type="number"
-        min="0"
-        step="any"
-        placeholder="0"
-        value={nilai}
-        onInput={(e) => onInput((e.target as HTMLInputElement).value)}
-        onBlur={onSelesai}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") onSelesai();
-        }}
-      />
-      <span class="kotak-usd num">
-        {Number.isFinite(usd) && usd > 0 ? formatUsd(usd) : "$0"}
-      </span>
     </div>
   );
 }
@@ -2584,6 +2621,7 @@ function ExecuteCard({
   // memutuskan hal yang sama pasti menyimpang.
   const kurang = plan?.allowances ?? [];
   const gateGagal = plan?.gates.filter((g) => !g.passed) ?? [];
+  const alasanTampil = blockedReasons.filter(alasanStatusTerlihat);
   // Zap yang belum dijalankan menahan pembukaan posisi. Membukanya sekarang
   // tetap berhasil, tapi sebagian modal akan menganggur tanpa menghasilkan
   // fee apa pun, dan itu kerugian yang tidak terlihat di layar mana pun.
@@ -2595,25 +2633,7 @@ function ExecuteCard({
     plan.zap === null;
 
   return (
-    <section class="card">
-      <div class="section-title">
-        <h2>Eksekusi</h2>
-        <span class="chip">
-          {plan ? plan.version.toUpperCase() : "belum ada rencana"}
-          {plan?.dry_run ? " · dry run" : ""}
-        </span>
-      </div>
-
-      {!canExecute ? (
-        <div class="stack" style="margin-top: var(--s2)">
-          {blockedReasons.map((r) => (
-            <p key={r} class="muted" style="margin: 0">
-              {r}
-            </p>
-          ))}
-        </div>
-      ) : null}
-
+    <section class="card execution-card">
       <SetoranCard
         plan={plan}
         view={view}
@@ -2623,9 +2643,25 @@ function ExecuteCard({
         onQuote={onQuote}
       />
 
+      {!canExecute && alasanTampil.length > 0 ? (
+        <div class="execution-blocked stack">
+          {alasanTampil.map((r) => (
+            <p key={r} class="muted" style="margin: 0">
+              {r}
+            </p>
+          ))}
+        </div>
+      ) : null}
+
       {plan ? (
         <>
-          <div class="stack" style="margin-top: var(--s3)">
+          <div class="execution-plan-status">
+            <span class="chip">{plan.version.toUpperCase()}</span>
+            {plan.dry_run ? <span class="chip warn">dry run</span> : null}
+            <span class="execution-expiry num">berlaku hingga {waktuSingkat(plan.expires_at)}</span>
+          </div>
+
+          <div class="execution-plan-meta">
             <div class="row">
               <span class="label">Likuiditas</span>
               <span class="value num">{plan.liquidity}</span>
@@ -2642,16 +2678,24 @@ function ExecuteCard({
             </div>
           </div>
 
-          <div class="stack" style="margin-top: var(--s3)">
-            {plan.gates.map((g) => (
-              <div key={g.id} class="row">
-                <span class="label">
-                  <span class={`dot ${g.passed ? "ok" : "bad"}`} /> {g.id} {g.name}
-                </span>
-                <span class="value muted">{g.detail}</span>
-              </div>
-            ))}
-          </div>
+          <details class="execution-gates" open={gateGagal.length > 0}>
+            <summary>
+              <span class={`dot ${gateGagal.length === 0 ? "ok" : "bad"}`} />
+              {gateGagal.length === 0
+                ? `${plan.gates.length} pemeriksaan lulus`
+                : `${gateGagal.length} pemeriksaan gagal`}
+            </summary>
+            <div class="stack">
+              {plan.gates.map((g) => (
+                <div key={g.id} class="row">
+                  <span class="label">
+                    <span class={`dot ${g.passed ? "ok" : "bad"}`} /> {g.id} {g.name}
+                  </span>
+                  <span class="value muted">{g.detail}</span>
+                </div>
+              ))}
+            </div>
+          </details>
 
           {plan.warnings.length > 0 ? (
             <div class="stack" style="margin-top: var(--s2)">
@@ -2728,7 +2772,6 @@ function ExecuteCard({
                 : "Buka posisi"}
           </button>
 
-          <p class="hint">Rencana berlaku sampai {waktuSingkat(plan.expires_at)}.</p>
         </>
       ) : null}
 
@@ -3041,9 +3084,6 @@ function DepthCard({
         />
       )}
 
-      <p class="hint">Batang biru: modal yang akan berbagi fee dengan Anda.</p>
-
-
     </section>
   );
 }
@@ -3101,7 +3141,6 @@ function RangeCard({ view }: { view: RangeView }) {
         </p>
       ))}
 
-      <p class="hint">Angka sudah dibulatkan ke grid tick.</p>
     </section>
   );
 }
@@ -3487,6 +3526,7 @@ function EngineCard({
   onSetRpc: (http: string[]) => void;
   onForget: () => void;
 }) {
+  const alasanTampil = status.blocked_reasons.filter(alasanStatusTerlihat);
   return (
     <section class="card">
       <h2>Engine</h2>
@@ -3499,9 +3539,9 @@ function EngineCard({
         <span class="value num">{formatDuration(status.uptime_secs)}</span>
       </div>
 
-      {!status.can_execute ? (
+      {!status.can_execute && alasanTampil.length > 0 ? (
         <ul class="blocked">
-          {status.blocked_reasons.map((r) => (
+          {alasanTampil.map((r) => (
             <li key={r}>{r}</li>
           ))}
         </ul>
@@ -3586,6 +3626,11 @@ function isPrivateKey(v: string): boolean {
 
 function shortAddress(a: string): string {
   return a.length > 12 ? `${a.slice(0, 6)}...${a.slice(-4)}` : a;
+}
+
+/** Keadaan ini sudah tampak dari kartu Wallet dan tidak perlu diulang. */
+function alasanStatusTerlihat(reason: string): boolean {
+  return reason.trim().toLowerCase() !== "wallet belum dibuat";
 }
 
 /** Angka besar dalam bentuk ringkas, karena side panel sempit. */

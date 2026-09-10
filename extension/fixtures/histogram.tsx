@@ -19,11 +19,21 @@ const depth: Distribusi = {
 function Preview() {
   const [bounds, setBounds] = useState<[number, number]>([.9, 1.1]);
   const [commits, setCommits] = useState(0);
+  const [pending, setPending] = useState<[number, number] | null>(null);
   return <main class="content" style="max-width:480px;margin:0 auto">
     <section class="card"><h2>Distribusi likuiditas</h2>
       <Histogram depth={depth} kelipatanBawah={bounds[0]} kelipatanAtas={bounds[1]}
-        onCommit={(lo, hi) => { setBounds([lo, hi]); setCommits(c => c + 1); }} />
-      <output aria-label="Hasil interaksi">{JSON.stringify({ commits, bounds })}</output>
+        onCommit={(lo, hi) => {
+          setPending([lo, hi]);
+          setCommits(c => c + 1);
+          // Meniru perjalanan panel -> engine -> panel. Handle tidak boleh
+          // kembali ke batas lama selama jawaban ini belum tiba.
+          window.setTimeout(() => {
+            setBounds([lo, hi]);
+            setPending(null);
+          }, 300);
+        }} />
+      <output aria-label="Hasil interaksi">{JSON.stringify({ commits, bounds, pending })}</output>
     </section>
   </main>;
 }

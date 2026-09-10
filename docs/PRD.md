@@ -1747,9 +1747,43 @@ execution.dry_run     menyusun dan menyimulasikan, tapi tidak pernah mengirim
                       bawaan: MENYALA
 ```
 
-Dry run menyala secara bawaan dan itu disengaja. Engine harus bisa dipasang di mesin bersih tanpa risiko memindahkan dana pada percobaan pertama. Mengirim transaksi sungguhan adalah tindakan sadar yang dinyalakan user, bukan bawaan yang kebetulan aktif. Config yang tidak menyebut bagian `execution` sama sekali tetap mendapat dry run menyala, bukan mati.
+Dry run menyala secara bawaan dan itu disengaja. Engine harus bisa dipasang di mesin bersih tanpa risiko memindahkan dana pada percobaan pertama. Mengirim transaksi sungguhan adalah tindakan sadar yang dinyalakan user, bukan bawaan yang kebetulan aktif. Config yang tidak menyebut bagian `execution` sama sekali tetap mendapat dry run menyala, bukan mati. Paragraf ini menjelaskan perilaku implementasi saat ini sampai migrasi mode di bawah selesai.
 
 Melampaui batas yang aktif berarti transaksi ditolak di engine dengan alasan yang dikembalikan ke panel.
+
+#### 9.2.1 Rancangan mode Simulasi dan Tx Asli
+
+Status: disepakati untuk implementasi berikutnya dan belum diterapkan pada kode.
+
+Sakelar `Simulasi | Tx Asli` akan menggantikan `execution.dry_run` dan indikator status eksekusi di bagian bawah side panel. Bawaannya `Simulasi`. Memilih mode membatalkan rencana aksi yang sudah tersusun, sehingga rencana dari satu mode tidak pernah bisa dikirim melalui mode lain.
+
+Mode Simulasi menjalankan pengalaman produk yang sama dengan transaksi asli: user menyusun rencana, melewati gate, membuka posisi, memantau posisi, mengklaim fee, melakukan rebalance, dan menutup posisi. Perbedaannya hanya pada lapisan pengiriman. Engine tidak meminta tanda tangan, tidak memesan nonce, tidak mengirim raw transaction, dan tidak mengubah allowance atau saldo on chain.
+
+Posisi simulasi wajib:
+
+- disimpan di basis data dan tetap ada setelah engine dimulai ulang;
+- muncul di tab Positions dan PnL dengan label `simulasi` yang selalu terlihat;
+- memakai harga, tick, likuiditas, gas, dan hasil quote dari snapshot rantai nyata saat aksi dilakukan;
+- mempunyai siklus hidup buka, tambah, klaim, rebalance, dan tutup yang sama dengan posisi asli;
+- menghasilkan fee, impermanent loss, biaya gas, slippage, serta PnL bersih sebagai estimasi hipotetis;
+- tidak dicampurkan ke saldo, fee yang bisa diklaim, riwayat transaksi, atau total PnL posisi asli.
+
+Fee simulasi dihitung dari perubahan fee growth pool dan likuiditas virtual posisi pada setiap pembaruan. Nilai posisi dan impermanent loss dihitung dari jumlah token virtual saat masuk dibanding nilai kedua token pada harga terakhir. Gas dan slippage memakai estimasi yang dihasilkan jalur quote yang sama dengan Tx Asli. Semua angka itu adalah hasil model untuk pengujian dan tidak dapat diklaim on chain.
+
+Setiap posisi, aksi, hasil, notifikasi, dan ekspor yang berasal dari mode ini membawa `execution_mode: "simulation"` serta label manusia `simulasi`. ID posisi simulasi memakai namespace terpisah, sehingga tidak mungkin dianggap sebagai token ID NFT atau position key on chain.
+
+Mode Tx Asli memakai seluruh pipeline tanda tangan, approval, simulasi `eth_call`, pengiriman, receipt, dan verifikasi pasca kirim yang sudah ditentukan dokumen ini. Perpindahan ke Tx Asli harus merupakan tindakan user yang eksplisit. Posisi simulasi tidak dapat diubah menjadi posisi asli; user harus menyusun rencana baru dan mengirim aksi baru.
+
+Migrasi konfigurasi yang direncanakan:
+
+```text
+execution.mode        "simulation" | "live"
+                      bawaan: "simulation"
+```
+
+Config lama dengan `dry_run = true`, atau tanpa bagian `execution`, dipetakan ke `simulation`. Config lama dengan `dry_run = false` dipetakan ke `live`, tetapi panel tetap membatalkan rencana lama dan meminta user menyusun ulang sebelum transaksi pertama. Setelah masa migrasi, `dry_run` dihapus dari schema, protokol, gate G6, dan UI.
+
+Uji penerimaan mode ini wajib membuktikan tiga hal: alur simulasi lengkap bertahan setelah restart dan menghasilkan PnL, tidak ada RPC pengiriman atau mutasi allowance selama simulasi, serta rencana dan posisi tidak pernah melintasi batas antara `simulation` dan `live`.
 
 ### 9.3 Permukaan lokal
 
