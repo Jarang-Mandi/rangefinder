@@ -45,3 +45,7 @@ setiap agent.
 | `009-zap-dan-router-fork.md` | Zap satu sisi, bug perbandingan desimal, dan cara memulihkan struct fork |
 | `010-posisi-pnl-notifikasi.md` | Enumerasi posisi, fee sebenarnya, satuan PnL, dan aturan notifikasi |
 | `011-mesin-sinyal.md` | Detektor sinyal, pembedaan kosong dari skor rendah, dan koreksi rumus PRD |
+| `012-integrasi-dan-perbaikan.md` | Audit lintas fitur, jurnal eksekusi, rekonstruksi PnL, dan fixture integrasi |
+| `013-drag-range-dan-kartu-eksekusi.md` | Drag range, tata letak setoran, dan pengujian lebar side panel |
+| `014-rencana-otomatis-dan-uji-live.md` | Quote otomatis, approval V4 saat harga bergerak, dan transaksi live pertama |
+| `015-layanan-lokal-dan-angka-posisi.md` | Watchdog engine, sesi wallet lokal, input berpasangan, dan angka PnL/Positions |

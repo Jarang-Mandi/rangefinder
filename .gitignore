@@ -8,6 +8,7 @@ extension/dist/
 .vite/
 .playwright-cli/
 output/playwright/
+output/*.png
 
 # Rahasia dan state lokal. Tidak boleh ada satu pun dari ini yang ter-commit.
 *.keystore

@@ -108,6 +108,25 @@ npm run build
 Lalu di Chrome: buka `chrome://extensions`, nyalakan Developer mode, klik
 Load unpacked, pilih `extension/dist`.
 
+## Menjalankan engine sebagai layanan lokal
+
+Di PowerShell biasa milik user yang akan memakai ekstensi:
+
+```powershell
+.\scripts\install-local-engine.ps1
+```
+
+Skrip membangun biner release, menyalinnya ke
+`%LOCALAPPDATA%\Rangefinder\bin`, lalu mendaftarkan Scheduled Task
+`Rangefinder Engine`. Launcher tersembunyi menjaga engine hidup dan mencoba
+lagi tiga detik setelah proses berhenti. Scheduled Task memulai launcher pada
+logon dan ikut menghidupkannya kembali bila launcher gagal.
+
+Instalasi lokal juga mengatur `auto_lock_minutes = 0` dan
+`use_credential_manager = true`. Untuk wallet lama, buka wallet satu kali
+setelah pemasangan. Passphrase kemudian dilindungi Windows Credential Manager
+dan restart berikutnya membuka wallet otomatis.
+
 ## Pairing
 
 1. Jalankan engine, salin token yang tercetak.
@@ -123,11 +142,11 @@ jalankan ulang engine, dan lakukan pairing ulang.
 Wallet dibuat dari side panel, bukan dari baris perintah, supaya passphrase
 tidak pernah masuk riwayat shell.
 
-Setelah dibuat, wallet **tetap terkunci**. Itu disengaja: jalur buka kunci
-diuji sejak menit pertama, bukan nanti saat sudah ada dana di dalamnya.
-
-Wallet mengunci diri setelah 30 menit tanpa aktivitas. Ubah lewat
-`wallet.auto_lock_minutes` di `config.toml`.
+Pada konfigurasi bawaan, wallet mengunci diri setelah 30 menit tanpa aktivitas.
+Ubah lewat `wallet.auto_lock_minutes` di `config.toml`; nilai nol mematikan
+auto-lock selama engine hidup. Profil layanan lokal di atas menyimpan
+passphrase lewat Windows Credential Manager agar user tidak perlu membuka
+wallet berulang kali.
 
 **Peringatan.** Pembatas nominal bawaannya tidak terbatas, atas keputusan yang
 sudah diambil sadar. Artinya pengaman satu satunya adalah isi wallet itu

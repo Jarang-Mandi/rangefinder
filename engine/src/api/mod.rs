@@ -2033,18 +2033,40 @@ impl AppState {
             }
             crate::exec::aksi::JenisAksi::TambahLikuiditas => {
                 let (meta0, meta1) = metadata.as_ref().expect("metadata aksi modal");
-                let available0 = jumlah_aksi(input.amount0.as_deref(), meta0.decimals)?;
-                let available1 = jumlah_aksi(input.amount1.as_deref(), meta1.decimals)?;
-                if available0.is_zero() && available1.is_zero() {
+                let entered0 = jumlah_aksi(input.amount0.as_deref(), meta0.decimals)?;
+                let entered1 = jumlah_aksi(input.amount1.as_deref(), meta1.decimals)?;
+                if entered0.is_zero() && entered1.is_zero() {
                     return Err("isi jumlah token0 atau token1 yang akan ditambahkan".into());
                 }
+                let pool = pool_dari_posisi(&posisi)?;
+                // Kalau user mengisi satu sisi, turunkan sisi pasangannya dari
+                // rasio range yang sama. Ini memakai matematika integer engine,
+                // jadi angka yang muncul di panel sama dengan calon calldata.
+                let (available0, available1) = match (entered0.is_zero(), entered1.is_zero()) {
+                    (false, true) => deposit::budget(
+                        &pool,
+                        posisi.tick_lower,
+                        posisi.tick_upper,
+                        entered0,
+                        true,
+                        false,
+                    )?,
+                    (true, false) => deposit::budget(
+                        &pool,
+                        posisi.tick_lower,
+                        posisi.tick_upper,
+                        entered1,
+                        false,
+                        false,
+                    )?,
+                    _ => (entered0, entered1),
+                };
                 let (saldo0, saldo1) =
                     execute::saldo_dua_token(&provider, alamat.multicall, pemilik, token0, token1)
                         .await?;
                 if available0 > saldo0 || available1 > saldo1 {
                     return Err("saldo tidak cukup untuk jumlah tambah likuiditas".into());
                 }
-                let pool = pool_dari_posisi(&posisi)?;
                 let (liquidity, butuh0, butuh1) = crate::exec::pipeline::hitung_jumlah(
                     &pool,
                     posisi.tick_lower,
@@ -2126,7 +2148,7 @@ impl AppState {
                     },
                     value,
                     execute::HarapanAksi::Tambah {
-                        sebelum: posisi.clone(),
+                        sebelum: Box::new(posisi.clone()),
                         minimum_tambahan: liquidity.saturating_sub(liquidity / 100),
                     },
                 )

@@ -10,7 +10,7 @@
 //! - Jumlah permintaan RPC dijaga tetap sedikit lewat Multicall3, karena tab ini
 //!   dimuat ulang setiap kali user membukanya.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use alloy::primitives::{keccak256, Address, FixedBytes, U256};
 use alloy::providers::Provider;
@@ -127,6 +127,15 @@ async fn baca_v3<P: Provider>(
             version: PoolVersion::V3,
             token0: p.token0.to_string(),
             token1: p.token1.to_string(),
+            symbol0: None,
+            symbol1: None,
+            decimals0: None,
+            decimals1: None,
+            base_symbol: None,
+            quote_symbol: None,
+            price_current: None,
+            price_lower: None,
+            price_upper: None,
             fee: p.fee.to::<u32>(),
             tick_spacing: 0,
             tick_lower: p.tickLower.as_i32(),
@@ -348,6 +357,15 @@ async fn baca_fee_v4<P: Provider>(
             version: PoolVersion::V4,
             token0: key.currency0.to_string(),
             token1: key.currency1.to_string(),
+            symbol0: None,
+            symbol1: None,
+            decimals0: None,
+            decimals1: None,
+            base_symbol: None,
+            quote_symbol: None,
+            price_current: None,
+            price_lower: None,
+            price_upper: None,
             fee: key.fee.to::<u32>(),
             tick_spacing: key.tickSpacing.as_i32(),
             tick_lower: *lower,
@@ -538,12 +556,87 @@ async fn muat_snapshot_internal<P: Provider>(
         }
     }
 
+    if rekonstruksi_pnl {
+        if let Err(e) = lengkapi_tampilan(provider, registry, &mut out).await {
+            errors.push(format!("metadata tampilan posisi tidak terbaca: {e}"));
+        }
+    }
+
     lengkapi_pnl(&mut out, registry, store, owner);
     urutkan(&mut out);
     SnapshotPosisi {
         positions: out,
         errors,
     }
+}
+
+/// Ambil simbol/desimal semua token dalam satu multicall, lalu turunkan harga
+/// manusiawi. Panel tidak perlu menebak desimal atau menghitung angka mentah.
+async fn lengkapi_tampilan<P: Provider>(
+    provider: &P,
+    registry: &Registry,
+    posisi: &mut [Posisi],
+) -> Result<()> {
+    let mut terlihat = HashSet::new();
+    let mut alamat = Vec::new();
+    for p in posisi.iter() {
+        for value in [&p.token0, &p.token1] {
+            let address: Address = value
+                .parse()
+                .with_context(|| format!("alamat token posisi tidak valid: {value}"))?;
+            if terlihat.insert(address) {
+                alamat.push(address);
+            }
+        }
+    }
+    let metadata = crate::pools::token_meta_batch(provider, registry, &alamat).await?;
+    let peta: HashMap<Address, crate::pools::TokenMeta> = alamat
+        .into_iter()
+        .zip(metadata)
+        .filter_map(|(address, meta)| meta.map(|meta| (address, meta)))
+        .collect();
+
+    for p in posisi {
+        let a0: Address = p.token0.parse()?;
+        let a1: Address = p.token1.parse()?;
+        let (Some(m0), Some(m1)) = (peta.get(&a0), peta.get(&a1)) else {
+            continue;
+        };
+        p.symbol0 = Some(m0.symbol.clone());
+        p.symbol1 = Some(m1.symbol.clone());
+        p.decimals0 = Some(m0.decimals);
+        p.decimals1 = Some(m1.decimals);
+
+        let scale = 10f64.powi(i32::from(m0.decimals) - i32::from(m1.decimals));
+        let harga_tick = |tick: i32| {
+            let value = 1.0001f64.powi(tick) * scale;
+            (value.is_finite() && value > 0.0).then_some(value)
+        };
+        let (Some(mut lower), Some(mut upper)) =
+            (harga_tick(p.tick_lower), harga_tick(p.tick_upper))
+        else {
+            continue;
+        };
+        let mut current = p.tick_sekarang.and_then(harga_tick);
+        let quote0 = kutipan_pool(registry, &p.token0, &p.token1)
+            .map(|(quote0, _, _)| quote0)
+            .unwrap_or(false);
+        if quote0 {
+            lower = 1.0 / lower;
+            upper = 1.0 / upper;
+            current = current.map(|value| 1.0 / value);
+            std::mem::swap(&mut lower, &mut upper);
+            p.base_symbol = Some(m1.symbol.clone());
+            p.quote_symbol = Some(m0.symbol.clone());
+        } else {
+            p.base_symbol = Some(m0.symbol.clone());
+            p.quote_symbol = Some(m1.symbol.clone());
+        }
+        p.price_current = current.filter(|value| value.is_finite());
+        p.price_lower = Some(lower);
+        p.price_upper = Some(upper);
+    }
+    Ok(())
 }
 
 /// Kenali token kutipan sebuah pool beserta desimalnya.
@@ -750,14 +843,14 @@ pub fn lengkapi_pnl(
             impermanent_loss: il,
             gas,
             slippage,
-            net: if perkiraan {
-                None
-            } else {
-                fee_kutipan
-                    .zip(gas)
-                    .zip(slippage)
-                    .map(|((fee, gas), slippage)| fee - il - gas - slippage)
-            },
+            // Kalau seluruh komponennya punya angka, net tetap berguna meski
+            // cost basis direkonstruksi. `perkiraan` membuat statusnya jelas;
+            // menyembunyikan hasil justru membuat user melihat empat angka
+            // tetapi tidak tahu kesimpulannya.
+            net: fee_kutipan
+                .zip(gas)
+                .zip(slippage)
+                .map(|((fee, gas), slippage)| fee - il - gas - slippage),
             perkiraan: perkiraan || fee_kutipan.is_none(),
         });
     }
@@ -796,6 +889,15 @@ mod tests {
             version: PoolVersion::V4,
             token0: "0x0".into(),
             token1: "0x1".into(),
+            symbol0: None,
+            symbol1: None,
+            decimals0: None,
+            decimals1: None,
+            base_symbol: None,
+            quote_symbol: None,
+            price_current: None,
+            price_lower: None,
+            price_upper: None,
             fee: 3000,
             tick_spacing: 60,
             tick_lower: 0,

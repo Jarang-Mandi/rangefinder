@@ -390,6 +390,236 @@
   font-weight: 600;
 }
 
+/* PnL mengikuti hierarki kartu acuan: pair dan status, satu hasil utama,
+ * kemudian komponen pembentuknya. Semua warna tetap berasal dari token tema. */
+.eyebrow {
+  margin: 0 0 3px;
+  color: var(--text-muted);
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: .11em;
+  text-transform: uppercase;
+}
+
+.pnl-summary-head,
+.pnl-position-head,
+.position-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s2);
+}
+
+.pnl-summary-head h2,
+.pnl-position-head h2,
+.position-head h2 {
+  font-size: 17px;
+  font-weight: 750;
+  letter-spacing: -.035em;
+}
+
+.pnl-version {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: var(--s3);
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.pnl-version select {
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-control);
+  background: var(--bg);
+  color: var(--text);
+}
+
+.pnl-currency + .pnl-currency {
+  margin-top: var(--s3);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--border);
+}
+
+.pnl-hero {
+  margin-top: var(--s3);
+  padding: var(--s4) 0;
+  text-align: center;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.pnl-hero > span {
+  display: block;
+  color: currentColor;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .1em;
+}
+
+.pnl-hero > strong {
+  display: block;
+  margin-top: 2px;
+  color: currentColor;
+  font-size: clamp(26px, 9vw, 38px);
+  font-weight: 800;
+  line-height: 1.15;
+  letter-spacing: -.055em;
+}
+
+.pnl-hero > small {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.pnl-hero.naik { color: var(--upper); }
+.pnl-hero.turun { color: var(--lower); }
+.pnl-hero.kosong { color: var(--text-muted); }
+
+.pnl-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  margin-top: var(--s3);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--r-control);
+  background: var(--border);
+}
+
+.pnl-metric {
+  min-width: 0;
+  padding: 9px;
+  background: var(--surface-raised);
+}
+
+.pnl-metric > span {
+  display: block;
+  color: var(--text-muted);
+  font-size: 8px;
+}
+
+.pnl-metric > strong {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pnl-records,
+.pnl-date {
+  margin: var(--s2) 0 0;
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.pnl-empty h2 { margin-top: 2px; font-size: 17px; }
+.pnl-empty .muted { margin: var(--s2) 0 0; }
+
+/* Posisi mengutamakan jumlah token dan harga. Raw liquidity serta tick
+ * dipindah ke detail teknis agar tetap bisa diaudit tanpa memenuhi kartu. */
+.position-card .pos-bar { margin-top: var(--s4); }
+
+.position-range-labels {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: var(--s1);
+  margin-top: 5px;
+  color: var(--text-muted);
+  font-size: 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+.position-range-labels strong {
+  color: var(--text);
+  font-size: 9px;
+  text-align: center;
+}
+
+.position-range-labels span:last-child { text-align: right; }
+
+.position-price-unit {
+  margin: 3px 0 0;
+  color: var(--text-muted);
+  font-size: 8px;
+  text-align: center;
+}
+
+.position-balances {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s2);
+  margin-top: var(--s3);
+}
+
+.position-balances > div {
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-control);
+  background: var(--surface-raised);
+}
+
+.position-balances span,
+.position-fees > span {
+  display: block;
+  color: var(--text-muted);
+  font-size: 8px;
+}
+
+.position-balances strong {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.position-fees {
+  margin-top: var(--s2);
+  padding: 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-control);
+}
+
+.position-fees strong {
+  display: block;
+  margin-top: 3px;
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.position-fees i { color: var(--text-muted); font-style: normal; }
+
+.position-technical {
+  margin-top: var(--s2);
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.position-technical summary { cursor: pointer; }
+.position-technical .stack { margin-top: var(--s2); }
+.position-link-state { font-size: 8px; }
+
+/* Hanya dipakai fixture visual dua kartu; tidak muncul di side panel. */
+.fixture-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 360px));
+  gap: var(--s4);
+  max-width: 736px;
+  margin: 0 auto;
+}
+
+@media (max-width: 560px) {
+  .fixture-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
 /* Daftar pool ramai, PRD 3.4.
  *
  * Baris dipisahkan garis tipis dan pergeseran nilai permukaan, bukan gradasi.

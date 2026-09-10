@@ -26,6 +26,7 @@ use keystore::{KeystoreFile, Secret};
 pub struct Wallet {
     path: PathBuf,
     auto_lock: Duration,
+    use_credential_manager: bool,
     /// Ada isinya hanya saat wallet terbuka.
     unlocked: Option<Unlocked>,
     /// Alamat dari berkas keystore. `None` berarti wallet belum dibuat.
@@ -53,12 +54,17 @@ pub struct WalletStatus {
     pub locked: bool,
     pub address: Option<String>,
     pub auto_lock_minutes: u64,
+    /// Benar kalau passphrase disimpan oleh Windows dan wallet dibuka lagi
+    /// otomatis saat engine hidup.
+    pub credential_manager: bool,
+    /// Mode lokal tanpa penguncian berulang.
+    pub always_unlocked: bool,
     /// Detik tersisa sebelum kunci otomatis. `None` kalau sedang terkunci.
     pub seconds_until_auto_lock: Option<u64>,
 }
 
 impl Wallet {
-    pub fn open(dir: &Path, auto_lock_minutes: u64) -> Result<Self> {
+    pub fn open(dir: &Path, auto_lock_minutes: u64, use_credential_manager: bool) -> Result<Self> {
         let path = dir.join("wallet.keystore.json");
         let address =
             if path.exists() {
@@ -73,6 +79,7 @@ impl Wallet {
         Ok(Self {
             path,
             auto_lock: Duration::from_secs(auto_lock_minutes.saturating_mul(60)),
+            use_credential_manager,
             unlocked: None,
             address,
         })
@@ -96,11 +103,17 @@ impl Wallet {
             locked: self.is_locked(),
             address: self.address.map(|a| a.to_string()),
             auto_lock_minutes: self.auto_lock.as_secs() / 60,
-            seconds_until_auto_lock: self.unlocked.as_ref().map(|u| {
-                self.auto_lock
-                    .saturating_sub(u.last_activity.elapsed())
-                    .as_secs()
-            }),
+            credential_manager: self.use_credential_manager,
+            always_unlocked: self.use_credential_manager && self.auto_lock.is_zero(),
+            seconds_until_auto_lock: (!self.auto_lock.is_zero())
+                .then(|| {
+                    self.unlocked.as_ref().map(|u| {
+                        self.auto_lock
+                            .saturating_sub(u.last_activity.elapsed())
+                            .as_secs()
+                    })
+                })
+                .flatten(),
         }
     }
 
@@ -147,6 +160,7 @@ impl Wallet {
             .with_context(|| format!("gagal menulis keystore ke {}", self.path.display()))?;
 
         self.address = Some(address);
+        self.remember_passphrase(passphrase);
         tracing::info!(%address, path = %self.path.display(), "wallet dibuat");
         Ok(address)
     }
@@ -175,8 +189,30 @@ impl Wallet {
             last_activity: Instant::now(),
         });
         self.address = Some(address);
+        self.remember_passphrase(passphrase);
         tracing::info!(%address, "wallet dibuka");
         Ok(address)
+    }
+
+    /// Buka wallet memakai passphrase yang dilindungi Windows Credential
+    /// Manager. Tidak adanya credential adalah keadaan awal yang normal: user
+    /// cukup membuka wallet satu kali lewat panel, lalu `unlock` menyimpannya.
+    pub fn unlock_from_credential(&mut self) -> Result<bool> {
+        if !self.use_credential_manager || !self.exists() {
+            return Ok(false);
+        }
+        let Some(entry) = self.credential_entry()? else {
+            return Ok(false);
+        };
+        let passphrase = match entry.get_password() {
+            Ok(value) => zeroize::Zeroizing::new(value),
+            Err(keyring::Error::NoEntry) => return Ok(false),
+            Err(error) => return Err(error).context("Credential Manager tidak bisa dibaca"),
+        };
+        self.unlock(&passphrase)
+            .map_err(anyhow::Error::from)
+            .context("credential wallet lokal tidak cocok dengan keystore")?;
+        Ok(true)
     }
 
     pub fn lock(&mut self) {
@@ -188,6 +224,9 @@ impl Wallet {
     /// Kunci wallet kalau sudah melewati batas tidak aktif.
     /// Mengembalikan `true` kalau kunci otomatis baru saja terjadi.
     pub fn tick_auto_lock(&mut self) -> bool {
+        if self.auto_lock.is_zero() {
+            return false;
+        }
         let expired = self
             .unlocked
             .as_ref()
@@ -217,6 +256,37 @@ impl Wallet {
             .map(|u| &u.signer)
             .ok_or(EngineError::WalletLocked)
     }
+
+    fn credential_entry(&self) -> Result<Option<keyring::Entry>> {
+        let Some(address) = self.address else {
+            return Ok(None);
+        };
+        keyring::Entry::new(
+            "Rangefinder local wallet",
+            &address.to_string().to_lowercase(),
+        )
+        .map(Some)
+        .context("Credential Manager tidak tersedia")
+    }
+
+    fn remember_passphrase(&self, passphrase: &str) {
+        if !self.use_credential_manager {
+            return;
+        }
+        let result = self
+            .credential_entry()
+            .and_then(|entry| entry.context("wallet belum mempunyai alamat"))
+            .and_then(|entry| {
+                entry
+                    .set_password(passphrase)
+                    .context("passphrase tidak bisa disimpan di Credential Manager")
+            });
+        if let Err(error) = result {
+            // Gagal menyimpan credential tidak membatalkan wallet yang sudah
+            // berhasil dibuat atau dibuka. Tidak ada rahasia masuk log.
+            tracing::warn!(error = %error, "sesi wallet lokal tidak bisa disimpan");
+        }
+    }
 }
 
 fn read_keystore(path: &Path) -> Result<KeystoreFile> {
@@ -241,7 +311,7 @@ mod tests {
     #[test]
     fn siklus_buat_buka_kunci() {
         let dir = dir_sementara("wallet-siklus");
-        let mut w = Wallet::open(&dir, 30).unwrap();
+        let mut w = Wallet::open(&dir, 30, false).unwrap();
         assert!(!w.exists());
         assert!(w.is_locked());
 
@@ -265,7 +335,7 @@ mod tests {
     #[test]
     fn menolak_menimpa_wallet_yang_ada() {
         let dir = dir_sementara("wallet-timpa");
-        let mut w = Wallet::open(&dir, 30).unwrap();
+        let mut w = Wallet::open(&dir, 30, false).unwrap();
         w.create("p", None).unwrap();
 
         // Harus `WalletExists`, bukan error umum. Panel memakai kode itu untuk
@@ -282,7 +352,7 @@ mod tests {
     #[test]
     fn signer_ditolak_saat_terkunci() {
         let dir = dir_sementara("wallet-signer");
-        let mut w = Wallet::open(&dir, 30).unwrap();
+        let mut w = Wallet::open(&dir, 30, false).unwrap();
         w.create("p", None).unwrap();
         assert!(matches!(w.signer(), Err(EngineError::WalletLocked)));
         w.unlock("p").unwrap();
@@ -291,13 +361,14 @@ mod tests {
     }
 
     #[test]
-    fn kunci_otomatis_langsung_saat_batas_nol() {
+    fn batas_nol_mematikan_kunci_otomatis() {
         let dir = dir_sementara("wallet-autolock");
-        let mut w = Wallet::open(&dir, 0).unwrap();
+        let mut w = Wallet::open(&dir, 0, false).unwrap();
         w.create("p", None).unwrap();
         w.unlock("p").unwrap();
-        assert!(w.tick_auto_lock());
-        assert!(w.is_locked());
+        assert!(!w.tick_auto_lock());
+        assert!(!w.is_locked());
+        assert_eq!(w.status().seconds_until_auto_lock, None);
         // Panggilan kedua tidak boleh melaporkan penguncian lagi.
         assert!(!w.tick_auto_lock());
         let _ = std::fs::remove_dir_all(&dir);
@@ -306,7 +377,7 @@ mod tests {
     #[test]
     fn status_tidak_memuat_rahasia() {
         let dir = dir_sementara("wallet-status");
-        let mut w = Wallet::open(&dir, 30).unwrap();
+        let mut w = Wallet::open(&dir, 30, false).unwrap();
         w.create("p", None).unwrap();
         w.unlock("p").unwrap();
         let json = serde_json::to_string(&w.status()).unwrap();

@@ -6,7 +6,7 @@
 //!   2. token pairing dibuat sekali, ditampilkan sekali
 //!   3. registry      dibaca dari chain.toml
 //!   4. gate G1       verifikasi bytecode. Mismatch menghentikan engine
-//!   5. wallet        dibuka dalam keadaan terkunci
+//!   5. wallet        dibuka dari Credential Manager bila mode lokal aktif
 //!   6. server        mengikat loopback
 //!
 //! INVARIAN
@@ -86,8 +86,24 @@ async fn main() -> Result<()> {
 
     let registry_checks = run_registry_gate(&chain_client, &registry).await?;
 
-    let wallet = wallet::Wallet::open(&data_dir, cfg.wallet.auto_lock_minutes)?;
-    if wallet.exists() {
+    let mut wallet = wallet::Wallet::open(
+        &data_dir,
+        cfg.wallet.auto_lock_minutes,
+        cfg.wallet.use_credential_manager,
+    )?;
+    let otomatis_terbuka = match wallet.unlock_from_credential() {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(error = %error, "wallet tetap terkunci; buka sekali lewat panel");
+            false
+        }
+    };
+    if otomatis_terbuka {
+        tracing::info!(
+            address = %wallet.address().map(|a| a.to_string()).unwrap_or_default(),
+            "wallet lokal dibuka lewat Credential Manager"
+        );
+    } else if wallet.exists() {
         tracing::info!(
             address = %wallet.address().map(|a| a.to_string()).unwrap_or_default(),
             "wallet ditemukan, keadaan terkunci"
@@ -306,21 +322,18 @@ fn spawn_auto_lock_loop(state: AppState) {
 }
 
 fn print_pairing(token: &auth::PairingToken, baru: bool, bind: &std::net::SocketAddr) {
-    let judul = if baru {
-        "Token pairing dibuat"
-    } else {
-        "Token pairing"
-    };
     println!();
-    println!("  {judul}");
-    println!("  {}", token.as_hex());
-    println!();
-    println!("  Buka side panel Rangefinder, tempel token di atas satu kali.");
-    println!("  Engine mendengarkan di http://{bind}");
     if baru {
+        println!("  Token pairing dibuat");
+        println!("  {}", token.as_hex());
+        println!();
+        println!("  Buka side panel Rangefinder, tempel token di atas satu kali.");
         println!("  Token disimpan di direktori data dan tidak akan ditampilkan lagi");
         println!("  kecuali dijalankan dengan --print-token.");
+    } else {
+        println!("  Token pairing sudah tersimpan");
     }
+    println!("  Engine mendengarkan di http://{bind}");
     println!();
 }
 

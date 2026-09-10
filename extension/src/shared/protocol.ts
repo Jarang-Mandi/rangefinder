@@ -10,7 +10,7 @@
  *   tidak mengizinkan memasang header pada koneksi WebSocket.
  */
 
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 export const WS_SUBPROTOCOL = "rangefinder";
 export const DEFAULT_ENGINE_ORIGIN = "http://127.0.0.1:8787";
 
@@ -52,6 +52,8 @@ export interface WalletStatus {
   locked: boolean;
   address: string | null;
   auto_lock_minutes: number;
+  credential_manager: boolean;
+  always_unlocked: boolean;
   seconds_until_auto_lock: number | null;
 }
 
@@ -540,6 +542,15 @@ export interface Posisi {
   version: PoolVersion;
   token0: string;
   token1: string;
+  symbol0: string | null;
+  symbol1: string | null;
+  decimals0: number | null;
+  decimals1: number | null;
+  base_symbol: string | null;
+  quote_symbol: string | null;
+  price_current: number | null;
+  price_lower: number | null;
+  price_upper: number | null;
   fee: number;
   tick_spacing: number;
   tick_lower: number;

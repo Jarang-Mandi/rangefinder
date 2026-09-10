@@ -54,7 +54,6 @@ import {
   type RangeBound,
   type RangeView,
   type TokenState,
-  type TransactionsView,
 } from "../shared/protocol";
 
 import { Histogram } from "./Histogram";
@@ -96,7 +95,6 @@ export function App() {
   /** Menunggu jawaban engine. Mencegah tombol ditekan dua kali. */
   const [execBusy, setExecBusy] = useState(false);
   const [positions, setPositions] = useState<PositionsView | null>(null);
-  const [transactions, setTransactions] = useState<TransactionsView | null>(null);
   const [posBusy, setPosBusy] = useState(false);
   const [actionPlan, setActionPlan] = useState<ActionPlanView | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
@@ -245,7 +243,6 @@ export function App() {
         setPositions(v);
         setPosBusy(false);
       },
-      onTransactions: setTransactions,
       onOpenPlan: (plan) => {
         setOpenPlan(plan);
         setExecBusy(false);
@@ -264,7 +261,6 @@ export function App() {
         // lagi tepat. Rencananya dibuang supaya user menyusun ulang.
         if (result.kind === "zap" && result.status === "sukses") setOpenPlan(null);
         if (result.kind === "action") setActionPlan(null);
-        clientRef.current?.getTransactions();
       },
       onAlert: (level, code, message) => {
         // Kegagalan eksekusi datang sebagai alert, dan tanpa ini tombolnya
@@ -514,10 +510,7 @@ export function App() {
           <button
             key={t.id}
             class={`tab${tab === t.id ? " active" : ""}`}
-            onClick={() => {
-              setTab(t.id);
-              if (t.id === "pnl") clientRef.current?.getTransactions();
-            }}
+            onClick={() => setTab(t.id)}
           >
             {t.label}
           </button>
@@ -624,12 +617,10 @@ export function App() {
         ) : tab === "pnl" ? (
           <PnlTab
             view={positions}
-            transactions={transactions}
             busy={posBusy}
             onMuat={() => {
               setPosBusy(true);
               clientRef.current?.getPositions();
-              clientRef.current?.getTransactions();
             }}
           />
         ) : tab === "settings" ? (
@@ -1600,40 +1591,26 @@ function BarisMetrik({ nama, nilai, ket }: { nama: string; nilai: string; ket: s
  * Angka datang dari engine apa adanya. Panel tidak menjumlahkan apa pun sendiri,
  * karena dua tempat yang menjumlahkan hal yang sama pasti menyimpang.
  */
-function PnlTab({
+export function PnlTab({
   view,
-  transactions,
   busy,
   onMuat,
 }: {
   view: PositionsView | null;
-  transactions: TransactionsView | null;
   busy: boolean;
   onMuat: () => void;
 }) {
   const [versionFilter, setVersionFilter] = useState("all");
   if (!view) {
     return (
-      <div class="stack">
-        <section class="card">
-          <div class="section-title">
-            <h2>PnL</h2>
-          </div>
-          <p class="muted" style="margin: var(--s2) 0 0">
-            Belum dimuat. Angka PnL dihitung dari posisi yang sedang berjalan.
-          </p>
-          <button
-            type="button"
-            class="primary"
-            style="margin-top: var(--s3); width: 100%"
-            disabled={busy}
-            onClick={onMuat}
-          >
-            {busy ? "Membaca rantai" : "Muat posisi"}
-          </button>
-        </section>
-        <TransactionHistory view={transactions} />
-      </div>
+      <section class="card pnl-empty">
+        <p class="eyebrow">HASIL LIKUIDITAS</p>
+        <h2>PnL belum dimuat</h2>
+        <p class="muted">Nilai dihitung dari posisi, fee, IL, gas, dan slippage yang tercatat.</p>
+        <button type="button" class="primary lebar" disabled={busy} onClick={onMuat}>
+          {busy ? "Membaca rantai" : "Muat PnL"}
+        </button>
+      </section>
     );
   }
 
@@ -1662,19 +1639,21 @@ function PnlTab({
           };
   const posisiTerlihat = view.positions.filter((p) => milikVersi(p.position_id));
   const tertutupTerlihat = view.tertutup.filter((p) => milikVersi(p.position_id));
-  const berhasil = posisiTerlihat.filter((p) => p.pnl !== null);
-  const belumDinilai =
-    posisiTerlihat.length - berhasil.length + tertutupTerlihat.filter((p) => p.pnl === null).length;
+  const belumDinilai = posisiTerlihat.filter((p) => p.pnl === null).length
+    + tertutupTerlihat.filter((p) => p.pnl === null).length;
 
   return (
     <div class="stack">
-      <section class="card">
-        <div class="section-title">
-          <h2>Ringkasan</h2>
+      <section class="card pnl-summary">
+        <div class="pnl-summary-head">
+          <div>
+            <p class="eyebrow">HASIL LIKUIDITAS</p>
+            <h2>Ringkasan PnL</h2>
+          </div>
           <span class="chip">{r.jumlah} posisi</span>
         </div>
 
-        <label class="field" style="margin-top: var(--s2)">
+        <label class="field pnl-version">
           <span>Versi kalibrasi</span>
           <select
             value={selectedVersion}
@@ -1687,45 +1666,42 @@ function PnlTab({
           </select>
         </label>
 
-        <p class="hint">
-          {view.learning.closed_records} dari {view.learning.records} rekaman
-          self-improvement sudah memiliki hasil penutupan.
-        </p>
-
-        <div class="stack" style="margin-top: var(--s2)">
-          {r.currencies.map(c => (
-            <div class="stack" key={c.currency.id}>
-              <div class="row">
-                <span class="label">Net {c.currency.symbol}</span>
-                <span class={`value num ${c.total_net == null ? "" : c.total_net >= 0 ? "naik" : "turun"}`}>{angka(c.total_net)}</span>
-              </div>
-              <div class="row">
-                <span class="label">Fee {c.currency.symbol}</span>
-                <span class="value num">{angka(c.total_fee)}</span>
-              </div>
-              <div class="row">
-                <span class="label">Biaya {c.currency.symbol}</span>
-                <span class="value num">{angka(c.total_biaya)}</span>
-              </div>
-            </div>
-          ))}
-          <div class="row">
-            <span class="label">Win rate</span>
-            <span class="value num">{r.win_rate_bps == null ? "Belum lengkap" : `${(r.win_rate_bps / 100).toFixed(1)}%`}</span>
+        {r.currencies.length === 0 ? (
+          <div class="pnl-hero kosong">
+            <span>PNL BELUM TERSEDIA</span>
+            <strong>—</strong>
+            <small>Belum ada posisi dengan satuan kutipan yang bisa dinilai.</small>
           </div>
+        ) : r.currencies.map((c) => (
+          <div class="pnl-currency" key={c.currency.id}>
+            <PnlHero value={c.total_net} symbol={c.currency.symbol} estimated={c.total_net === null} />
+            <div class="pnl-metrics">
+              <PnlMetric label="Fee diperoleh" value={c.total_fee} symbol={c.currency.symbol} tone="naik" />
+              <PnlMetric label="Total biaya" value={c.total_biaya == null ? null : -c.total_biaya} symbol={c.currency.symbol} tone="turun" />
+              <PnlMetric
+                label="Win rate"
+                text={r.win_rate_bps == null ? "Belum lengkap" : `${(r.win_rate_bps / 100).toFixed(1)}%`}
+              />
+              <PnlMetric label="Posisi dinilai" text={`${c.jumlah}`} />
+            </div>
+          </div>
+        ))}
+
+        <div class="pnl-records">
+          {view.learning.closed_records} dari {view.learning.records} rekaman sudah ditutup
         </div>
 
         {r.perkiraan > 0 ? (
           <p class="hint">
-            {r.perkiraan} dari {r.jumlah} posisi belum memiliki catatan modal, fee,
-            atau biaya lengkap. Net menunggu rekonsiliasi.
+            {r.perkiraan} posisi masih berupa perkiraan. Hasil bersih muncul setelah
+            modal, fee, gas, dan slippage lengkap.
           </p>
         ) : null}
 
         {belumDinilai > 0 ? (
           <p class="hint">
-            {belumDinilai} posisi belum dapat dinilai karena satuan atau bukti
-            akuntansinya belum lengkap.
+            {belumDinilai} posisi belum dapat dinilai karena satuan kutipan atau
+            bukti akuntansinya belum lengkap.
           </p>
         ) : null}
 
@@ -1739,13 +1715,12 @@ function PnlTab({
         </button>
       </section>
 
-      {berhasil.map((p) => (
+      {posisiTerlihat.map((p) => (
         <PnlCard key={p.position_id} pos={p} />
       ))}
       {tertutupTerlihat.map((p) => (
         <ClosedPnlCard key={p.position_id} pos={p} />
       ))}
-      <TransactionHistory view={transactions} />
     </div>
   );
 }
@@ -1753,140 +1728,90 @@ function PnlTab({
 function ClosedPnlCard({ pos }: { pos: PosisiTertutup }) {
   const h = pos.pnl;
   return (
-    <section class="card">
-      <div class="section-title">
-        <h2>Posisi tertutup · {shortAddress(pos.position_id)}</h2>
+    <section class="card pnl-position">
+      <div class="pnl-position-head">
+        <div>
+          <p class="eyebrow">POSISI TERTUTUP</p>
+          <h2>{shortAddress(pos.token0)} / {shortAddress(pos.token1)}</h2>
+        </div>
         <span class="chip">{h?.perkiraan ? "perkiraan" : h ? "tercatat" : "belum lengkap"}</span>
       </div>
-      <p class="muted" style="margin: var(--s2) 0 0">
-        {new Date(pos.ditutup_pada).toLocaleString("id-ID")} · tx {shortAddress(pos.tx_hash)}
-      </p>
-      <div class="row" style="margin-top: var(--s2)">
-        <span class="label">Diterima token0 / token1</span>
-        <span class="value num">{pos.diterima0 || "?"} / {pos.diterima1 || "?"}</span>
-      </div>
+      <p class="pnl-date">Ditutup {new Date(pos.ditutup_pada).toLocaleString("id-ID")} · tx {shortAddress(pos.tx_hash)}</p>
       {h ? (
-        <div class="stack" style="margin-top: var(--s2)">
-          <div class="row">
-            <span class="label">Fee {h.currency.symbol}</span>
-            <span class="value num naik">{angka(h.fee)}</span>
+        <>
+          <PnlHero value={h.net} symbol={h.currency.symbol} estimated={h.perkiraan} />
+          <div class="pnl-metrics">
+            <PnlMetric label="Fee" value={h.fee} symbol={h.currency.symbol} tone="naik" />
+            <PnlMetric label="Impermanent loss" value={-h.impermanent_loss} symbol={h.currency.symbol} tone="turun" />
+            <PnlMetric label="Gas" value={h.gas == null ? null : -h.gas} symbol={h.currency.symbol} tone="turun" />
+            <PnlMetric label="Slippage zap" value={h.slippage == null ? null : -h.slippage} symbol={h.currency.symbol} tone="turun" />
           </div>
-          <div class="row">
-            <span class="label">Impermanent loss</span>
-            <span class="value num turun">{angka(-h.impermanent_loss)}</span>
-          </div>
-          <div class="row">
-            <span class="label">Gas tercatat</span>
-            <span class="value num turun">{angka(h.gas == null ? null : -h.gas)}</span>
-          </div>
-          <div class="row">
-            <span class="label">Slippage zap</span>
-            <span class="value num turun">{angka(h.slippage == null ? null : -h.slippage)}</span>
-          </div>
-          <div class="row pnl-net">
-            <span class="label">Net</span>
-            <span class={`value num ${h.net == null ? "" : h.net >= 0 ? "naik" : "turun"}`}>{angka(h.net)}</span>
-          </div>
-        </div>
+        </>
       ) : null}
       {pos.error ? <p class="hint">{pos.error}</p> : null}
     </section>
   );
 }
 
-function TransactionHistory({ view }: { view: TransactionsView | null }) {
+function PnlCard({ pos }: { pos: Posisi }) {
+  const h = pos.pnl;
   return (
-    <section class="card">
-      <div class="section-title">
-        <h2>Jurnal transaksi</h2>
-        <span class="chip">{view?.items.length ?? 0}</span>
+    <section class="card pnl-position">
+      <div class="pnl-position-head">
+        <div>
+          <p class="eyebrow">AKTIF · {pos.version.toUpperCase()} · {(pos.fee / 10_000).toFixed(2)}%</p>
+          <h2>{namaPair(pos)}</h2>
+        </div>
+        <span class="chip">
+          <span class={`dot ${!h || h.net == null ? "warn" : h.net >= 0 ? "ok" : "bad"}`} />
+          {!h ? "belum dinilai" : h.perkiraan ? "perkiraan" : "tercatat"}
+        </span>
       </div>
-      {view?.error ? <p class="hint">{view.error}</p> : null}
-      {!view ? (
-        <p class="muted" style="margin: var(--s2) 0 0">Belum dimuat.</p>
-      ) : view.items.length === 0 ? (
-        <p class="muted" style="margin: var(--s2) 0 0">Belum ada transaksi yang dicatat.</p>
+      {h ? (
+        <>
+          <PnlHero value={h.net} symbol={h.currency.symbol} estimated={h.perkiraan} />
+          <div class="pnl-metrics">
+            <PnlMetric label="Fee diperoleh" value={h.fee} symbol={h.currency.symbol} tone="naik" />
+            <PnlMetric label="Impermanent loss" value={-h.impermanent_loss} symbol={h.currency.symbol} tone="turun" />
+            <PnlMetric label="Gas" value={h.gas == null ? null : -h.gas} symbol={h.currency.symbol} tone="turun" />
+            <PnlMetric label="Slippage zap" value={h.slippage == null ? null : -h.slippage} symbol={h.currency.symbol} tone="turun" />
+          </div>
+        </>
       ) : (
-        <div class="stack" style="margin-top: var(--s2)">
-          {view.items.map((item) => {
-            const nada = item.status === "succeeded"
-              ? "ok"
-              : item.status === "reverted"
-                ? "bad"
-                : "warn";
-            return (
-              <div class="stack" key={item.tx_hash}>
-                <div class="row">
-                  <span class="label">
-                    <span class={`dot ${nada}`} /> {item.operation}
-                  </span>
-                  <span class="value num">{shortAddress(item.tx_hash)}</span>
-                </div>
-                <div class="row">
-                  <span class="label">Status · nonce {item.nonce}</span>
-                  <span class="value">{item.status}{item.confirmed ? " · final" : ""}</span>
-                </div>
-                {item.gas_used !== null ? (
-                  <div class="row">
-                    <span class="label">Gas terpakai</span>
-                    <span class="value num">{item.gas_used.toLocaleString("id-ID")}</span>
-                  </div>
-                ) : null}
-                {item.received ? (
-                  <div class="row">
-                    <span class="label">Diterima token0 / token1</span>
-                    <span class="value num">{item.received.amount0} / {item.received.amount1}</span>
-                  </div>
-                ) : null}
-                {item.error ? <p class="hint">{item.error}</p> : null}
-              </div>
-            );
-          })}
+        <div class="pnl-hero kosong">
+          <span>PNL BELUM TERSEDIA</span>
+          <strong>—</strong>
+          <small>Harga kutipan atau bukti posisi belum lengkap.</small>
         </div>
       )}
     </section>
   );
 }
 
-function PnlCard({ pos }: { pos: Posisi }) {
-  const h = pos.pnl;
-  if (!h) return null;
-
+function PnlHero({ value, symbol, estimated }: { value: number | null; symbol: string; estimated: boolean }) {
+  const tone = value == null ? "" : value >= 0 ? "naik" : "turun";
+  const label = value == null ? "PNL BELUM LENGKAP" : value >= 0 ? "PROFIT BERSIH" : "RUGI BERSIH";
   return (
-    <section class="card">
-      <div class="section-title">
-        <h2>
-          {pos.version.toUpperCase()} #{pos.token_id} · {h.currency.symbol}
-        </h2>
-        <span class="chip">
-          <span class={`dot ${h.net == null ? "" : h.net >= 0 ? "ok" : "bad"}`} />
-          {h.perkiraan ? "perkiraan" : "tercatat"}
-        </span>
-      </div>
+    <div class={`pnl-hero ${tone}`}>
+      <span>{label}</span>
+      <strong class="num">{value == null ? "—" : angka(value)}</strong>
+      <small>{value == null ? "Menunggu seluruh komponen akuntansi" : `${symbol}${estimated ? " · perkiraan" : ""}`}</small>
+    </div>
+  );
+}
 
-      <div class="stack" style="margin-top: var(--s2)">
-        <div class="row">
-          <span class="label">Fee diperoleh</span>
-          <span class="value num naik">{angka(h.fee)}</span>
-        </div>
-        <div class="row">
-          <span class="label">Impermanent loss</span>
-          <span class="value num turun">{angka(-h.impermanent_loss)}</span>
-        </div>
-        <div class="row">
-          <span class="label">Gas tercatat</span>
-          <span class="value num turun">{angka(h.gas == null ? null : -h.gas)}</span>
-        </div>
-        <div class="row">
-          <span class="label">Slippage zap</span>
-          <span class="value num turun">{angka(h.slippage == null ? null : -h.slippage)}</span>
-        </div>
-        <div class="row pnl-net">
-          <span class="label">Net</span>
-          <span class={`value num ${h.net == null ? "" : h.net >= 0 ? "naik" : "turun"}`}>{angka(h.net)}</span>
-        </div>
-      </div>
-    </section>
+function PnlMetric({ label, value, symbol, text, tone = "" }: {
+  label: string;
+  value?: number | null;
+  symbol?: string;
+  text?: string;
+  tone?: "" | "naik" | "turun";
+}) {
+  return (
+    <div class="pnl-metric">
+      <span>{label}</span>
+      <strong class={`num ${tone}`}>{text ?? `${angka(value ?? null)}${symbol ? ` ${symbol}` : ""}`}</strong>
+    </div>
   );
 }
 
@@ -1901,10 +1826,45 @@ function angka(v: number | null): string {
   if (v == null) return "Belum diketahui";
   if (!Number.isFinite(v)) return "?";
   const tanda = v > 0 ? "+" : "";
+  const absolut = Math.abs(v);
+  const max = absolut > 0 && absolut < 0.000001 ? 12
+    : absolut < 0.001 ? 9
+      : absolut < 1 ? 6
+        : 4;
   return `${tanda}${v.toLocaleString("id-ID", {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 4,
+    minimumFractionDigits: absolut >= 1 || absolut === 0 ? 2 : 0,
+    maximumFractionDigits: max,
   })}`;
+}
+
+function namaPair(pos: Posisi): string {
+  return `${pos.base_symbol ?? pos.symbol0 ?? "Token 0"}/${pos.quote_symbol ?? pos.symbol1 ?? "Token 1"}`;
+}
+
+/** Ubah unit blockchain menjadi angka manusiawi tanpa membulatkan ke nol. */
+function formatUnitMentah(value: string | null, decimals: number | null): string {
+  if (value === null || decimals === null || !/^\d+$/.test(value)) return "—";
+  let digits = value.replace(/^0+(?=\d)/, "");
+  if (decimals === 0) return BigInt(digits).toLocaleString("id-ID");
+  if (digits.length <= decimals) digits = `${"0".repeat(decimals + 1 - digits.length)}${digits}`;
+  const split = digits.length - decimals;
+  const whole = digits.slice(0, split);
+  const fraction = digits.slice(split);
+  const numeric = Number(`${whole}.${fraction}`);
+  if (Number.isFinite(numeric) && numeric >= 1_000_000) {
+    return numeric.toLocaleString("id-ID", { notation: "compact", maximumFractionDigits: 3 });
+  }
+  const leading = fraction.match(/^0*/)?.[0].length ?? 0;
+  const kept = fraction.slice(0, whole === "0" ? Math.min(12, leading + 5) : 4).replace(/0+$/, "");
+  const wholeDisplay = BigInt(whole).toLocaleString("id-ID");
+  return kept ? `${wholeDisplay},${kept}` : wholeDisplay;
+}
+
+function formatHargaPosisi(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return "—";
+  const abs = Math.abs(value);
+  const max = abs > 0 && abs < 0.000001 ? 12 : abs < 0.01 ? 9 : abs < 1 ? 6 : 4;
+  return value.toLocaleString("id-ID", { maximumFractionDigits: max });
 }
 
 /**
@@ -2037,7 +1997,7 @@ function PositionsTab({
  * Bar posisi harga di dalam range memakai warna datar, bukan gradient, sesuai
  * aturan desain proyek.
  */
-function PositionCard({
+export function PositionCard({
   pos,
   plan,
   busy,
@@ -2054,16 +2014,44 @@ function PositionCard({
 }) {
   const [amount0, setAmount0] = useState("");
   const [amount1, setAmount1] = useState("");
+  const [sisiAktif, setSisiAktif] = useState<0 | 1>(0);
+  const rencanaTerakhir = useRef("");
   const porsi = porsiDalamRange(pos);
   const nada = pos.kosong ? "" : pos.in_range ? "ok" : "bad";
   const status = pos.kosong ? "kosong" : pos.in_range ? "di dalam" : "di luar";
+  const simbol0 = pos.symbol0 ?? "Token 0";
+  const simbol1 = pos.symbol1 ?? "Token 1";
+
+  // Engine menurunkan sisi lain dari matematika range. Hanya kotak yang tidak
+  // sedang disunting yang ditimpa supaya input tidak melompat di bawah jari.
+  useEffect(() => {
+    if (plan?.action !== "tambah_likuiditas" || !plan.amounts) return;
+    if (sisiAktif === 0) setAmount1(plan.amounts.amount1);
+    else setAmount0(plan.amounts.amount0);
+  }, [plan?.request_id, plan?.amounts?.amount0, plan?.amounts?.amount1]);
+
+  useEffect(() => {
+    const value = sisiAktif === 0 ? amount0 : amount1;
+    const numeric = Number(value);
+    if (busy || !Number.isFinite(numeric) || numeric <= 0) return;
+    const fingerprint = `${pos.position_id}:${sisiAktif}:${value}`;
+    if (rencanaTerakhir.current === fingerprint) return;
+    const timer = window.setTimeout(() => {
+      rencanaTerakhir.current = fingerprint;
+      onPlanAction(pos.position_id, "tambah_likuiditas", sisiAktif === 0
+        ? { amount0: value }
+        : { amount1: value });
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [amount0, amount1, sisiAktif, busy, pos.position_id]);
 
   return (
-    <section class="card">
-      <div class="section-title">
-        <h2>
-          {pos.version.toUpperCase()} #{pos.token_id}
-        </h2>
+    <section class="card position-card">
+      <div class="position-head">
+        <div>
+          <p class="eyebrow">{pos.version.toUpperCase()} · POSISI #{pos.token_id}</p>
+          <h2>{namaPair(pos)}</h2>
+        </div>
         <span class="chip">
           <span class={`dot ${nada}`} />
           {status}
@@ -2074,28 +2062,54 @@ function PositionCard({
         <div class="pos-bar-isi" style={`left: ${(porsi * 100).toFixed(2)}%`} />
       </div>
 
-      <div class="stack" style="margin-top: var(--s2)">
-        <div class="row">
-          <span class="label">Fee tier</span>
-          <span class="value num">{(pos.fee / 10_000).toFixed(2)}%</span>
+      <div class="position-range-labels">
+        <span>{formatHargaPosisi(pos.price_lower)} {pos.quote_symbol ?? ""}</span>
+        <strong>{formatHargaPosisi(pos.price_current)} {pos.quote_symbol ?? ""}</strong>
+        <span>{formatHargaPosisi(pos.price_upper)} {pos.quote_symbol ?? ""}</span>
+      </div>
+      <p class="position-price-unit">
+        {pos.base_symbol && pos.quote_symbol
+          ? `Harga ${pos.quote_symbol} per 1 ${pos.base_symbol}`
+          : "Harga range belum terbaca"}
+      </p>
+
+      <div class="position-balances">
+        <div>
+          <span>Di posisi · {simbol0}</span>
+          <strong class="num">{formatUnitMentah(pos.amount0, pos.decimals0)}</strong>
         </div>
-        <div class="row">
-          <span class="label">Tick</span>
-          <span class="value num">
-            {pos.tick_lower} sampai {pos.tick_upper} · grid {pos.tick_spacing}
-          </span>
-        </div>
-        <div class="row">
-          <span class="label">Likuiditas</span>
-          <span class="value num">{pos.liquidity}</span>
-        </div>
-        <div class="row">
-          <span class="label">Fee belum diklaim</span>
-          <span class="value num">
-            {pos.fee0} dan {pos.fee1}
-          </span>
+        <div>
+          <span>Di posisi · {simbol1}</span>
+          <strong class="num">{formatUnitMentah(pos.amount1, pos.decimals1)}</strong>
         </div>
       </div>
+
+      <div class="position-fees">
+        <span>Fee belum diklaim</span>
+        <strong class="num">
+          {formatUnitMentah(pos.fee0, pos.decimals0)} {simbol0}
+          <i> + </i>
+          {formatUnitMentah(pos.fee1, pos.decimals1)} {simbol1}
+        </strong>
+      </div>
+
+      <details class="position-technical">
+        <summary>Detail teknis</summary>
+        <div class="stack">
+          <div class="row">
+            <span class="label">Fee tier</span>
+            <span class="value num">{(pos.fee / 10_000).toFixed(2)}%</span>
+          </div>
+          <div class="row">
+            <span class="label">Tick / grid</span>
+            <span class="value num">{pos.tick_lower}—{pos.tick_upper} / {pos.tick_spacing}</span>
+          </div>
+          <div class="row">
+            <span class="label">Likuiditas mentah</span>
+            <span class="value num">{pos.liquidity}</span>
+          </div>
+        </div>
+      </details>
 
       {pos.hooks && pos.hooks !== "0x0000000000000000000000000000000000000000" ? (
         <p class="hint">Hook {shortAddress(pos.hooks)}, belum diperiksa.</p>
@@ -2105,10 +2119,11 @@ function PositionCard({
         <div class="setoran">
           <div class="section-title">
             <h3>Tambah ke range ini</h3>
+            <span class="muted position-link-state">{busy ? "Menyesuaikan pair…" : "Nilai pair otomatis"}</span>
           </div>
           <div class="kotak-setor">
             <div class="kotak-atas">
-              <span class="kotak-nama">Token 0</span>
+              <span class="kotak-nama">{simbol0} Amount</span>
               <span class="kotak-saldo num">{shortAddress(pos.token0)}</span>
             </div>
             <input
@@ -2119,13 +2134,15 @@ function PositionCard({
               placeholder="0"
               value={amount0}
               onInput={(event) => {
+                setSisiAktif(0);
                 setAmount0((event.target as HTMLInputElement).value);
+                setAmount1("");
               }}
             />
           </div>
           <div class="kotak-setor">
             <div class="kotak-atas">
-              <span class="kotak-nama">Token 1</span>
+              <span class="kotak-nama">{simbol1} Amount</span>
               <span class="kotak-saldo num">{shortAddress(pos.token1)}</span>
             </div>
             <input
@@ -2136,20 +2153,12 @@ function PositionCard({
               placeholder="0"
               value={amount1}
               onInput={(event) => {
+                setSisiAktif(1);
                 setAmount1((event.target as HTMLInputElement).value);
+                setAmount0("");
               }}
             />
           </div>
-          <button
-            type="button"
-            class="lebar"
-            disabled={busy || !(Number(amount0) > 0 || Number(amount1) > 0)}
-            onClick={() =>
-              onPlanAction(pos.position_id, "tambah_likuiditas", { amount0, amount1 })
-            }
-          >
-            Susun tambah likuiditas
-          </button>
         </div>
 
         <div class="position-actions">
@@ -2410,7 +2419,7 @@ export function SetoranCard({
     const harga = sisiAktif === "meme" ? hargaMeme : hargaQuote;
     const n = Number(teks);
     if (!canExecute || busy || !Number.isFinite(n) || n <= 0 || harga <= 0) return;
-    const timer = window.setTimeout(() => susun(sisiAktif), 400);
+    const timer = window.setTimeout(() => susun(sisiAktif), 250);
     return () => window.clearTimeout(timer);
   }, [
     isiMeme,
@@ -2479,6 +2488,7 @@ export function SetoranCard({
               onQuote(null);
               setSisiAktif("meme");
               setIsiMeme(v);
+              setIsiQuote("");
             }}
             onSelesai={() => susun("meme", plan === null)}
           />
@@ -2491,6 +2501,7 @@ export function SetoranCard({
               onQuote(null);
               setSisiAktif("quote");
               setIsiQuote(v);
+              setIsiMeme("");
             }}
             onSelesai={() => susun("quote", plan === null)}
           />
@@ -3237,6 +3248,11 @@ function WalletCard({
     : isian.length >= 8;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
+  const walletLabel = !w.exists
+    ? "belum ada"
+    : w.locked
+      ? w.always_unlocked ? "siapkan sekali" : "terkunci"
+      : w.always_unlocked ? "lokal aktif" : "terbuka";
 
   const act = async (path: string, body?: unknown) => {
     if (!client) return;
@@ -3262,7 +3278,7 @@ function WalletCard({
         <h2>Wallet</h2>
         <span class="chip">
           <span class={`dot ${!w.exists ? "" : w.locked ? "warn" : "ok"}`} />
-          {!w.exists ? "belum ada" : w.locked ? "terkunci" : "terbuka"}
+          {walletLabel}
         </span>
       </div>
 
@@ -3280,8 +3296,21 @@ function WalletCard({
         </div>
       ) : null}
 
+      {w.exists && w.always_unlocked ? (
+        <div class="row">
+          <span class="label">Sesi lokal</span>
+          <span class="value">Selalu terbuka</span>
+        </div>
+      ) : null}
+
       {w.exists && w.locked ? (
         <div class="stack" style="margin-top: var(--s3)">
+          {w.always_unlocked ? (
+            <p class="hint" style="margin: 0">
+              Masukkan passphrase sekali. Windows Credential Manager akan membuka
+              wallet otomatis pada start berikutnya.
+            </p>
+          ) : null}
           <input
             type="password"
             value={passphrase}
@@ -3301,7 +3330,7 @@ function WalletCard({
         </div>
       ) : null}
 
-      {w.exists && !w.locked ? (
+      {w.exists && !w.locked && !w.always_unlocked ? (
         <button
           style="margin-top: var(--s3); width: 100%"
           disabled={busy}

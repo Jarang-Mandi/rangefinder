@@ -97,9 +97,11 @@ impl Default for RpcConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WalletConfig {
-    /// Menit tanpa aktivitas sebelum wallet mengunci diri.
+    /// Menit tanpa aktivitas sebelum wallet mengunci diri. Nol berarti sesi
+    /// lokal tetap terbuka selama engine hidup.
     pub auto_lock_minutes: u64,
-    /// Simpan passphrase di Windows Credential Manager. Mati secara bawaan.
+    /// Simpan passphrase di Windows Credential Manager supaya engine bisa
+    /// membuka wallet lagi sesudah restart tanpa meminta input berulang.
     pub use_credential_manager: bool,
 }
 

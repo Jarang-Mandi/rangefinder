@@ -1350,12 +1350,17 @@ range atau mengarang likuiditas di luar data yang sudah dibaca. Setiap commit
 range membatalkan rencana setoran lama. Pengujian browser fixture memakai
 komponen produksi pada lebar 320, 360, dan 480 piksel.
 
-**Input setoran menyusun rencana secara otomatis setelah stabil 400 ms.**
+**Input setoran menyusun rencana secara otomatis setelah stabil 250 ms.**
 Mengubah nominal, aset setoran, zap, pool, atau tick membatalkan rencana lama,
 lalu panel meminta rencana baru tanpa tombol antara. Sidik jari input menahan
 permintaan identik agar jawaban engine tidak membentuk loop. Approval, zap,
 dan pembukaan posisi tetap berupa klik terpisah karena masing masing adalah
 aksi on-chain.
+
+Pada setoran dua aset dan penambahan likuiditas, user cukup mengisi salah satu
+token. Engine menurunkan sisi pasangan dari rasio likuiditas range yang sama
+dan panel mengisi kotak lain setelah quote kembali. Hitungannya memakai integer
+yang sama dengan calon calldata, bukan perkiraan harga di panel.
 
 **Preset range menandai dirinya dari lebar yang sebenarnya berlaku**, bukan dari
 tombol mana yang terakhir ditekan. Engine membulatkan batas ke grid tick,
@@ -1743,6 +1748,9 @@ Side panel bekerja pada lebar 320 sampai 480 piksel dan wajib benar di seluruh r
 - Passphrase tidak pernah ditulis ke disk. Setelah engine dibuka, kunci hasil dekripsi hanya ada di memori, di dalam wadah yang di-zeroize saat engine berhenti atau saat wallet dikunci.
 - Opsi menyimpan passphrase di Windows Credential Manager, mati secara default.
 - Wallet mengunci diri otomatis setelah periode tidak aktif yang bisa diatur, default 30 menit.
+- Profil layanan lokal mengaktifkan Credential Manager dan memakai nilai
+  auto-lock nol. Wallet lama meminta passphrase sekali untuk mengisi credential,
+  lalu engine membukanya otomatis pada restart berikutnya.
 - Kunci privat tidak pernah dikirim ke side panel, ke content script, atau keluar dari proses engine dalam bentuk apa pun.
 
 ### 9.2 Batas risiko

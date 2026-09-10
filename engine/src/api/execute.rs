@@ -257,7 +257,7 @@ impl AksiTersimpan {
 pub enum HarapanAksi {
     TidakAda,
     Tambah {
-        sebelum: crate::positions::Posisi,
+        sebelum: Box<crate::positions::Posisi>,
         minimum_tambahan: u128,
     },
     RebalanceV3 {

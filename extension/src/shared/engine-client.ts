@@ -80,10 +80,12 @@ const BACKOFF_MAX_MS = 15_000;
 export class EngineClient {
   private socket: WebSocket | null = null;
   private heartbeat: number | null = null;
+  private helloTimer: number | null = null;
   private reconnectTimer: number | null = null;
   private backoff = BACKOFF_START_MS;
   private stopped = false;
   private protocolReady = false;
+  private hasConnected = false;
   private quoteRequest: string | null = null;
   private actionRequest: string | null = null;
 
@@ -163,7 +165,9 @@ export class EngineClient {
     this.protocolReady = false;
 
     socket.onopen = () => {
-      this.backoff = BACKOFF_START_MS;
+      this.helloTimer = self.setTimeout(() => {
+        if (!this.protocolReady) socket.close(4000, "hello engine tidak diterima");
+      }, 7_000);
     };
 
     socket.onmessage = (event) => {
@@ -181,7 +185,10 @@ export class EngineClient {
           this.handlers.onState("offline", "Versi engine dan ekstensi berbeda. Perbarui keduanya.");
           return;
         }
+        this.clearHelloTimer();
         this.protocolReady = true;
+        this.hasConnected = true;
+        this.backoff = BACKOFF_START_MS;
         this.handlers.onState("connected");
         this.startHeartbeat();
         return;
@@ -265,9 +272,12 @@ export class EngineClient {
       this.socket = null;
       this.protocolReady = false;
       if (this.stopped) return;
-      // 1006 tanpa pernah terbuka biasanya berarti handshake ditolak, dan
-      // penyebab paling umum adalah token yang salah.
-      if (event.code === 1006 && this.backoff === BACKOFF_START_MS) {
+      // Sesudah pernah tersambung, putus singkat adalah keadaan pemulihan.
+      // Panel mempertahankan data terakhir dan menunjukkan proses sambung
+      // ulang, sementara launcher lokal menghidupkan engine kembali.
+      if (this.hasConnected) {
+        this.handlers.onState("connecting", "Menyambung ulang ke engine lokal…");
+      } else if (event.code === 1006 && this.backoff === BACKOFF_START_MS) {
         this.handlers.onState("offline", "engine tidak menjawab, atau token salah");
       } else {
         this.handlers.onState("offline");
@@ -470,8 +480,16 @@ export class EngineClient {
     }
   }
 
+  private clearHelloTimer() {
+    if (this.helloTimer !== null) {
+      self.clearTimeout(this.helloTimer);
+      this.helloTimer = null;
+    }
+  }
+
   private clearTimers() {
     this.clearHeartbeat();
+    this.clearHelloTimer();
     if (this.reconnectTimer !== null) {
       self.clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;

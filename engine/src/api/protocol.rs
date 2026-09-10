@@ -386,7 +386,7 @@ pub struct SignalsView {
     pub dihitung_pada: String,
 }
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Tentukan apakah engine boleh mengeksekusi transaksi, beserta alasannya.
 ///
@@ -438,6 +438,8 @@ mod tests {
             locked: false,
             address: Some("0xabc".into()),
             auto_lock_minutes: 30,
+            credential_manager: false,
+            always_unlocked: false,
             seconds_until_auto_lock: Some(1800),
         }
     }

@@ -273,7 +273,7 @@ fn tentukan_pengirim(repo_root: &Path, arg: Option<&str>, _cfg: &Config) -> Resu
 
     // Wallet engine, kalau sudah dibuat.
     if let Ok(dir) = config::data_dir() {
-        if let Ok(w) = Wallet::open(&dir, 30) {
+        if let Ok(w) = Wallet::open(&dir, 30, false) {
             if let Some(a) = w.address() {
                 return Ok(a);
             }
