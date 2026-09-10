@@ -57,10 +57,13 @@ Event dari perpindahan terprogram dibedakan dari drag user supaya tidak
 memantul kembali ke engine.
 
 Kartu eksekusi mengikuti hierarki MMT Finance: header ringkas, sakelar Zap,
-satu input aset saat Zap aktif, dua input saat Zap mati, token pill, nilai fiat,
-saldo, lalu satu tombol utama. Fixture `fixtures/execution.html` menguji alur
-input serta lebar 320, 360, dan 480 piksel. Rancangan pengganti dry run bernama
-`Simulasi | Tx Asli` sudah ada di PRD 9.2.1, tetapi belum diimplementasikan.
+satu input aset saat Zap aktif, dua input saat Zap mati, ticker dalam token pill,
+nilai fiat, saldo, lalu satu tombol utama. Header tidak memakai ikon range.
+Logo token tidak dipalsukan dari huruf ticker dan tidak diambil dari jaringan
+selama protokol belum membawa aset terverifikasi. Fixture
+`fixtures/execution.html` menguji alur input serta lebar 320, 360, dan 480
+piksel. Rancangan pengganti dry run bernama `Simulasi | Tx Asli` sudah ada di
+PRD 9.2.1, tetapi belum diimplementasikan.
 
 Setelah fase 6 ditutup, seluruh pekerjaan berikutnya adalah perbaikan yang
 datang dari user memakai panelnya sendiri. Itu tercatat di PRD 6.15, dan

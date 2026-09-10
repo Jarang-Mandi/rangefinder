@@ -2409,25 +2409,16 @@ export function SetoranCard({
     <div class="setoran">
       <div class="execution-deposit-header">
         <h2>Set Deposit Amounts</h2>
-        <div class="execution-header-tools">
-          <span class="range-glyph" title="Range aktif" aria-hidden="true">
-            <svg viewBox="0 0 20 20">
-              <path d="M3 2.5v14.5h14.5" />
-              <path d="M6 13l3-4 3 2 4-6" />
-            </svg>
-          </span>
-          <span class="execution-header-divider" />
-          <button
-            type="button"
-            class={`sakelar${zap ? " nyala" : ""}`}
-            disabled={versi === "v3"}
-            onClick={() => { setZap(!zap); onQuote(null); }}
-            aria-pressed={zap}
-          >
-            <span class="sakelar-tuas" />
-            <span class="sakelar-teks">Zap in</span>
-          </button>
-        </div>
+        <button
+          type="button"
+          class={`sakelar${zap ? " nyala" : ""}`}
+          disabled={versi === "v3"}
+          onClick={() => { setZap(!zap); onQuote(null); }}
+          aria-pressed={zap}
+        >
+          <span class="sakelar-tuas" />
+          <span class="sakelar-teks">Zap in</span>
+        </button>
       </div>
 
       {zap ? (
@@ -2543,7 +2534,6 @@ function KotakSetor({
 }) {
   const tokenPill = (
     <>
-      <span class="token-emblem" aria-hidden="true">{simbol.slice(0, 1).toUpperCase()}</span>
       <span>{simbol}</span>
       {onGanti ? <span class="token-swap" aria-hidden="true">⇆</span> : null}
     </>

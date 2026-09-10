@@ -3,6 +3,9 @@ async (page) => {
   const state = async () => JSON.parse(await page.locator('output').textContent());
   const toggle = page.getByRole('button', { name: 'Zap in' });
 
+  if (await page.locator('.range-glyph').count() !== 0) throw Error('Header masih memuat ikon range');
+  if (await page.locator('.token-emblem').count() !== 0) throw Error('Token masih memakai logo pengganti');
+
   for (const width of [320, 360, 480]) {
     await page.setViewportSize({ width, height: 700 });
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth);

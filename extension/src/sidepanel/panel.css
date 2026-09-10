@@ -775,37 +775,6 @@
   letter-spacing: -0.02em;
 }
 
-.execution-header-tools {
-  display: flex;
-  align-items: center;
-  gap: var(--s2);
-  flex: none;
-}
-
-.range-glyph {
-  display: grid;
-  width: 20px;
-  height: 20px;
-  place-items: center;
-  color: var(--accent);
-}
-
-.range-glyph svg {
-  width: 19px;
-  height: 19px;
-  fill: none;
-  stroke: currentColor;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  stroke-width: 1.5;
-}
-
-.execution-header-divider {
-  width: 1px;
-  height: 20px;
-  background: var(--border-strong);
-}
-
 /* Kotak setoran mengikuti hierarki acuan MMT: label kecil, angka utama besar,
  * token berbentuk pil, lalu nilai fiat dan saldo pada garis dasar yang sama. */
 .kotak-setor {
@@ -865,7 +834,7 @@
   flex: none;
   max-width: 48%;
   min-height: 30px;
-  padding: 4px 7px 4px 5px;
+  padding: 5px 8px;
   overflow: hidden;
   border: 1px solid var(--border-strong);
   border-radius: 999px;
@@ -878,20 +847,6 @@
 
 button.token-pill {
   cursor: pointer;
-}
-
-.token-emblem {
-  display: grid;
-  width: 20px;
-  height: 20px;
-  flex: none;
-  place-items: center;
-  border: 1px solid var(--accent);
-  border-radius: 50%;
-  background: var(--surface);
-  color: var(--accent);
-  font-size: 9px;
-  font-weight: 800;
 }
 
 .token-swap {

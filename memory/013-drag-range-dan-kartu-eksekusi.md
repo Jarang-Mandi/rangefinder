@@ -35,6 +35,13 @@ terpisah. Saat Zap mati, kedua kotak tampil karena kedua sisi perlu diisi.
 Urutan visualnya: judul dan sakelar, label jumlah, angka besar dan token pill,
 nilai fiat dan saldo, tombol utama, lalu estimasi gas dan APR.
 
+Header tidak membutuhkan ikon range karena konteks range sudah jelas dari tab
+dan kartu di atasnya. Token pill tidak memakai lingkaran berisi huruf sebagai
+logo semu. Protokol belum membawa URL atau aset logo yang terverifikasi, dan
+mencarinya dari layanan luar akan menambah request, cache, CSP, serta risiko
+gambar salah. Sampai aset itu tersedia dari sumber tepercaya, ticker saja lebih
+ringan dan jujur.
+
 `fixtures/execution.html` memakai komponen produksi tanpa engine atau wallet.
 `check-execution.cjs` membuktikan jumlah input pada kedua keadaan Zap,
 pergantian aset, payload setoran, dan tidak adanya scroll horizontal pada lebar

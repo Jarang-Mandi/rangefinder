@@ -1407,11 +1407,13 @@ lalu jarang disentuh, sedangkan tab Range dipakai setiap kali menaruh posisi.
 mengganti endpoint RPC sebelumnya tidak memberi tanda apa pun di layar, sehingga
 user tidak tahu apakah permintaannya sampai.
 
-**Setoran memakai dua kotak yang selalu terlihat**, mengikuti tata letak acuan
-MMT Finance: nama token, jumlah, nilainya dalam USD, dan saldo wallet, lalu satu
-tombol besar yang labelnya menyatakan keadaan, lalu baris estimasi APR. Rasio
-antara kedua sisi ditentukan range dan bukan oleh user, jadi mengisi satu kotak
-sudah menentukan isi kotak yang lain, dan engine yang menghitungnya.
+**Setoran mengikuti tata letak acuan MMT Finance.** Saat Zap aktif, satu kotak
+menampilkan aset sumber, jumlah, nilai USD, saldo wallet, dan ticker yang dapat
+ditekan untuk mengganti sisi. Saat Zap mati, kedua kotak tampil karena user
+perlu mengisi kedua aset. Header hanya berisi judul dan sakelar Zap, tanpa ikon
+range. Logo token tidak direka dari huruf ticker dan tidak dicari dari jaringan;
+selama protokol belum membawa aset logo terverifikasi, token pill hanya memakai
+ticker. Di bawah input ada satu tombol utama, estimasi gas, dan estimasi APR.
 
 Saldo wallet ikut di `token_state`. `None` berarti wallet belum dibuka, bukan
 saldo nol: yang pertama menuntun ke membuka wallet, yang kedua ke membeli
