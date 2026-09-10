@@ -910,7 +910,7 @@ Mint lewat `NonfungiblePositionManager.mint(MintParams)`. Posisi berupa NFT ERC7
 
 **Koreksi terhadap rencana awal soal Permit2.** Bagian ini semula menyebut approval memakai Permit2 supaya tidak perlu approve terpisah tiap token. Itu keliru untuk jalur yang kita pakai. Permit2 dipakai UniversalRouter, sedangkan NonfungiblePositionManager v3 menarik token lewat `transferFrom` biasa, jadi ia butuh allowance ERC20 langsung ke alamatnya. Tanpa itu `mint` selalu revert dengan `TRANSFER_FROM_FAILED`, dan revert itu terjadi setelah gas terbakar.
 
-Karena itu membuka posisi berjalan dua transaksi: `approve` lebih dulu, lalu `mint`. Izin diberikan **sebesar yang dibutuhkan**, bukan tak terbatas. Wallet ini panas dan tersimpan di mesin user, dan batas nominal posisi sengaja tidak dibatasi atas permintaan user. Dua hal itu bersama berarti izin tak terbatas menaruh seluruh saldo pada satu kontrak, selamanya. Biaya tambahannya satu transaksi per posisi, dan pada rantai berblok 100 ms itu hampir tidak terasa.
+Karena itu membuka posisi berjalan dua transaksi: `approve` lebih dulu, lalu `mint`. Untuk posisi baru, izin diberikan **sebesar anggaran flow yang sudah dibatasi input**, bukan seluruh saldo dan bukan tak terbatas. Jumlah mint pada satu snapshot dapat berubah selama approval masuk blok; memakai angka itu persis dapat membuat quote berikutnya meminta approval lagi. Biaya tambahannya satu transaksi per posisi, dan pada rantai berblok 100 ms itu hampir tidak terasa.
 
 Aksi lain: `increaseLiquidity`, `decreaseLiquidity`, `collect`, `burn`. Rebalance adalah `decreaseLiquidity` penuh, lalu `collect`, lalu `mint` baru, semuanya dalam satu multicall.
 
@@ -934,6 +934,11 @@ Parameter `MINT_POSITION` adalah PoolKey yang diratakan menjadi lima kata, lalu 
 | 2 | Permit2 mengizinkan PositionManager lewat `Permit2.approve`, yang punya masa berlaku |
 
 Melewatkan lapis kedua adalah kesalahan yang paling mudah terjadi, karena lapis pertama terlihat seperti sudah cukup. Akibatnya `mint` revert setelah gas terbakar. Masa berlaku disetel tiga puluh menit: izin Permit2 yang berlaku setahun sama saja dengan izin tak terbatas dalam waktu.
+
+Error Permit2 `AllowanceExpired(uint256)` dan `InsufficientAllowance(uint256)`
+datang sebagai selector `0xd81b2f2e` dan `0xf96fb071`. Penerjemah mengenali
+selector itu sebelum reason pendek V3 seperti `TI`; pencarian substring `ti`
+akan keliru mencocokkan kata `execution` pada hampir setiap revert.
 
 **Slippage dijaga dari arah yang berlawanan.** V3 memakai `amount0Min` dan `amount1Min`, yaitu batas bawah yang harus tercapai. V4 memakai `amount0Max` dan `amount1Max`, yaitu batas atas yang boleh terpakai. Itu satu satunya pengaman di jalur ini, jadi menyetelnya sebesar saldo berarti mengizinkan pool mengambil seluruh saldo saat harga bergerak. Engine memakai jumlah yang dibutuhkan ditambah margin slippage, dan tidak pernah melampaui saldo.
 

@@ -1003,15 +1003,21 @@ impl AppState {
             None
         };
 
+        // Untuk posisi baru, izin mengikuti ANGGARAN yang sudah dibatasi input
+        // user, bukan jumlah mint pada satu snapshot harga. Jumlah mint dapat
+        // bergeser sedikit ketika approval masuk blok; memakai angka snapshot
+        // membuat Permit2 kurang lagi setelah setiap quote ulang dan memicu
+        // rangkaian approval tanpa akhir. Anggaran tetap menjadi batas keras:
+        // engine tidak pernah mengizinkan lebih dari dana flow ini.
         let allowances = crate::exec::plan::izin_yang_kurang(
             &provider,
             &alamat,
             pool.version,
             pemilik,
             token0,
-            amount0,
+            available0,
             token1,
-            amount1,
+            available1,
             chrono::Utc::now().timestamp().max(0) as u64,
         )
         .await?;

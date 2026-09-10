@@ -259,10 +259,10 @@ satu transaksi. Teks pada tombol menyebutkan langkah keberapa.
 Izin Permit2 berlaku tiga puluh menit. Itu disengaja: izin yang berlaku
 setahun sama saja dengan izin tak terbatas dalam waktu.
 
-Izin diberikan **sebesar yang dibutuhkan rencana itu**, bukan tak terbatas. Ini
-disengaja: wallet ini panas dan batas nominal posisi tidak dibatasi, jadi izin
-tak terbatas menaruh seluruh saldo pada satu kontrak selamanya. Konsekuensinya
-langkah ini berulang tiap posisi.
+Untuk posisi baru, izin diberikan **sebesar anggaran flow yang sudah dibatasi
+input**, bukan seluruh saldo dan bukan tak terbatas. Ini cukup menampung
+perubahan rasio kecil ketika approval masuk blok tanpa membuka akses ke dana di
+luar setoran tersebut. Konsekuensinya langkah ini berulang tiap posisi.
 
 Sesudah terkirim, engine membaca ulang allowance dari rantai untuk
 membuktikannya benar benar naik. Sebagian token mengembalikan `false` alih alih

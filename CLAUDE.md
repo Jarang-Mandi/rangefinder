@@ -274,7 +274,7 @@ tersandung:
 | Receipt sukses belum berarti berhasil | `exec/send.rs` dan `exec/verify.rs` | G7 membaca ulang posisinya dari rantai. Transaksi bisa sukses sambil menghasilkan posisi yang berbeda dari niat kita |
 | Rencana disimpan di engine, tidak bolak balik lewat panel | `api/mod.rs::pending_plan` | Rencana yang kembali dari panel bisa saja sudah diubah, dan bagian yang paling menarik untuk diubah justru calldata-nya |
 | Rencana dikeluarkan dari slot sebelum dikirim | `api/mod.rs::kirim_open` | Rencana yang masih tersimpan setelah dikirim bisa disetujui dua kali, dan dua persetujuan berarti dua posisi |
-| Izin ERC20 sebesar yang dibutuhkan, bukan tak terbatas | `exec/approve.rs` | Wallet panas ditambah batas nominal yang sengaja tidak dibatasi berarti izin tak terbatas menaruh seluruh saldo pada satu kontrak, selamanya |
+| Izin posisi baru sebesar anggaran flow, bukan seluruh saldo atau tak terbatas | `api/mod.rs`, `exec/approve.rs` | Anggaran input menahan risiko, sedangkan margin terhadap snapshot mint mencegah approval berulang saat harga bergerak sebelum quote ulang |
 | Pool V4 ditolak jalur eksekusi V3 | `exec/pipeline.rs` gate G0 | Tanpa gate ini kegagalannya muncul sebagai revert tanpa data, dan tebakan terdekatnya menyalahkan tick yang sebenarnya benar |
 | RangeView memakai orientasi harga, MintParams memakai orientasi tick | `api/execute.rs::tick_menaik` | Saat memecoin token1, `lower.tick` justru yang lebih besar. Memakainya apa adanya menolak setiap posisi pada separuh pool yang ada |
 | ABI V4 wajib dibuktikan ada di bytecode | `cargo xtask v4probe` | Rantai ini sudah terbukti memakai fork pada UniversalRouter. ABI dari ingatan bukan bukti, dan kekeliruannya baru terlihat saat transaksi revert |

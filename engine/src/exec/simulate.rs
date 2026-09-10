@@ -137,6 +137,26 @@ pub enum SimulateError {
 pub fn jelaskan_revert(mentah: &str) -> String {
     let r = mentah.to_lowercase();
 
+    // Custom error membawa selector heksadesimal, bukan nama. Periksa lebih
+    // dulu supaya `ti` tidak keliru cocok dengan kata `execution` pada setiap
+    // error tak dikenal. Kedua selector ini berasal dari IAllowanceTransfer
+    // Permit2 dan argumennya adalah expiry atau allowance saat ini.
+    let selector: &[(&str, &str)] = &[
+        (
+            "0xd81b2f2e",
+            "izin Permit2 sudah kedaluwarsa atau belum pernah diberikan",
+        ),
+        (
+            "0xf96fb071",
+            "jumlah izin Permit2 lebih kecil dari yang dibutuhkan",
+        ),
+    ];
+    for (pola, penjelasan) in selector {
+        if r.contains(pola) {
+            return format!("{penjelasan} (pesan kontrak: {mentah})");
+        }
+    }
+
     let kamus: &[(&str, &str)] = &[
         (
             "stf",
@@ -155,7 +175,7 @@ pub fn jelaskan_revert(mentah: &str) -> String {
             "deadline sudah lewat. Kutipan kedaluwarsa, minta yang baru",
         ),
         ("lok", "pool sedang terkunci. Coba lagi sesaat lagi"),
-        ("ti", "tick di luar batas yang diizinkan pool"),
+        ("reverted: ti", "tick di luar batas yang diizinkan pool"),
         ("tlu", "tick bawah harus lebih kecil dari tick atas"),
         ("tlm", "tick bawah di bawah batas minimum Uniswap"),
         ("tum", "tick atas di atas batas maksimum Uniswap"),
@@ -411,6 +431,30 @@ mod tests {
         // teks mentahnya untuk menelusuri.
         let hasil = jelaskan_revert("0xdeadbeef sesuatu yang aneh");
         assert!(hasil.contains("0xdeadbeef sesuatu yang aneh"));
+    }
+
+    #[test]
+    fn selector_permit2_tidak_disalahartikan_sebagai_tick() {
+        let kedaluwarsa = jelaskan_revert(
+            "execution reverted, data: 0xd81b2f2e0000000000000000000000000000000000000000000000000000000000000000",
+        );
+        assert!(kedaluwarsa.contains("Permit2"));
+        assert!(kedaluwarsa.contains("kedaluwarsa"));
+        assert!(!kedaluwarsa.contains("tick"));
+
+        let kurang = jelaskan_revert(
+            "execution reverted, data: 0xf96fb0710000000000000000000000000000000000000000000000000000000000000001",
+        );
+        assert!(kurang.contains("Permit2"));
+        assert!(kurang.contains("lebih kecil"));
+        assert!(!kurang.contains("tick"));
+    }
+
+    #[test]
+    fn kata_execution_tidak_dianggap_error_ti() {
+        let hasil = jelaskan_revert("execution reverted, data: 0xdeadbeef");
+        assert!(!hasil.contains("tick"));
+        assert!(hasil.contains("0xdeadbeef"));
     }
 
     #[test]
