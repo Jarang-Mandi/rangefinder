@@ -120,8 +120,7 @@ function Preview() {
           plan={plan}
           busy={false}
           onPlanAction={onPlan}
-          onApproveAction={() => {}}
-          onExecuteAction={() => {}}
+          onRunAction={() => {}}
         />
       </div>
     </main>

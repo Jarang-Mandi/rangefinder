@@ -123,6 +123,10 @@ async fn session(socket: WebSocket, state: AppState) {
                                 let s = state.clone();
                                 tokio::spawn(async move { s.on_approve_token(plan_id, step_id).await });
                             }
+                            Ok(ClientMessage::RunOpenFlow { plan_id }) => {
+                                let s = state.clone();
+                                tokio::spawn(async move { s.on_run_open_flow(plan_id).await });
+                            }
                             Ok(ClientMessage::GetPositions) => {
                                 let s = state.clone();
                                 tokio::spawn(async move { s.on_get_positions().await });
@@ -166,6 +170,10 @@ async fn session(socket: WebSocket, state: AppState) {
                             Ok(ClientMessage::ExecuteAction { plan_id }) => {
                                 let s = state.clone();
                                 tokio::spawn(async move { s.on_execute_action(plan_id).await });
+                            }
+                            Ok(ClientMessage::RunActionFlow { plan_id }) => {
+                                let s = state.clone();
+                                tokio::spawn(async move { s.on_run_action_flow(plan_id).await });
                             }
                             Ok(ClientMessage::SwapZap { plan_id }) => {
                                 let s = state.clone();

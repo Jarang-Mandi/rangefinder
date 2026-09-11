@@ -9,6 +9,14 @@ async (page) => {
   if (await page.getByText('Jurnal transaksi').count() !== 0) {
     throw Error('PnL masih memuat jurnal transaksi');
   }
+  if (await page.locator('.eyebrow, details').count() !== 0) {
+    throw Error('Positions atau PnL masih memuat eyebrow/detail teknis');
+  }
+  for (const text of ['Versi kalibrasi', 'Impermanent loss', 'Slippage zap', 'Token id', 'Tick spacing']) {
+    if (await page.getByText(text, { exact: false }).count() !== 0) {
+      throw Error('Keterangan teknis masih terlihat: ' + text);
+    }
+  }
 
   await inputs.nth(0).fill('0.00029931');
   await page.waitForFunction(() => {

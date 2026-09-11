@@ -357,6 +357,11 @@ export class EngineClient {
     this.send({ type: "approve_token", plan_id: planId, step_id: stepId });
   }
 
+  /** Jalankan seluruh approval, zap, dan pembukaan di engine dari satu klik. */
+  runOpenFlow(planId: string) {
+    this.send({ type: "run_open_flow", plan_id: planId });
+  }
+
   /** Muat ulang posisi LP wallet dari rantai. */
   getPositions() {
     this.send({ type: "get_positions" });
@@ -392,6 +397,11 @@ export class EngineClient {
   /** Setujui aksi terakhir. Ini yang benar benar memindahkan dana. */
   executeAction(planId: string) {
     this.send({ type: "execute_action", plan_id: planId });
+  }
+
+  /** Jalankan approval dan aksi posisi di engine dari satu klik. */
+  runActionFlow(planId: string) {
+    this.send({ type: "run_action_flow", plan_id: planId });
   }
 
   /** Minta riwayat notifikasi terakhir. */

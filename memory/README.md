@@ -49,3 +49,4 @@ setiap agent.
 | `013-drag-range-dan-kartu-eksekusi.md` | Drag range, tata letak setoran, dan pengujian lebar side panel |
 | `014-rencana-otomatis-dan-uji-live.md` | Quote otomatis, approval V4 saat harga bergerak, dan transaksi live pertama |
 | `015-layanan-lokal-dan-angka-posisi.md` | Watchdog engine, sesi wallet lokal, input berpasangan, dan angka PnL/Positions |
+| `016-ui-utama-dan-alur-engine.md` | UI tanpa eyebrow/detail teknis, satu tombol beralur engine, dan saldo yang didahulukan |

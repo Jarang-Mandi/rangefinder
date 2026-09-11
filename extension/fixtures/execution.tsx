@@ -1,6 +1,6 @@
 import { render } from "preact";
 import { useState } from "preact/hooks";
-import { SetoranCard } from "../src/sidepanel/App";
+import { ExecuteCard } from "../src/sidepanel/App";
 import type { Deposit, OpenPlanView, RangeView, TokenState } from "../src/shared/protocol";
 import "../src/shared/tokens.css";
 import "../src/sidepanel/panel.css";
@@ -53,6 +53,7 @@ const view: RangeView = {
 
 function Preview() {
   const [deposit, setDeposit] = useState<Deposit | null>(null);
+  const [runs, setRuns] = useState(0);
   const modal = Number(deposit?.amount ?? "0");
   const jumlahMeme = deposit?.side === "meme" ? modal : modal / view.current.price_usd;
   const jumlahQuote = deposit?.side === "quote" ? modal : modal * view.current.price_usd;
@@ -71,9 +72,17 @@ function Preview() {
     token_id_simulasi: "1",
     gas_estimate: 180_000,
     dry_run: false,
-    gates: [],
-    warnings: [],
-    allowances: [],
+    gates: [{ id: "G4", name: "simulasi", passed: false, detail: "detail teknis fixture" }],
+    warnings: ["peringatan teknis fixture"],
+    allowances: [{
+      step_id: "permit2-fixture",
+      spender: alamatQuote,
+      jenis: "erc20_ke_permit2",
+      token: alamatMeme,
+      needed: "1",
+      current: "0",
+      label: "Izinkan Permit2",
+    }],
     version: "v4",
     zap: null,
     setor: {
@@ -90,18 +99,18 @@ function Preview() {
   } : null;
   return (
     <main class="content" style="width:100%;max-width:480px;margin:0 auto">
-      <section class="card execution-card">
-        <SetoranCard
-          plan={plan}
-          view={view}
-          token={token}
-          busy={false}
-          canExecute
-          onQuote={setDeposit}
-        />
-      </section>
+      <ExecuteCard
+        plan={plan}
+        view={view}
+        token={token}
+        result={null}
+        busy={false}
+        canExecute
+        onQuote={setDeposit}
+        onRun={() => setRuns((value) => value + 1)}
+      />
       <output aria-label="Setoran terakhir" style="display:none">
-        {JSON.stringify(deposit)}
+        {JSON.stringify({ deposit, runs })}
       </output>
     </main>
   );

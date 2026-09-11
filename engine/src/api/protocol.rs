@@ -74,6 +74,11 @@ pub enum ClientMessage {
     /// pernah dari panel.
     ApproveToken { plan_id: String, step_id: String },
 
+    /// Jalankan seluruh rangkaian pembukaan dari satu persetujuan user.
+    /// Engine mengerjakan approval, zap bila dibutuhkan, penyusunan ulang,
+    /// lalu mint secara berurutan. Detail langkah tidak perlu keluar ke UI.
+    RunOpenFlow { plan_id: String },
+
     /// Deret candle dari chart gmgn, dipakai seluruh detektor sinyal.
     ///
     /// Datang lebih jarang daripada `chart_price` karena isinya ratusan bar
@@ -94,6 +99,9 @@ pub enum ClientMessage {
 
     /// Setujui aksi terakhir dan kirim transaksinya.
     ExecuteAction { plan_id: String },
+
+    /// Jalankan approval yang dibutuhkan lalu aksi posisi terakhir.
+    RunActionFlow { plan_id: String },
 
     /// Minta riwayat notifikasi terakhir.
     GetNotifications,
@@ -386,7 +394,7 @@ pub struct SignalsView {
     pub dihitung_pada: String,
 }
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Tentukan apakah engine boleh mengeksekusi transaksi, beserta alasannya.
 ///
@@ -532,6 +540,20 @@ mod tests {
         assert!(matches!(
             execute_zap,
             ClientMessage::SwapZap { plan_id } if plan_id == "plan-123"
+        ));
+
+        let open_flow: ClientMessage =
+            serde_json::from_str(r#"{"type":"run_open_flow","plan_id":"open-123"}"#).unwrap();
+        assert!(matches!(
+            open_flow,
+            ClientMessage::RunOpenFlow { plan_id } if plan_id == "open-123"
+        ));
+
+        let action_flow: ClientMessage =
+            serde_json::from_str(r#"{"type":"run_action_flow","plan_id":"action-123"}"#).unwrap();
+        assert!(matches!(
+            action_flow,
+            ClientMessage::RunActionFlow { plan_id } if plan_id == "action-123"
         ));
     }
 

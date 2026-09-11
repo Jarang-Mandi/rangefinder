@@ -10,7 +10,7 @@
  *   tidak mengizinkan memasang header pada koneksi WebSocket.
  */
 
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 5;
 export const WS_SUBPROTOCOL = "rangefinder";
 export const DEFAULT_ENGINE_ORIGIN = "http://127.0.0.1:8787";
 
@@ -217,7 +217,7 @@ export interface RangeView {
   warnings: string[];
 }
 
-/** Hasil satu gate validasi, ditampilkan apa adanya di panel. */
+/** Hasil satu gate validasi untuk keputusan internal engine. */
 export interface GateResult {
   id: string;
   name: string;
@@ -233,8 +233,8 @@ export interface GateResult {
  * lewat Permit2: token mengizinkan Permit2, lalu Permit2 mengizinkan position
  * manager.
  *
- * Panel tidak perlu tahu bedanya. Ia menekan tombolnya sampai daftar ini
- * kosong, dan engine yang memutuskan langkah mana yang dikerjakan.
+ * Panel tidak perlu tahu bedanya. Engine mengerjakan daftar ini secara
+ * berurutan setelah user menekan tombol utama.
  */
 export interface LangkahIzin {
   step_id: string;
@@ -249,7 +249,7 @@ export interface LangkahIzin {
 }
 
 /**
- * Rencana membuka posisi yang sudah lolos gate, menunggu persetujuan.
+ * Rencana membuka posisi yang sudah diperiksa, menunggu satu persetujuan user.
  *
  * Calldata TIDAK ikut dikirim. Ia tinggal di engine, karena rencana yang
  * bolak balik lewat panel bisa saja kembali dalam keadaan sudah diubah, dan
@@ -833,6 +833,7 @@ export type ClientMessage =
   | { type: "invalidate_plan" }
   | { type: "quote_range"; deposit: Deposit; request_id: string }
   | { type: "approve_token"; plan_id: string; step_id: string }
+  | { type: "run_open_flow"; plan_id: string }
   | { type: "get_positions" }
   | { type: "get_transactions" }
   | { type: "get_notifications" }
@@ -849,6 +850,7 @@ export type ClientMessage =
       input: ActionInput;
     }
   | { type: "execute_action"; plan_id: string }
+  | { type: "run_action_flow"; plan_id: string }
   | { type: "swap_zap"; plan_id: string }
   | { type: "open_position"; plan_id: string };
 

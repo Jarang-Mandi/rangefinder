@@ -58,6 +58,11 @@ const PERKIRAAN_GAS_ETH: f64 = 0.0005;
 /// paling buruk sekalipun pada rantai berblok 100 ms.
 const DEADLINE_DETIK: u64 = 300;
 
+/// Batas keras jumlah transaksi dalam satu alur tombol utama. Jalur normal
+/// membutuhkan paling banyak beberapa approval, satu zap, lalu aksi akhir.
+/// Batas ini mencegah replanning yang rusak mengulang transaksi tanpa akhir.
+const MAX_FLOW_STEPS: usize = 12;
+
 /// Deret candle beserta alamat token yang memilikinya.
 ///
 /// Alamat ikut disimpan supaya deret milik token lama tidak terpakai untuk
@@ -69,6 +74,10 @@ pub type DeretBar = (String, Vec<crate::signals::bar::Bar>);
 pub struct AppState {
     pub intent: Arc<intent::Intent>,
     pub execution_lock: Arc<Mutex<()>>,
+    /// Menahan satu alur tombol utama sampai selesai. Tanpa kunci ini, dua
+    /// pesan yang datang hampir bersamaan bisa mengirim approval pertama dua
+    /// kali sebelum rencana sempat disusun ulang.
+    pub flow_lock: Arc<Mutex<()>>,
     pub positions_lock: Arc<Mutex<()>>,
     pub cfg: Arc<Config>,
     pub auth: Arc<PairingToken>,
@@ -667,14 +676,43 @@ impl AppState {
 
             let saldo = s.baca_saldo(&provider, &meta, &kelompok).await;
 
+            // Saldo adalah angka yang langsung dibutuhkan kotak amount. Kirim
+            // begitu RPC menjawab; pengukuran APR/TVL di bawah tidak boleh
+            // menahannya beberapa detik.
+            {
+                let guard = s.active.read().await;
+                let Some(active) = guard.as_ref() else { return };
+                if !meta
+                    .as_ref()
+                    .is_some_and(|m| m.address.eq_ignore_ascii_case(&active.meta.address))
+                    || !active.selected_quote.eq_ignore_ascii_case(&kelompok.quote)
+                {
+                    return;
+                }
+                let _ = s.events.send(protocol::ServerMessage::TokenState(Box::new(
+                    protocol::TokenState {
+                        address: active.meta.address.clone(),
+                        meta: Some(active.meta.clone()),
+                        quotes: active.quotes.clone(),
+                        pools: active.pools.clone(),
+                        selected_quote: Some(active.selected_quote.clone()),
+                        selected_pool_id: Some(active.selected_pool_id.clone()),
+                        saldo: saldo.clone(),
+                        error: None,
+                    },
+                )));
+            }
+
             // Statistik diukur untuk kelompok yang sedang dipilih, bukan hanya
             // yang teratas. Tanpa ini, setiap kali user berpindah pasangan,
             // kolom APR, TVL, dan volume kosong tanpa penjelasan.
             let mut kelompok = kelompok;
+            let perlu_stats = kelompok.pools.iter().all(|p| p.stats.is_none());
+            if !perlu_stats {
+                return;
+            }
             if let Some(m) = meta.as_ref() {
-                if kelompok.pools.iter().all(|p| p.stats.is_none()) {
-                    crate::pools::ukur_stats(&provider, &s.registry, m, &mut kelompok).await;
-                }
+                crate::pools::ukur_stats(&provider, &s.registry, m, &mut kelompok).await;
             }
 
             {
@@ -1561,6 +1599,7 @@ impl AppState {
     /// Jumlahnya diambil dari rencana, bukan dari panel. Panel yang boleh
     /// menentukan jumlah izin adalah panel yang boleh menguras wallet.
     pub async fn on_approve_token(&self, plan_id: String, step_id: String) {
+        let _flow = self.flow_lock.lock().await;
         match self.kirim_approve(plan_id.clone(), step_id).await {
             Ok(view) => {
                 let ulang = view.outcome.status != crate::exec::send::TxStatus::Menggantung;
@@ -1624,6 +1663,134 @@ impl AppState {
                 }
             }
             Err(pesan) => self.alert_kritis("approve_failed", pesan),
+        }
+    }
+
+    /// Jalankan approval, zap, dan mint dari satu klik. Semua keputusan tetap
+    /// diambil ulang dari rencana engine setelah setiap receipt sehingga
+    /// perubahan saldo atau allowance tidak pernah ditebak oleh panel.
+    pub async fn on_run_open_flow(&self, plan_id: String) {
+        if let Err(pesan) = self.run_open_flow(plan_id).await {
+            self.alert_kritis("open_flow_failed", pesan);
+        }
+    }
+
+    async fn run_open_flow(&self, mut plan_id: String) -> Result<(), String> {
+        let _flow = self.flow_lock.lock().await;
+        for _ in 0..MAX_FLOW_STEPS {
+            let (step_id, perlu_zap, siap) = {
+                let guard = self.pending_plan.read().await;
+                let r = guard
+                    .as_ref()
+                    .ok_or("rencana pembukaan sudah tidak tersedia")?;
+                r.periksa(&plan_id, &self.intent)?;
+                (
+                    r.allowances.first().map(|step| step.step_id.clone()),
+                    r.zap_calldata.is_some(),
+                    r.allowances.is_empty() && r.zap_calldata.is_none() && r.plan.is_sendable(),
+                )
+            };
+
+            if let Some(step_id) = step_id {
+                let view = self.kirim_approve(plan_id.clone(), step_id).await?;
+                let status = view.outcome.status;
+                let _ = self
+                    .events
+                    .send(protocol::ServerMessage::SendResult(Box::new(view)));
+                if status != crate::exec::send::TxStatus::Sukses {
+                    if status == crate::exec::send::TxStatus::Menggantung {
+                        self.batalkan_flow_tidak_pasti(&plan_id).await;
+                    }
+                    return Err(
+                        "Izin token belum berhasil. Tidak ada langkah berikutnya yang dikirim"
+                            .into(),
+                    );
+                }
+
+                let task = {
+                    let guard = self.pending_plan.read().await;
+                    let r = guard
+                        .as_ref()
+                        .filter(|r| r.plan_id == plan_id)
+                        .ok_or("rencana pembukaan berubah setelah izin token")?;
+                    let revision = self
+                        .intent
+                        .advance(r.revision)
+                        .ok_or("rencana pembukaan berubah saat izin diproses")?;
+                    let mut task = r.quote.clone();
+                    task.revision = revision;
+                    task
+                };
+                let view = self.susun_rencana(task).await?;
+                plan_id = view.plan_id.clone();
+                let _ = self
+                    .events
+                    .send(protocol::ServerMessage::OpenPlan(Box::new(view)));
+                continue;
+            }
+
+            if perlu_zap {
+                let (view, lanjut) = self.kirim_zap(plan_id.clone()).await?;
+                let status = view.outcome.status;
+                let _ = self
+                    .events
+                    .send(protocol::ServerMessage::SendResult(Box::new(view)));
+                if status != crate::exec::send::TxStatus::Sukses {
+                    return Err(
+                        "Penyesuaian jumlah token belum berhasil. Posisi belum dibuka".into(),
+                    );
+                }
+                let task = lanjut.ok_or("saldo hasil penyesuaian belum bisa dipakai")?;
+                let view = self.susun_rencana(task).await?;
+                plan_id = view.plan_id.clone();
+                let _ = self
+                    .events
+                    .send(protocol::ServerMessage::OpenPlan(Box::new(view)));
+                continue;
+            }
+
+            if !siap {
+                return Err("Posisi belum siap dibuka. Periksa jumlah setoran dan saldo".into());
+            }
+
+            let view = self.kirim_open(plan_id).await?;
+            let status = view.outcome.status;
+            let terverifikasi = view.outcome.fully_verified();
+            let _ = self
+                .events
+                .send(protocol::ServerMessage::SendResult(Box::new(view)));
+            if status == crate::exec::send::TxStatus::Menggantung {
+                self.alert_kritis(
+                    "open_pending",
+                    "Status pembukaan posisi belum pasti. Muat ulang Positions sebelum mencoba lagi"
+                        .into(),
+                );
+            } else if status == crate::exec::send::TxStatus::Sukses && !terverifikasi {
+                self.alert_kritis(
+                    "open_unverified",
+                    "Posisi sudah dikirim tetapi hasil akhirnya belum terverifikasi. Muat ulang Positions sebelum mencoba lagi"
+                        .into(),
+                );
+            }
+            return Ok(());
+        }
+        Err("Alur pembukaan berhenti karena terlalu banyak langkah".into())
+    }
+
+    async fn batalkan_flow_tidak_pasti(&self, plan_id: &str) {
+        {
+            let mut pending = self.pending_plan.write().await;
+            if pending.as_ref().is_some_and(|r| r.plan_id == plan_id) {
+                pending.take();
+                self.intent.change();
+            }
+        }
+        {
+            let mut pending = self.pending_action.write().await;
+            if pending.as_ref().is_some_and(|r| r.plan_id == plan_id) {
+                pending.take();
+                self.intent.begin_action();
+            }
         }
     }
 
@@ -2781,6 +2948,7 @@ impl AppState {
 
     /// Setujui aksi terakhir dan kirim transaksinya.
     pub async fn on_execute_action(&self, plan_id: String) {
+        let _flow = self.flow_lock.lock().await;
         match self.kirim_aksi(plan_id).await {
             Ok(view) => {
                 let verifikasi_gagal = view
@@ -2804,6 +2972,91 @@ impl AppState {
             }
             Err(pesan) => self.alert_kritis("action_failed", pesan),
         }
+    }
+
+    /// Jalankan seluruh izin lalu aksi posisi dari satu tombol. Rencana selalu
+    /// dihitung ulang setelah receipt approval agar jumlah dan gate yang
+    /// dipakai aksi akhir sesuai state rantai terbaru.
+    pub async fn on_run_action_flow(&self, plan_id: String) {
+        if let Err(pesan) = self.run_action_flow(plan_id).await {
+            self.alert_kritis("action_flow_failed", pesan);
+        }
+    }
+
+    async fn run_action_flow(&self, mut plan_id: String) -> Result<(), String> {
+        let _flow = self.flow_lock.lock().await;
+        for _ in 0..MAX_FLOW_STEPS {
+            let (step_id, siap) = {
+                let guard = self.pending_action.read().await;
+                let r = guard.as_ref().ok_or("rencana aksi sudah tidak tersedia")?;
+                r.periksa(&plan_id, &self.intent)?;
+                (
+                    r.allowances.first().map(|step| step.step_id.clone()),
+                    r.allowances.is_empty() && r.siap,
+                )
+            };
+
+            if let Some(step_id) = step_id {
+                let view = self.kirim_approve(plan_id.clone(), step_id).await?;
+                let status = view.outcome.status;
+                let _ = self
+                    .events
+                    .send(protocol::ServerMessage::SendResult(Box::new(view)));
+                if status != crate::exec::send::TxStatus::Sukses {
+                    if status == crate::exec::send::TxStatus::Menggantung {
+                        self.batalkan_flow_tidak_pasti(&plan_id).await;
+                    }
+                    return Err("Izin token belum berhasil. Aksi posisi tidak dikirim".into());
+                }
+
+                let (position_id, action, input, request_id) = {
+                    let guard = self.pending_action.read().await;
+                    let r = guard
+                        .as_ref()
+                        .filter(|r| r.plan_id == plan_id)
+                        .ok_or("rencana aksi berubah setelah izin token")?;
+                    (
+                        r.position_id.clone(),
+                        r.action,
+                        r.input.clone(),
+                        r.request_id.clone(),
+                    )
+                };
+                let revision = self.intent.begin_action();
+                let view = self
+                    .susun_rencana_aksi(position_id, action, input, request_id, revision)
+                    .await?;
+                plan_id = view.plan_id.clone();
+                let _ = self
+                    .events
+                    .send(protocol::ServerMessage::ActionPlan(Box::new(view)));
+                continue;
+            }
+
+            if !siap {
+                return Err("Aksi belum siap. Muat ulang posisi lalu coba lagi".into());
+            }
+
+            let view = self.kirim_aksi(plan_id).await?;
+            let verifikasi_gagal = view
+                .outcome
+                .verification
+                .as_ref()
+                .is_some_and(|gate| !gate.passed);
+            let _ = self
+                .events
+                .send(protocol::ServerMessage::SendResult(Box::new(view)));
+            if verifikasi_gagal {
+                self.alert_kritis(
+                    "action_unverified",
+                    "Transaksi selesai tetapi perubahan posisi belum terverifikasi. Muat ulang Positions sebelum melakukan aksi lain"
+                        .into(),
+                );
+            }
+            self.on_get_positions().await;
+            return Ok(());
+        }
+        Err("Alur aksi berhenti karena terlalu banyak langkah".into())
     }
 
     async fn kirim_aksi(&self, plan_id: String) -> Result<execute::SendResultView, String> {
@@ -3792,6 +4045,7 @@ impl AppState {
     /// Yang dikosongkan hanya calldata zapnya, supaya swap yang sama tidak
     /// bisa dijalankan dua kali.
     pub async fn on_swap_zap(&self, plan_id: String) {
+        let _flow = self.flow_lock.lock().await;
         match self.kirim_zap(plan_id).await {
             Ok((view, lanjut)) => {
                 let _ = self
@@ -3963,6 +4217,7 @@ impl AppState {
     /// yang tetap tersimpan setelah dikirim bisa disetujui dua kali, dan dua
     /// persetujuan berarti dua posisi beserta dua kali biayanya.
     pub async fn on_open_position(&self, plan_id: String) {
+        let _flow = self.flow_lock.lock().await;
         match self.kirim_open(plan_id).await {
             Ok(view) => {
                 let terverifikasi = view.outcome.fully_verified();

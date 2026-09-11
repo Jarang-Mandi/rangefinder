@@ -390,16 +390,7 @@
   font-weight: 600;
 }
 
-/* PnL mengikuti hierarki kartu acuan: pair dan status, satu hasil utama,
- * kemudian komponen pembentuknya. Semua warna tetap berasal dari token tema. */
-.eyebrow {
-  margin: 0 0 3px;
-  color: var(--text-muted);
-  font-size: 8px;
-  font-weight: 800;
-  letter-spacing: .11em;
-  text-transform: uppercase;
-}
+/* PnL menampilkan pair, status, dan hasil utama. */
 
 .pnl-summary-head,
 .pnl-position-head,
@@ -416,24 +407,6 @@
   font-size: 17px;
   font-weight: 750;
   letter-spacing: -.035em;
-}
-
-.pnl-version {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  margin-top: var(--s3);
-  color: var(--text-muted);
-  font-size: 9px;
-}
-
-.pnl-version select {
-  width: 100%;
-  padding: 7px 9px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-control);
-  background: var(--bg);
-  color: var(--text);
 }
 
 .pnl-currency + .pnl-currency {
@@ -490,6 +463,10 @@
   background: var(--border);
 }
 
+.pnl-position .pnl-metrics {
+  grid-template-columns: 1fr;
+}
+
 .pnl-metric {
   min-width: 0;
   padding: 9px;
@@ -511,7 +488,6 @@
   white-space: nowrap;
 }
 
-.pnl-records,
 .pnl-date {
   margin: var(--s2) 0 0;
   color: var(--text-muted);
@@ -521,8 +497,7 @@
 .pnl-empty h2 { margin-top: 2px; font-size: 17px; }
 .pnl-empty .muted { margin: var(--s2) 0 0; }
 
-/* Posisi mengutamakan jumlah token dan harga. Raw liquidity serta tick
- * dipindah ke detail teknis agar tetap bisa diaudit tanpa memenuhi kartu. */
+/* Posisi mengutamakan jumlah token dan harga. */
 .position-card .pos-bar { margin-top: var(--s4); }
 
 .position-range-labels {
@@ -542,13 +517,6 @@
 }
 
 .position-range-labels span:last-child { text-align: right; }
-
-.position-price-unit {
-  margin: 3px 0 0;
-  color: var(--text-muted);
-  font-size: 8px;
-  text-align: center;
-}
 
 .position-balances {
   display: grid;
@@ -596,16 +564,6 @@
 }
 
 .position-fees i { color: var(--text-muted); font-style: normal; }
-
-.position-technical {
-  margin-top: var(--s2);
-  color: var(--text-muted);
-  font-size: 9px;
-}
-
-.position-technical summary { cursor: pointer; }
-.position-technical .stack { margin-top: var(--s2); }
-.position-link-state { font-size: 8px; }
 
 /* Hanya dipakai fixture visual dua kartu; tidak muncul di side panel. */
 .fixture-grid {
@@ -980,8 +938,7 @@
   color: var(--text);
 }
 
-/* Kartu eksekusi dibuat sebagai satu permukaan utuh. Setoran, status rencana,
- * dan pemeriksaan dipisahkan dengan garis tipis, bukan kartu bertumpuk. */
+/* Kartu eksekusi dibuat sebagai satu permukaan utuh. */
 .execution-card {
   overflow: hidden;
 }
@@ -1107,76 +1064,20 @@ button.token-pill {
   text-align: right;
 }
 
-.execution-blocked,
-.execution-plan-status,
-.execution-plan-meta,
-.execution-gates,
-.execution-card > .stack:last-child {
+.execution-card > .primary {
   margin-top: var(--s3);
-  padding-top: var(--s3);
-  border-top: 1px solid var(--border);
 }
 
-.execution-blocked {
-  color: var(--warn);
-  font-size: 10px;
-}
-
-.execution-plan-status {
-  display: flex;
-  align-items: center;
-  gap: var(--s1);
-}
-
-.execution-plan-status .chip {
-  padding: 2px 6px;
-  font-size: 9px;
-}
-
-.execution-plan-status .chip.warn {
-  border-color: var(--warn);
-  color: var(--warn);
-}
-
-.execution-expiry {
-  margin-left: auto;
-  color: var(--text-muted);
-  font-size: 9px;
-}
-
-.execution-plan-meta {
+.result-simple {
+  margin: var(--s3) 0 0;
+  text-align: center;
   font-size: 11px;
+  font-weight: 700;
 }
 
-.execution-gates summary {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--text-muted);
-  font-size: 10px;
-  cursor: pointer;
-  list-style: none;
-}
-
-.execution-gates summary::-webkit-details-marker {
-  display: none;
-}
-
-.execution-gates summary::after {
-  content: "+";
-  margin-left: auto;
-  color: var(--text-muted);
-  font-size: 14px;
-  line-height: 1;
-}
-
-.execution-gates[open] summary::after {
-  content: "\2212";
-}
-
-.execution-gates .stack {
-  margin-top: var(--s2);
-}
+.result-simple.ok { color: var(--upper); }
+.result-simple.bad { color: var(--lower); }
+.result-simple.warn { color: var(--warn); }
 
 /* Kabar dari engine, jawaban langsung atas aksi yang baru ditekan.
  * Diletakkan di atas isi tab supaya terlihat tanpa menggulir. */

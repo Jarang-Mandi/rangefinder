@@ -150,6 +150,10 @@ export function App() {
   const [scanBusy, setScanBusy] = useState(false);
 
   const clientRef = useRef<EngineClient | null>(null);
+  /** Menjaga tombol tunggal tetap sibuk selama engine menjalankan beberapa
+   * transaksi berurutan di belakang layar. */
+  const openFlowRunningRef = useRef(false);
+  const actionFlowRunningRef = useRef(false);
   /** Tab gmgn yang sedang menampilkan chart. Tujuan perintah gambar garis. */
   const gmgnTabRef = useRef<number | null>(null);
   /** Alamat token yang sedang aktif, dipakai saat meneruskan harga chart. */
@@ -182,6 +186,20 @@ export function App() {
       onState: (s, detail) => {
         setState(s);
         setStateDetail(detail);
+        if (s === "connected") {
+          const activeAddress = addressRef.current;
+          if (activeAddress) {
+            // Token bisa sudah ditemukan sebelum pairing selesai. Permintaan
+            // saat socket belum siap memang tidak terkirim, jadi ulangi tepat
+            // ketika hello diterima agar saldo pertama langsung muncul.
+            client.subscribeToken(activeAddress);
+          } else {
+            void chrome.tabs.query({ active: true, currentWindow: true }).then(([activeTab]) => {
+              const found = robinhoodToken(activeTab?.url ?? "");
+              if (found) loadToken(found, false);
+            }).catch(() => {});
+          }
+        }
       },
       onStatus: setStatus,
       onTokenState: (t) => {
@@ -237,7 +255,7 @@ export function App() {
       },
       onActionPlan: (p) => {
         setActionPlan(p);
-        setActionBusy(false);
+        if (!actionFlowRunningRef.current) setActionBusy(false);
       },
       onPositions: (v) => {
         setPositions(v);
@@ -245,14 +263,21 @@ export function App() {
       },
       onOpenPlan: (plan) => {
         setOpenPlan(plan);
-        setExecBusy(false);
-        setActionBusy(false);
+        if (!openFlowRunningRef.current) setExecBusy(false);
       },
       onSendResult: (result) => {
         setSendResult(result);
         if (result.kind === "action") setActionResult(result);
-        setExecBusy(false);
-        setActionBusy(false);
+        if (result.kind === "open") {
+          openFlowRunningRef.current = false;
+          setExecBusy(false);
+        } else if (result.kind === "action") {
+          actionFlowRunningRef.current = false;
+          setActionBusy(false);
+        } else if (!openFlowRunningRef.current && !actionFlowRunningRef.current) {
+          setExecBusy(false);
+          setActionBusy(false);
+        }
         // Rencana sudah dipakai engine dan dikeluarkan dari slotnya, jadi
         // menampilkannya lagi akan menawarkan tombol yang pasti ditolak.
         if (result.kind === "open") setOpenPlan(null);
@@ -267,6 +292,8 @@ export function App() {
         // akan tetap mati sesudahnya.
         setExecBusy(false);
         setActionBusy(false);
+        openFlowRunningRef.current = false;
+        actionFlowRunningRef.current = false;
         // Toast di halaman gmgn menangani kejadian yang layak mengganggu user,
         // sesuai PRD 3.7. Yang di sini adalah jawaban langsung atas aksi yang
         // baru saja user tekan, dan itu harus terlihat di tempat ia menekannya.
@@ -580,20 +607,11 @@ export function App() {
               setExecBusy(true);
               clientRef.current?.quoteRange(deposit);
             }}
-            onApproveToken={(t) => {
+            onRunOpenFlow={() => {
               if (!openPlan) return;
+              openFlowRunningRef.current = true;
               setExecBusy(true);
-              clientRef.current?.approveToken(openPlan.plan_id, t);
-            }}
-            onSwapZap={() => {
-              if (!openPlan) return;
-              setExecBusy(true);
-              clientRef.current?.swapZap(openPlan.plan_id);
-            }}
-            onOpenPosition={() => {
-              if (!openPlan) return;
-              setExecBusy(true);
-              clientRef.current?.openPosition(openPlan.plan_id);
+              clientRef.current?.runOpenFlow(openPlan.plan_id);
             }}
           />
         ) : tab === "signals" ? (
@@ -646,15 +664,11 @@ export function App() {
               setActionBusy(true);
               clientRef.current?.planAction(id, a, input);
             }}
-            onApproveAction={(stepId) => {
+            onRunAction={() => {
               if (!actionPlan) return;
+              actionFlowRunningRef.current = true;
               setActionBusy(true);
-              clientRef.current?.approveToken(actionPlan.plan_id, stepId);
-            }}
-            onExecuteAction={() => {
-              if (!actionPlan) return;
-              setActionBusy(true);
-              clientRef.current?.executeAction(actionPlan.plan_id);
+              clientRef.current?.runActionFlow(actionPlan.plan_id);
             }}
           />
         ) : (
@@ -752,9 +766,7 @@ function RangeTab({
   sendResult,
   execBusy,
   onQuoteRange,
-  onApproveToken,
-  onSwapZap,
-  onOpenPosition,
+  onRunOpenFlow,
 }: {
   status: EngineStatus | null;
   state: ConnectionState;
@@ -773,9 +785,7 @@ function RangeTab({
   sendResult: SendResultView | null;
   execBusy: boolean;
   onQuoteRange: (deposit: Deposit | null) => void;
-  onApproveToken: (token: string) => void;
-  onSwapZap: () => void;
-  onOpenPosition: () => void;
+  onRunOpenFlow: () => void;
 }) {
 
   if (!status) {
@@ -812,11 +822,8 @@ function RangeTab({
           result={sendResult}
           busy={execBusy}
           canExecute={status.can_execute}
-          blockedReasons={status.blocked_reasons}
           onQuote={onQuoteRange}
-          onApprove={onApproveToken}
-          onZap={onSwapZap}
-          onOpen={onOpenPosition}
+          onRun={onRunOpenFlow}
         />
         </>
       ) : null}
@@ -1582,11 +1589,9 @@ function BarisMetrik({ nama, nilai, ket }: { nama: string; nilai: string; ket: s
 /**
  * Tab PnL.
  *
- * KENAPA KOMPONENNYA SELALU DIPISAH
- * Fee kotor menipu. Posisi yang mengumpulkan fee besar bisa tetap rugi setelah
- * impermanent loss, gas, dan slippage. Kalau kartunya hanya menampilkan satu
- * angka, kesalahan itu akan terulang karena tidak pernah terlihat. PRD 11
- * menyebutnya eksplisit.
+ * Fee kotor menipu. Engine tetap memisahkan impermanent loss, gas, dan
+ * slippage saat menghitung net. Panel mengutamakan net dan fee; rincian
+ * akuntansinya tetap tersimpan untuk audit tanpa memenuhi tampilan utama.
  *
  * Angka datang dari engine apa adanya. Panel tidak menjumlahkan apa pun sendiri,
  * karena dua tempat yang menjumlahkan hal yang sama pasti menyimpang.
@@ -1600,77 +1605,31 @@ export function PnlTab({
   busy: boolean;
   onMuat: () => void;
 }) {
-  const [versionFilter, setVersionFilter] = useState("all");
   if (!view) {
     return (
       <section class="card pnl-empty">
-        <p class="eyebrow">HASIL LIKUIDITAS</p>
-        <h2>PnL belum dimuat</h2>
-        <p class="muted">Nilai dihitung dari posisi, fee, IL, gas, dan slippage yang tercatat.</p>
+        <h2>PnL</h2>
         <button type="button" class="primary lebar" disabled={busy} onClick={onMuat}>
-          {busy ? "Membaca rantai" : "Muat PnL"}
+          {busy ? "Memuat…" : "Muat PnL"}
         </button>
       </section>
     );
   }
 
-  const versions = Array.from(
-    new Set(Object.values(view.learning.position_versions)),
-  ).sort();
-  const selectedVersion =
-    versionFilter === "all" || versions.includes(versionFilter)
-      ? versionFilter
-      : "all";
-  const milikVersi = (positionId: string) =>
-    selectedVersion === "all" ||
-    view.learning.position_versions[positionId.toLowerCase()] === selectedVersion;
-  const r =
-    selectedVersion === "all"
-      ? view.ringkasan
-      : view.learning.summaries.find((item) => item.version === selectedVersion)
-          ?.summary ?? {
-            jumlah: 0,
-            total_net: null,
-            total_fee: null,
-            total_biaya: null,
-            currencies: [],
-            win_rate_bps: null,
-            perkiraan: 0,
-          };
-  const posisiTerlihat = view.positions.filter((p) => milikVersi(p.position_id));
-  const tertutupTerlihat = view.tertutup.filter((p) => milikVersi(p.position_id));
-  const belumDinilai = posisiTerlihat.filter((p) => p.pnl === null).length
-    + tertutupTerlihat.filter((p) => p.pnl === null).length;
+  const r = view.ringkasan;
 
   return (
     <div class="stack">
       <section class="card pnl-summary">
         <div class="pnl-summary-head">
-          <div>
-            <p class="eyebrow">HASIL LIKUIDITAS</p>
-            <h2>Ringkasan PnL</h2>
-          </div>
+          <h2>PnL</h2>
           <span class="chip">{r.jumlah} posisi</span>
         </div>
 
-        <label class="field pnl-version">
-          <span>Versi kalibrasi</span>
-          <select
-            value={selectedVersion}
-            onChange={(event) => setVersionFilter(event.currentTarget.value)}
-          >
-            <option value="all">Semua versi</option>
-            {versions.map((version) => (
-              <option value={version} key={version}>{version}</option>
-            ))}
-          </select>
-        </label>
-
         {r.currencies.length === 0 ? (
           <div class="pnl-hero kosong">
-            <span>PNL BELUM TERSEDIA</span>
+            <span>PNL</span>
             <strong>—</strong>
-            <small>Belum ada posisi dengan satuan kutipan yang bisa dinilai.</small>
           </div>
         ) : r.currencies.map((c) => (
           <div class="pnl-currency" key={c.currency.id}>
@@ -1687,38 +1646,20 @@ export function PnlTab({
           </div>
         ))}
 
-        <div class="pnl-records">
-          {view.learning.closed_records} dari {view.learning.records} rekaman sudah ditutup
-        </div>
-
-        {r.perkiraan > 0 ? (
-          <p class="hint">
-            {r.perkiraan} posisi masih berupa perkiraan. Hasil bersih muncul setelah
-            modal, fee, gas, dan slippage lengkap.
-          </p>
-        ) : null}
-
-        {belumDinilai > 0 ? (
-          <p class="hint">
-            {belumDinilai} posisi belum dapat dinilai karena satuan kutipan atau
-            bukti akuntansinya belum lengkap.
-          </p>
-        ) : null}
-
         <button
           type="button"
           style="margin-top: var(--s3); width: 100%"
           disabled={busy}
           onClick={onMuat}
         >
-          {busy ? "Membaca rantai" : "Muat ulang"}
+          {busy ? "Memuat…" : "Muat ulang"}
         </button>
       </section>
 
-      {posisiTerlihat.map((p) => (
+      {view.positions.map((p) => (
         <PnlCard key={p.position_id} pos={p} />
       ))}
-      {tertutupTerlihat.map((p) => (
+      {view.tertutup.map((p) => (
         <ClosedPnlCard key={p.position_id} pos={p} />
       ))}
     </div>
@@ -1730,25 +1671,18 @@ function ClosedPnlCard({ pos }: { pos: PosisiTertutup }) {
   return (
     <section class="card pnl-position">
       <div class="pnl-position-head">
-        <div>
-          <p class="eyebrow">POSISI TERTUTUP</p>
-          <h2>{shortAddress(pos.token0)} / {shortAddress(pos.token1)}</h2>
-        </div>
-        <span class="chip">{h?.perkiraan ? "perkiraan" : h ? "tercatat" : "belum lengkap"}</span>
+        <h2>Posisi ditutup</h2>
+        <span class="chip">Selesai</span>
       </div>
-      <p class="pnl-date">Ditutup {new Date(pos.ditutup_pada).toLocaleString("id-ID")} · tx {shortAddress(pos.tx_hash)}</p>
+      <p class="pnl-date">{new Date(pos.ditutup_pada).toLocaleString("id-ID")}</p>
       {h ? (
         <>
           <PnlHero value={h.net} symbol={h.currency.symbol} estimated={h.perkiraan} />
           <div class="pnl-metrics">
-            <PnlMetric label="Fee" value={h.fee} symbol={h.currency.symbol} tone="naik" />
-            <PnlMetric label="Impermanent loss" value={-h.impermanent_loss} symbol={h.currency.symbol} tone="turun" />
-            <PnlMetric label="Gas" value={h.gas == null ? null : -h.gas} symbol={h.currency.symbol} tone="turun" />
-            <PnlMetric label="Slippage zap" value={h.slippage == null ? null : -h.slippage} symbol={h.currency.symbol} tone="turun" />
+            <PnlMetric label="Fee diperoleh" value={h.fee} symbol={h.currency.symbol} tone="naik" />
           </div>
         </>
       ) : null}
-      {pos.error ? <p class="hint">{pos.error}</p> : null}
     </section>
   );
 }
@@ -1758,13 +1692,10 @@ function PnlCard({ pos }: { pos: Posisi }) {
   return (
     <section class="card pnl-position">
       <div class="pnl-position-head">
-        <div>
-          <p class="eyebrow">AKTIF · {pos.version.toUpperCase()} · {(pos.fee / 10_000).toFixed(2)}%</p>
-          <h2>{namaPair(pos)}</h2>
-        </div>
+        <h2>{namaPair(pos)}</h2>
         <span class="chip">
           <span class={`dot ${!h || h.net == null ? "warn" : h.net >= 0 ? "ok" : "bad"}`} />
-          {!h ? "belum dinilai" : h.perkiraan ? "perkiraan" : "tercatat"}
+          Aktif
         </span>
       </div>
       {h ? (
@@ -1772,16 +1703,12 @@ function PnlCard({ pos }: { pos: Posisi }) {
           <PnlHero value={h.net} symbol={h.currency.symbol} estimated={h.perkiraan} />
           <div class="pnl-metrics">
             <PnlMetric label="Fee diperoleh" value={h.fee} symbol={h.currency.symbol} tone="naik" />
-            <PnlMetric label="Impermanent loss" value={-h.impermanent_loss} symbol={h.currency.symbol} tone="turun" />
-            <PnlMetric label="Gas" value={h.gas == null ? null : -h.gas} symbol={h.currency.symbol} tone="turun" />
-            <PnlMetric label="Slippage zap" value={h.slippage == null ? null : -h.slippage} symbol={h.currency.symbol} tone="turun" />
           </div>
         </>
       ) : (
         <div class="pnl-hero kosong">
-          <span>PNL BELUM TERSEDIA</span>
+          <span>PNL</span>
           <strong>—</strong>
-          <small>Harga kutipan atau bukti posisi belum lengkap.</small>
         </div>
       )}
     </section>
@@ -1795,7 +1722,7 @@ function PnlHero({ value, symbol, estimated }: { value: number | null; symbol: s
     <div class={`pnl-hero ${tone}`}>
       <span>{label}</span>
       <strong class="num">{value == null ? "—" : angka(value)}</strong>
-      <small>{value == null ? "Menunggu seluruh komponen akuntansi" : `${symbol}${estimated ? " · perkiraan" : ""}`}</small>
+      <small>{symbol}{estimated ? " · perkiraan" : ""}</small>
     </div>
   );
 }
@@ -1887,8 +1814,7 @@ function PositionsTab({
   result,
   onMuat,
   onPlanAction,
-  onApproveAction,
-  onExecuteAction,
+  onRunAction,
 }: {
   view: PositionsView | null;
   busy: boolean;
@@ -1897,19 +1823,13 @@ function PositionsTab({
   result: SendResultView | null;
   onMuat: () => void;
   onPlanAction: (tokenId: string, action: JenisAksi, input?: ActionInput) => void;
-  onApproveAction: (stepId: string) => void;
-  onExecuteAction: () => void;
+  onRunAction: () => void;
 }) {
   if (!view) {
     return (
       <div class="stack">
         <section class="card">
-          <div class="section-title">
-            <h2>Positions</h2>
-          </div>
-          <p class="muted" style="margin: var(--s2) 0 0">
-            Belum dimuat. Tekan tombol di bawah untuk membaca posisi dari rantai.
-          </p>
+          <h2>Positions</h2>
           <button
             type="button"
             class="primary"
@@ -1917,7 +1837,7 @@ function PositionsTab({
             disabled={busy}
             onClick={onMuat}
           >
-            {busy ? "Membaca rantai" : "Muat posisi"}
+            {busy ? "Memuat…" : "Muat posisi"}
           </button>
         </section>
       </div>
@@ -1946,14 +1866,9 @@ function PositionsTab({
 
         {view.error ? (
           <p class="muted" style="margin: var(--s2) 0 0">
-            {view.error}
+            Posisi belum dapat dimuat.
           </p>
         ) : null}
-
-        <div class="row" style="margin-top: var(--s2)">
-          <span class="label">Wallet</span>
-          <span class="value num">{shortAddress(view.owner)}</span>
-        </div>
 
         <button
           type="button"
@@ -1961,7 +1876,7 @@ function PositionsTab({
           disabled={busy}
           onClick={onMuat}
         >
-          {busy ? "Membaca rantai" : "Muat ulang"}
+          {busy ? "Memuat…" : "Muat ulang"}
         </button>
         {result ? <SendResultRow result={result} /> : null}
       </section>
@@ -1973,18 +1888,13 @@ function PositionsTab({
           plan={plan?.position_id === p.position_id ? plan : null}
           busy={actionBusy}
           onPlanAction={onPlanAction}
-          onApproveAction={onApproveAction}
-          onExecuteAction={onExecuteAction}
+          onRunAction={onRunAction}
         />
       ))}
 
       {view.positions.length === 0 && !view.error ? (
         <section class="card">
-          <p class="muted" style="margin: 0">
-            Tidak ada posisi dalam jendela pemindaian. Posisi V4 ditemukan lewat
-            log transfer, jadi yang lebih tua dari tiga juta blok baru muncul
-            setelah sekali ketemu.
-          </p>
+          <p class="muted" style="margin: 0">Belum ada posisi.</p>
         </section>
       ) : null}
     </div>
@@ -2002,15 +1912,13 @@ export function PositionCard({
   plan,
   busy,
   onPlanAction,
-  onApproveAction,
-  onExecuteAction,
+  onRunAction,
 }: {
   pos: Posisi;
   plan: ActionPlanView | null;
   busy: boolean;
   onPlanAction: (tokenId: string, action: JenisAksi, input?: ActionInput) => void;
-  onApproveAction: (stepId: string) => void;
-  onExecuteAction: () => void;
+  onRunAction: () => void;
 }) {
   const [amount0, setAmount0] = useState("");
   const [amount1, setAmount1] = useState("");
@@ -2048,10 +1956,7 @@ export function PositionCard({
   return (
     <section class="card position-card">
       <div class="position-head">
-        <div>
-          <p class="eyebrow">{pos.version.toUpperCase()} · POSISI #{pos.token_id}</p>
-          <h2>{namaPair(pos)}</h2>
-        </div>
+        <h2>{namaPair(pos)}</h2>
         <span class="chip">
           <span class={`dot ${nada}`} />
           {status}
@@ -2067,12 +1972,6 @@ export function PositionCard({
         <strong>{formatHargaPosisi(pos.price_current)} {pos.quote_symbol ?? ""}</strong>
         <span>{formatHargaPosisi(pos.price_upper)} {pos.quote_symbol ?? ""}</span>
       </div>
-      <p class="position-price-unit">
-        {pos.base_symbol && pos.quote_symbol
-          ? `Harga ${pos.quote_symbol} per 1 ${pos.base_symbol}`
-          : "Harga range belum terbaca"}
-      </p>
-
       <div class="position-balances">
         <div>
           <span>Di posisi · {simbol0}</span>
@@ -2093,38 +1992,14 @@ export function PositionCard({
         </strong>
       </div>
 
-      <details class="position-technical">
-        <summary>Detail teknis</summary>
-        <div class="stack">
-          <div class="row">
-            <span class="label">Fee tier</span>
-            <span class="value num">{(pos.fee / 10_000).toFixed(2)}%</span>
-          </div>
-          <div class="row">
-            <span class="label">Tick / grid</span>
-            <span class="value num">{pos.tick_lower}—{pos.tick_upper} / {pos.tick_spacing}</span>
-          </div>
-          <div class="row">
-            <span class="label">Likuiditas mentah</span>
-            <span class="value num">{pos.liquidity}</span>
-          </div>
-        </div>
-      </details>
-
-      {pos.hooks && pos.hooks !== "0x0000000000000000000000000000000000000000" ? (
-        <p class="hint">Hook {shortAddress(pos.hooks)}, belum diperiksa.</p>
-      ) : null}
-
       <div class="stack" style="margin-top: var(--s3)">
         <div class="setoran">
           <div class="section-title">
-            <h3>Tambah ke range ini</h3>
-            <span class="muted position-link-state">{busy ? "Menyesuaikan pair…" : "Nilai pair otomatis"}</span>
+            <h3>Tambah likuiditas</h3>
           </div>
           <div class="kotak-setor">
             <div class="kotak-atas">
               <span class="kotak-nama">{simbol0} Amount</span>
-              <span class="kotak-saldo num">{shortAddress(pos.token0)}</span>
             </div>
             <input
               class="kotak-input num"
@@ -2143,7 +2018,6 @@ export function PositionCard({
           <div class="kotak-setor">
             <div class="kotak-atas">
               <span class="kotak-nama">{simbol1} Amount</span>
-              <span class="kotak-saldo num">{shortAddress(pos.token1)}</span>
             </div>
             <input
               class="kotak-input num"
@@ -2190,9 +2064,10 @@ export function PositionCard({
           <ActionPlanCard
             plan={plan}
             busy={busy}
-            onApprove={onApproveAction}
-            onKirim={onExecuteAction}
+            onRun={onRunAction}
           />
+        ) : busy ? (
+          <button type="button" class="primary" disabled>Menyiapkan…</button>
         ) : null}
       </div>
     </section>
@@ -2200,90 +2075,36 @@ export function PositionCard({
 }
 
 /**
- * Hasil pemeriksaan sebuah aksi, ditampilkan sebelum tombol konfirmasi aktif.
- *
- * PRD 3.5 menuntut simulasi ditampilkan lebih dulu. `siap` datang dari engine,
- * bukan disimpulkan di sini, karena panel yang menyimpulkan sendiri akan
- * menyimpang begitu ada gate baru ditambahkan.
+ * Satu tombol aksi. Gate, approval, dan simulasi tetap dijalankan engine tetapi
+ * tidak memenuhi kartu dengan rincian implementasi.
  */
 function ActionPlanCard({
   plan,
   busy,
-  onApprove,
-  onKirim,
+  onRun,
 }: {
   plan: ActionPlanView;
   busy: boolean;
-  onApprove: (stepId: string) => void;
-  onKirim: () => void;
+  onRun: () => void;
 }) {
+  const dapatDijalankan = !plan.dry_run && (plan.allowances.length > 0 || plan.siap);
+  const label: Record<JenisAksi, string> = {
+    tambah_likuiditas: "Tambah likuiditas",
+    rebalance: "Rebalance",
+    klaim_fee: "Klaim fee",
+    tutup_posisi: "Tutup posisi",
+  };
   return (
-    <div class="stack" style="border-top: 1px solid var(--border); padding-top: var(--s2)">
-      {plan.gates.map((g) => (
-        <div key={g.id} class="row">
-          <span class="label">
-            <span class={`dot ${g.passed ? "ok" : "bad"}`} /> {g.id} {g.name}
-          </span>
-          <span class="value muted">{g.detail}</span>
-        </div>
-      ))}
-      <div class="row">
-        <span class="label">Gas perkiraan</span>
-        <span class="value num">{plan.gas_estimate.toLocaleString("id-ID")}</span>
-      </div>
-
-      {plan.amounts ? (
-        <div class="stack">
-          <div class="row">
-            <span class="label">Maksimum token0</span>
-            <span class="value num">{plan.amounts.amount0} {plan.amounts.symbol0}</span>
-          </div>
-          <div class="row">
-            <span class="label">Maksimum token1</span>
-            <span class="value num">{plan.amounts.amount1} {plan.amounts.symbol1}</span>
-          </div>
-        </div>
-      ) : null}
-      {plan.tick_lower_baru !== null && plan.tick_upper_baru !== null ? (
-        <div class="row">
-          <span class="label">Range baru</span>
-          <span class="value num">{plan.tick_lower_baru} sampai {plan.tick_upper_baru}</span>
-        </div>
-      ) : null}
-
-      {plan.allowances.length > 0 ? (
-        <div class="stack">
-          <p class="hint">Izin token harus selesai berurutan sebelum simulasi dapat lolos.</p>
-          {plan.allowances.map((allowance) => (
-            <button
-              key={allowance.step_id}
-              type="button"
-              disabled={busy}
-              onClick={() => onApprove(allowance.step_id)}
-            >
-              {allowance.label}
-            </button>
-          ))}
-        </div>
-      ) : null}
-
+    <div style="border-top: 1px solid var(--border); padding-top: var(--s2)">
       <button
         type="button"
         class="primary"
         style="width: 100%"
-        disabled={!plan.siap || busy}
-        onClick={onKirim}
+        disabled={!dapatDijalankan || busy}
+        onClick={onRun}
       >
-        {plan.dry_run
-          ? "Dry run aktif, tidak akan dikirim"
-          : plan.siap
-            ? `Konfirmasi ${plan.nama}`
-            : "Ada pemeriksaan yang gagal"}
+        {busy ? "Memproses…" : dapatDijalankan ? label[plan.action] : "Belum siap"}
       </button>
-
-      {plan.menutup ? (
-        <p class="hint">Posisi ditutup habis dan NFT-nya dibakar.</p>
-      ) : null}
     </div>
   );
 }
@@ -2311,15 +2132,15 @@ function porsiDalamRange(p: Posisi): number {
 }
 
 /**
- * Kartu eksekusi: susun rencana, beri izin, buka posisi.
+ * Kartu eksekusi: isi nominal lalu jalankan satu alur pembukaan.
  *
  * Penyusunan rencana berjalan otomatis setelah input berhenti berubah. Aksi
- * on-chain tetap terpisah dan eksplisit, karena aksi itulah yang memindahkan
- * uang sungguhan.
+ * on-chain dimulai dari satu tombol. Engine tetap menunggu receipt dan
+ * menyusun ulang state di antara approval, zap, dan pembukaan.
  *
  * Panel tidak menyimpulkan apa pun sendiri. Boleh tidaknya mengirim, izin mana
  * yang kurang, dan gate mana yang gagal, semuanya datang dari engine. Panel
- * hanya menampilkan dan meneruskan tekanan tombol.
+ * hanya menampilkan jumlah pasangan dan meneruskan persetujuan utama.
  */
 /**
  * Setoran satu aset saat zap aktif, mengikuti tata letak acuan MMT Finance.
@@ -2328,8 +2149,8 @@ function porsiDalamRange(p: Posisi): number {
  * Zap mati memperlihatkan kedua sisi; user boleh mengetik salah satunya dan
  * engine mengisi sisi pasangan dengan rasio range yang sama.
  * Rencana disusun otomatis setelah input berhenti berubah sebentar. Dengan
- * begitu nominal dan range adalah input; tombol berikutnya langsung menjadi
- * aksi on-chain yang memang dibutuhkan (izin, zap, atau buka posisi).
+ * begitu nominal dan range adalah input; tombol berikutnya menyerahkan seluruh
+ * urutan transaksi yang diperlukan kepada engine.
  *
  * KENAPA MENGISI SATU KOTAK MENGISI YANG LAIN
  * Rasio antara kedua sisi ditentukan range, bukan oleh user. Range yang
@@ -2509,24 +2330,6 @@ export function SetoranCard({
         </>
       )}
 
-      <div class="row" style="margin-top: var(--s2)">
-        <span class="label">Perkiraan gas</span>
-        <span class="value num">
-          {plan?.gas_biaya == null
-            ? "-"
-            : `${plan.gas_biaya.toFixed(6)} ETH`}
-        </span>
-      </div>
-
-      <div class="row">
-        <span class="label">Estimasi APR</span>
-        <span class="value num">
-          {plan?.apr_estimasi == null
-            ? "-"
-            : Math.round(plan.apr_estimasi).toLocaleString("id-ID") + "%"}
-        </span>
-      </div>
-
       {plan?.zap && !zap ? (
         <p class="warn-line">
           Tanpa zap, sebagian modal menganggur tanpa menghasilkan fee.
@@ -2604,18 +2407,15 @@ function KotakSetor({
     </div>
   );
 }
-function ExecuteCard({
+export function ExecuteCard({
   view,
   token,
   plan,
   result,
   busy,
   canExecute,
-  blockedReasons,
   onQuote,
-  onApprove,
-  onZap,
-  onOpen,
+  onRun,
 }: {
   view: RangeView | null;
   token: TokenState | null;
@@ -2623,28 +2423,9 @@ function ExecuteCard({
   result: SendResultView | null;
   busy: boolean;
   canExecute: boolean;
-  blockedReasons: string[];
   onQuote: (deposit: Deposit | null) => void;
-  onApprove: (token: string) => void;
-  onZap: () => void;
-  onOpen: () => void;
+  onRun: () => void;
 }) {
-  // Engine sudah menyaring: daftar ini hanya berisi langkah yang memang
-  // masih kurang. Panel tidak menyaring ulang, karena dua tempat yang
-  // memutuskan hal yang sama pasti menyimpang.
-  const kurang = plan?.allowances ?? [];
-  const gateGagal = plan?.gates.filter((g) => !g.passed) ?? [];
-  const alasanTampil = blockedReasons.filter(alasanStatusTerlihat);
-  // Zap yang belum dijalankan menahan pembukaan posisi. Membukanya sekarang
-  // tetap berhasil, tapi sebagian modal akan menganggur tanpa menghasilkan
-  // fee apa pun, dan itu kerugian yang tidak terlihat di layar mana pun.
-  const siapKirim =
-    plan !== null &&
-    !plan.dry_run &&
-    gateGagal.length === 0 &&
-    kurang.length === 0 &&
-    plan.zap === null;
-
   return (
     <section class="card execution-card">
       <SetoranCard
@@ -2655,192 +2436,36 @@ function ExecuteCard({
         canExecute={canExecute}
         onQuote={onQuote}
       />
-
-      {!canExecute && alasanTampil.length > 0 ? (
-        <div class="execution-blocked stack">
-          {alasanTampil.map((r) => (
-            <p key={r} class="muted" style="margin: 0">
-              {r}
-            </p>
-          ))}
-        </div>
-      ) : null}
-
       {plan ? (
-        <>
-          <div class="execution-plan-status">
-            <span class="chip">{plan.version.toUpperCase()}</span>
-            {plan.dry_run ? <span class="chip warn">dry run</span> : null}
-            <span class="execution-expiry num">berlaku hingga {waktuSingkat(plan.expires_at)}</span>
-          </div>
-
-          <div class="execution-plan-meta">
-            <div class="row">
-              <span class="label">Likuiditas</span>
-              <span class="value num">{plan.liquidity}</span>
-            </div>
-            <div class="row">
-              <span class="label">Tick</span>
-              <span class="value num">
-                {plan.tick_lower} sampai {plan.tick_upper}
-              </span>
-            </div>
-            <div class="row">
-              <span class="label">Gas perkiraan</span>
-              <span class="value num">{plan.gas_estimate.toLocaleString("id-ID")}</span>
-            </div>
-          </div>
-
-          <details class="execution-gates" open={gateGagal.length > 0}>
-            <summary>
-              <span class={`dot ${gateGagal.length === 0 ? "ok" : "bad"}`} />
-              {gateGagal.length === 0
-                ? `${plan.gates.length} pemeriksaan lulus`
-                : `${gateGagal.length} pemeriksaan gagal`}
-            </summary>
-            <div class="stack">
-              {plan.gates.map((g) => (
-                <div key={g.id} class="row">
-                  <span class="label">
-                    <span class={`dot ${g.passed ? "ok" : "bad"}`} /> {g.id} {g.name}
-                  </span>
-                  <span class="value muted">{g.detail}</span>
-                </div>
-              ))}
-            </div>
-          </details>
-
-          {plan.warnings.length > 0 ? (
-            <div class="stack" style="margin-top: var(--s2)">
-              {plan.warnings.map((w) => (
-                <p key={w} class="hint">
-                  {w}
-                </p>
-              ))}
-            </div>
-          ) : null}
-
-          {kurang.length > 0 ? (
-            <div class="stack" style="margin-top: var(--s3)">
-              <p class="hint">
-                {plan.version === "v4"
-                  ? "V4 menarik token lewat Permit2, jadi izinnya dua lapis. Kerjakan berurutan, satu tombol satu transaksi."
-                  : "Izin ERC20 belum cukup. Diberikan sebesar yang dibutuhkan saja, bukan tak terbatas."}
-              </p>
-              {kurang.map((a) => (
-                <button
-                  key={`${a.jenis}:${a.token}`}
-                  type="button"
-                  disabled={busy}
-                  onClick={() => onApprove(a.step_id)}
-                >
-                  {a.label}
-                </button>
-              ))}
-            </div>
-          ) : null}
-
-          {plan.zap ? (
-            <div class="stack" style="margin-top: var(--s3)">
-              <div class="row">
-                <span class="label">Zap</span>
-                <span class="value num">
-                  {(plan.zap.porsi_bps / 100).toFixed(1)}% ditukar
-                </span>
-              </div>
-              <div class="row">
-                <span class="label">Perkiraan diterima</span>
-                <span class="value num">{plan.zap.perkiraan_diterima}</span>
-              </div>
-              <div class="row">
-                <span class="label">Minimum diterima</span>
-                <span class="value num">{plan.zap.minimum_diterima}</span>
-              </div>
-              <p class="hint">
-                Modal belum sesuai rasio range, jadi sebagian perlu ditukar
-                lebih dulu. Tanpa ini {plan.zap.menganggur_tanpa_zap} satuan
-                akan menganggur tanpa menghasilkan fee.
-              </p>
-              <button type="button" disabled={busy || kurang.length > 0} onClick={onZap}>
-                Tukar {shortAddress(plan.zap.dari)} ke {shortAddress(plan.zap.ke)}
-              </button>
-              <p class="hint">
-                Setelah swap selesai, susun rencana lagi supaya jumlahnya
-                dihitung ulang dari saldo yang baru.
-              </p>
-            </div>
-          ) : null}
-
-          <button
-            type="button"
-            class="primary"
-            style="margin-top: var(--s3); width: 100%"
-            disabled={!siapKirim || busy}
-            onClick={onOpen}
-          >
-            {plan.dry_run
-              ? "Dry run aktif, tidak akan dikirim"
-              : plan.zap
-                ? "Jalankan zap dulu"
-                : "Buka posisi"}
-          </button>
-
-        </>
+        <button
+          type="button"
+          class="primary lebar"
+          disabled={!canExecute || plan.dry_run || busy}
+          onClick={onRun}
+        >
+          {busy ? "Memproses…" : "Buka posisi"}
+        </button>
+      ) : busy ? (
+        <button type="button" class="primary lebar" disabled>
+          Menyiapkan…
+        </button>
       ) : null}
 
-      {result ? <SendResultRow result={result} /> : null}
+      {result?.kind === "open" ? <SendResultRow result={result} /> : null}
     </section>
   );
 }
 
 function SendResultRow({ result }: { result: SendResultView }) {
-  const nada =
-    result.status === "sukses" ? "ok" : result.status === "revert" ? "bad" : "warn";
+  const nada = result.status === "sukses" ? "ok" : result.status === "revert" ? "bad" : "warn";
+  const label = result.status === "sukses"
+    ? result.kind === "open" ? "Posisi berhasil dibuka" : "Berhasil"
+    : result.status === "menggantung" ? "Status masih diproses" : "Transaksi gagal";
   return (
-    <div class="stack" style="margin-top: var(--s3)">
-      <div class="row">
-        <span class="label">
-          <span class={`dot ${nada}`} /> {result.kind}
-        </span>
-        <span class="value num">{shortAddress(result.tx_hash)}</span>
-      </div>
-      <div class="row">
-        <span class="label">Status</span>
-        <span class="value">{result.status}</span>
-      </div>
-      {result.gas_used !== null ? (
-        <div class="row">
-          <span class="label">Gas terpakai</span>
-          <span class="value num">{result.gas_used.toLocaleString("id-ID")}</span>
-        </div>
-      ) : null}
-      {result.token_id ? (
-        <div class="row">
-          <span class="label">Token id</span>
-          <span class="value num">{result.token_id}</span>
-        </div>
-      ) : null}
-      {result.verification ? (
-        <p class={result.verification.passed ? "hint" : "muted"}>
-          {result.verification.id} {result.verification.detail}
-        </p>
-      ) : null}
-      {result.status === "menggantung" ? (
-        <p class="hint">
-          Receipt belum datang. Transaksinya sudah ada di rantai, statusnya yang
-          belum diketahui. Jangan mengirim ulang sebelum memeriksanya.
-        </p>
-      ) : null}
-    </div>
+    <p class={`result-simple ${nada}`}>
+      <span class={`dot ${nada}`} /> {label}
+    </p>
   );
-}
-
-/** Jam menit dari waktu ISO, cukup untuk menilai apakah rencana masih segar. */
-function waktuSingkat(iso: string): string {
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime())
-    ? iso
-    : d.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" });
 }
 
 /**

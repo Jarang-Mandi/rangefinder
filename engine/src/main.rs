@@ -118,6 +118,7 @@ async fn main() -> Result<()> {
     let state = AppState {
         intent: Arc::new(rangefinder_engine::api::intent::Intent::default()),
         execution_lock: Arc::new(Mutex::new(())),
+        flow_lock: Arc::new(Mutex::new(())),
         positions_lock: Arc::new(Mutex::new(())),
         cfg: Arc::new(cfg.clone()),
         auth: Arc::new(token),

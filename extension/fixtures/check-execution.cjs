@@ -8,6 +8,11 @@ async (page) => {
   if (await page.getByRole('button', { name: 'Susun rencana' }).count() !== 0) {
     throw Error('Setoran masih meminta langkah Susun rencana');
   }
+  for (const text of ['Likuiditas', 'Tick', 'Gas perkiraan', 'Permit2', 'pemeriksaan', 'peringatan teknis fixture']) {
+    if (await page.getByText(text, { exact: false }).count() !== 0) {
+      throw Error('Detail engine masih terlihat: ' + text);
+    }
+  }
 
   for (const width of [320, 360, 480]) {
     await page.setViewportSize({ width, height: 700 });
@@ -23,7 +28,7 @@ async (page) => {
     const deposit = JSON.parse(value);
     return deposit?.side === 'quote' && deposit?.amount === '7500' && deposit?.zap === true;
   });
-  const deposit = await state();
+  const deposit = (await state()).deposit;
   if (deposit.side !== 'quote' || deposit.amount !== '7500' || deposit.zap !== true) {
     throw Error('Jumlah zap tidak diteruskan dengan benar');
   }
@@ -51,6 +56,11 @@ async (page) => {
     return fields.some(field => field.value === '2');
   });
   const dariQuote = [await meme.inputValue(), await quoteManual.inputValue()];
+
+  const buka = page.getByRole('button', { name: 'Buka posisi' });
+  if (await buka.count() !== 1) throw Error('Eksekusi harus memakai satu tombol Buka posisi');
+  await buka.click();
+  if ((await state()).runs !== 1) throw Error('Buka posisi tidak menjalankan flow engine');
 
   return { widths: [320, 360, 480], zapInputs: 1, manualInputs: 2, deposit, dariMeme, dariQuote };
 }

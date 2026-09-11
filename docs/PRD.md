@@ -265,10 +265,10 @@ Jalan kedua, dan ini yang lebih sering terjadi dalam pemakaian nyata: user sendi
 
 - Menampilkan semua posisi V3 dan V4 milik wallet, termasuk posisi yang dibuka di luar Rangefinder, dan **mengelolanya penuh**. Posisi dari platform lain punya set aksi yang sama persis: tambah, rebalance, klaim, tutup. Satu satunya pembatas adalah posisi pada pool dengan hook di luar allowlist, yang hanya boleh ditutup, tidak boleh ditambah.
 - Posisi dari luar yang tidak punya catatan cost basis di basis data lokal direkonstruksi dari log on chain, yaitu event `IncreaseLiquidity`, `DecreaseLiquidity`, dan `Collect`, sehingga PnL-nya tetap terhitung. Jika rekonstruksi tidak lengkap, kartu menandainya sebagai perkiraan, bukan menyembunyikannya.
-- Setiap kartu menampilkan pair, versi protokol, fee tier, range, harga sekarang relatif range, status in range atau out of range, durasi, fee terkumpul yang belum diklaim, dan net PnL berjalan.
+- Setiap kartu menampilkan pair, range, harga sekarang relatif range, status in range atau out of range, jumlah token, fee terkumpul yang belum diklaim, dan aksi utama. Versi protokol, fee tier, tick mentah, liquidity mentah, serta rincian implementasi tidak tampil di kartu.
 - Indikator posisi harga di dalam range berupa bar horizontal solid, bukan gradient.
 - Klik kartu membuka daftar aksi: Tambah likuiditas, Rebalance ke range baru, Klaim fee, Tutup posisi, Tutup lalu swap ke ETH.
-- Setiap aksi menampilkan simulasi hasil sebelum tombol konfirmasi aktif, termasuk perkiraan gas dan slippage.
+- Engine menjalankan simulasi dan seluruh gate sebelum transaksi, tetapi panel hanya menampilkan satu tombol aksi. Approval dan penyusunan ulang berjalan berurutan di belakang layar setelah tombol ditekan.
 - Posisi yang keluar range lebih dari ambang waktu yang diset user naik ke puncak daftar dan ditandai.
 - Data posisi diperbarui melalui WebSocket dari engine, tanpa polling dari sisi panel.
 
@@ -278,9 +278,9 @@ Jalan kedua, dan ini yang lebih sering terjadi dalam pemakaian nyata: user sendi
 
 **Acceptance criteria.**
 
-- Kartu memisahkan dengan jelas fee yang diperoleh, impermanent loss, biaya gas, biaya slippage zap, dan net akhir.
+- Engine tetap menghitung fee, impermanent loss, gas, slippage zap, dan net akhir secara terpisah. Panel mengutamakan net dan fee yang diperoleh; rincian akuntansi teknis tetap berada di engine dan jurnal.
 - Ada ringkasan agregat: total net, win rate, median time in range, dan fee APR terealisasi.
-- Bisa difilter berdasarkan rentang waktu, token, versi protokol, dan tipe strategi.
+- Ringkasan memuat seluruh posisi aktif dan tertutup tanpa filter versi teknis di tampilan utama.
 - Kartu bisa diekspor jadi PNG.
 - Angka net PnL memakai basis yang bisa dipilih user antara USD atau ETH.
 
@@ -1438,12 +1438,14 @@ ditekan untuk mengganti sisi. Saat Zap mati, kedua kotak tampil karena user
 perlu mengisi kedua aset. Header hanya berisi judul dan sakelar Zap, tanpa ikon
 range. Logo token tidak direka dari huruf ticker dan tidak dicari dari jaringan;
 selama protokol belum membawa aset logo terverifikasi, token pill hanya memakai
-ticker. Di bawah input ada satu tombol utama, estimasi gas, dan estimasi APR.
+ticker. Di bawah input hanya ada satu tombol utama. Approval, zap, simulasi,
+gas, gate, dan penyusunan ulang rencana dikerjakan engine di belakang layar.
 
 Saldo wallet ikut di `token_state`. `None` berarti wallet belum dibuka, bukan
 saldo nol: yang pertama menuntun ke membuka wallet, yang kedua ke membeli
-tokennya dulu. Saat user berpindah pasangan, saldo menyusul lewat kiriman kedua
-supaya perpindahan yang seharusnya seketika tidak menyentuh jaringan.
+tokennya dulu. Saat user berpindah pasangan, engine mengirim saldo segera
+setelah pembacaan RPC selesai dan baru mengukur statistik pool sesudahnya.
+Panel mengulang subscribe saat koneksi pairing siap agar permintaan awal tidak hilang.
 
 **Riwayat notifikasi dihapus dari panel**, menyimpang dari 3.7. Toast di halaman
 gmgn tetap berjalan lewat koneksi content script sendiri, dan itulah jalur yang
@@ -1508,7 +1510,7 @@ pesan mulai ada. `cargo xtask docs-check` memeriksa satu arah: setiap pesan yang
 sudah ada di kode wajib tercantum di sini. Sebaliknya tidak diwajibkan, karena
 rencana boleh mendahului implementasi.
 
-Versi protokol saat ini 3. Nama field di kabel memakai snake_case. Engine dan
+Versi protokol saat ini 5. Nama field di kabel memakai snake_case. Engine dan
 ekstensi harus dimuat ulang bersama ketika kontrak ini berubah.
 
 Panel ke engine:
@@ -1528,6 +1530,7 @@ Panel ke engine:
 | `invalidate_plan` | tanpa isi, membatalkan rencana saat setoran sedang disunting | 3 |
 | `quote_range` | `{ deposit: { side, amount, zap }, request_id }`. `side` bernilai `meme` atau `quote`, `amount` string desimal token sumber. Engine membaca ulang pool, menghitung sisi pasangan, serta membatasi dana pada anggaran tersebut. Tidak mengirim transaksi | 3 |
 | `approve_token` | `{ plan_id, step_id }`. Setujui langkah izin pertama dalam rencana itu. Token, spender, dan jumlah diambil dari langkah tersimpan, termasuk izin UniversalRouter. Setiap klik paling banyak satu transaksi | 3 |
+| `run_open_flow` | `{ plan_id }`. Satu persetujuan user untuk alur pembukaan. Engine menjalankan approval satu per satu, zap bila perlu, menyusun ulang dari state rantai setelah setiap receipt, lalu membuka posisi. Alur dikunci agar pesan ganda tidak mengirim langkah yang sama dua kali | 7 |
 | `swap_zap` | `{ plan_id }`. Jalankan swap zap dari rencana itu. Setelah receipt sukses, engine menyusun preview mint dari sisa modal dan hasil swap terukur; mint tetap memerlukan persetujuan terpisah | 4 |
 | `open_position` | `{ plan_id }`. Setujui rencana tersimpan yang ID, revisi, serta masa berlakunya masih cocok. Rencana dikeluarkan sebelum pengiriman. Calldata tetap hanya berada di engine | 3 |
 | `rebalance` | `{ positionId, tickLower, tickUpper }` | 3 |
@@ -1538,6 +1541,7 @@ Panel ke engine:
 | `get_notifications` | tanpa isi. Minta riwayat notifikasi terakhir | 5 |
 | `plan_action` | `{ position_id, request_id, action, input }`. Identitas posisi adalah chain:manager:token_id. `input` membawa amount0/amount1 untuk tambah likuiditas; rebalance memakai range aktif yang terlihat di chart. Engine membaca ulang posisi dan kepemilikannya sebelum menyusun dan menyimulasikan aksi | 5 |
 | `execute_action` | `{ plan_id }`. Setujui ID aksi yang ditampilkan. Rencana lama, kedaluwarsa, atau belum lolos gate ditolak | 5 |
+| `run_action_flow` | `{ plan_id }`. Satu persetujuan user untuk aksi posisi. Engine menyelesaikan approval, menyusun ulang dari state rantai, lalu mengirim aksi akhir secara berurutan | 7 |
 | `approve_hook` | `{ hook }`. Catat persetujuan sadar user atas sebuah hook V4 yang belum lolos kriteria adopsi 5.4. Engine menilai ulang hooknya sendiri sebelum mencatat, karena penilaian yang datang dari panel bisa saja sudah diubah, dan bagian yang paling menarik untuk diubah justru kesimpulan bisa diupgrade atau tidaknya. Hook yang masih bisa diupgrade ditolak di sini juga. Penilaian menyimpan code_hash; quote, approval token, zap, dan mint memeriksa ulang kode serta slot proxy. Pencabutan membatalkan revisi rencana, dan hasil penilaian lama tidak boleh menghidupkan kembali persetujuan | 6 |
 | `forget_hook` | `{ hook }`. Cabut persetujuan sebuah hook | 6 |
 | `set_rpc` | `{ http[] }`. Tulis daftar endpoint RPC baru ke config.toml. HANYA menulis: endpoint yang sedang dipakai tidak ditukar saat engine berjalan, karena permintaan yang sudah berangkat ke satu RPC tidak boleh ditunggu jawabannya dari yang lain. Panel diberi tahu bahwa engine perlu dijalankan ulang | 6 |
@@ -1551,17 +1555,17 @@ Engine ke panel:
 | `hello` | `{ engineVersion, protocolVersion }`, dikirim sekali saat tersambung | 1 |
 | `engine_status` | `{ engineVersion, uptimeSecs, chain, wallet, registry, canExecute, blockedReasons[], rpcHttp[] }`. `rpcHttp` sudah tersunting kuncinya oleh `chain::endpoint` saat endpointnya dibuat, bukan saat ditampilkan | 1 |
 | `pong` | balasan denyut | 1 |
-| `open_plan` | `{ plan_id, request_id, deposit, ... }`, seluruh gate termasuk R1/R2, setor, APR yang sudah memakai versi kalibrasi aktif, gas_biaya, gas_gwei, version, zap, expires_at. Langkah izin membawa `{ step_id, jenis, token, spender, needed, current, label }`. Panel hanya menerima request_id miliknya. TVL tidak terbaca ditampilkan kosong, bukan nol | 3 |
+| `open_plan` | `{ plan_id, request_id, deposit, ... }`, seluruh gate termasuk R1/R2, setor, APR yang sudah memakai versi kalibrasi aktif, gas_biaya, gas_gwei, version, zap, expires_at. Langkah izin membawa `{ step_id, jenis, token, spender, needed, current, label }`. Panel hanya menerima request_id miliknya dan memakai rencana untuk jumlah pasangan serta tombol utama; rincian gate dan izin tidak ditampilkan | 3 |
 | `send_result` | `{ kind, tx_hash, nonce, gas_limit, status, block_number, gas_used, gas_cost_wei, minted_amounts, token_id, verification, sent_at }`. Gas berasal dari gasUsed dan effectiveGasPrice receipt; null jika belum diketahui. minted_amounts berisi amount0/amount1 aktual dari event manager V3, null jika belum dibuktikan. `kind`: `approve`, `zap`, `open`, `action`. `status`: `sukses`, `revert`, `menggantung` | 3 |
 | `alert` | `{ level, code, message, positionId }` | 1 |
-| `positions` | `{ positions[], tertutup[], owner, keluar_range, ringkasan, learning, error, dimuat_pada }`. Posisi membawa position_id berisi chain:manager:token_id. `fee0`, `fee1`, fee PnL, gas, slippage, dan net bernilai null jika buktinya belum tersedia. `tertutup[]` direkonstruksi dari jurnal close. `learning` membawa position_versions, daftar kalibrasi, jumlah hasil, dan ringkasan per versi untuk filter PnL. Pemuatan berkala tiap 30 detik tetap berjalan ketika panel tertutup | 5 |
+| `positions` | `{ positions[], tertutup[], owner, keluar_range, ringkasan, learning, error, dimuat_pada }`. Posisi membawa position_id berisi chain:manager:token_id. `fee0`, `fee1`, fee PnL, gas, slippage, dan net bernilai null jika buktinya belum tersedia. `tertutup[]` direkonstruksi dari jurnal close. `learning` tetap membawa data kalibrasi untuk engine, tetapi tidak ditampilkan sebagai filter teknis di PnL. Pemuatan berkala tiap 30 detik tetap berjalan ketika panel tertutup | 5 |
 | `transactions` | `{ owner, items[], error }`. Tiap item memuat operasi, hash, plan/flow/position ID, nonce, gas, jumlah diterima, status, dan finalitas. Request lengkap serta calldata tidak keluar dari engine; detail error transport disunting karena dapat memuat URL RPC berkunci | 5 |
 | `notify` | `{ level, code, message, subject, at, ditahan }`. Berbeda dari `alert`: pesan ini melewati pendinginan, masuk riwayat, dan membawa petunjuk durasi serta suara. `alert` dipakai untuk kegagalan seketika pada aksi yang sedang dijalankan user | 5 |
 | `notify_history` | daftar kejadian terakhir, terbaru lebih dulu, paling banyak 50 | 5 |
 | `depth` | `{ poolId, tickSekarang, hargaSekarang, tickSpacing, pita[], quoteAdalahToken1, error }`. Setiap pita membawa batas tick, batas harga, likuiditas, modal yang tertanam dalam token kutipan, dan penanda apakah harga sekarang ada di dalamnya. Batas harga selalu terurut naik apa pun sisi mana memecoinnya berada, karena panel tidak boleh mengulang perhitungan arah itu sendiri. Lihat 6.14 | 6 |
 | `scan_results` | `{ rows[], hooks[], adopsi_lengkap, jendelaPindaiMenit, jendelaVolumeMenit, volumeJendelaPendek, modalAcuan, totalSwap, dipindaiPada, error }`. Setiap baris membawa simbol, pasangan, market cap, volume, kedalaman, hasil jendela, APR, efisiensi, umur, risiko, label, dan alasan. `hooks[]` membawa code_hash, jumlah pool, umur, TVL USD, LP unik aktif, lima status kriteria, serta lolos_otomatis. `adopsi_lengkap` benar setelah sejarah Initialize dan ModifyLiquidity selesai | 6 |
 | `signals` | `{ address, barTerpakai, harga, sideways, basis, saran, konsentrasiDibandingLebar, dihitungPada }`. `sideways` dan `basis` kosong berarti datanya belum cukup, BUKAN berarti kondisinya tidak menarik | 6 |
-| `action_plan` | `{ plan_id, position_id, request_id, token_id, action, nama, gates[], gas_estimate, dry_run, menutup, siap, expires_at, fee0, fee1, allowances[], amounts, tick_lower_baru, tick_upper_baru }`. Tambah dan rebalance memakai R1; tambah modal baru juga memakai R2. Simulasi ditampilkan sebelum tombol konfirmasi aktif | 5 |
+| `action_plan` | `{ plan_id, position_id, request_id, token_id, action, nama, gates[], gas_estimate, dry_run, menutup, siap, expires_at, fee0, fee1, allowances[], amounts, tick_lower_baru, tick_upper_baru }`. Tambah dan rebalance memakai R1; tambah modal baru juga memakai R2. Panel memakai hasilnya untuk mengaktifkan satu tombol, sedangkan gate, simulasi, dan approval tetap berada di alur engine | 5 |
 | `token_state` | `{ address, meta, quotes[], pools[], selectedQuote, selectedPoolId, saldo, error }`. `saldo` memuat saldo wallet untuk kedua sisi pasangan terpilih beserta saldo token gas, dan bernilai kosong kalau wallet belum dibuka, yang berbeda dari saldo nol. Setiap pool membawa `stats` berisi volume, TVL, dan proyeksi APR kalau sudah terukur. Setiap `quote` membawa `{ quote, quoteSymbol, quoteDecimals, canonical, pools[] }`. Dikirim dua kali saat memuat: sekali cepat dari kunci pool yang tersimpan, sekali lagi setelah pemindaian selesai kalau ada yang berubah. Lihat 4.3c | 2 |
 | `range_view` | `{ poolId, tickSpacing, ethUsd, current, lower, upper, widthPct, inRange, warnings[] }`. Tiap batas memuat `tick`, `priceWeth`, `priceUsd`, `mcapUsd`, dan `driftBps`, yaitu selisih akibat pembulatan ke grid tick | 2 |
 | `price_tick` | `{ address, priceUsd, priceWeth, mcapUsd }` | 2 |
@@ -1924,7 +1928,7 @@ Posisi yang tetap berada di dalam range tapi tidak menghasilkan fee adalah modal
 
 ### 11.10 Akuntansi biaya penuh
 
-Fee kotor menipu. Kartu PnL wajib memisahkan gas buka, gas tutup, slippage zap, dan dampak harga, lalu menampilkan net. Tanpa ini, posisi kecil yang terlihat untung sebenarnya rugi setelah biaya, dan kesalahan itu akan terulang karena tidak pernah terlihat.
+Fee kotor menipu. Engine wajib memisahkan gas buka, gas tutup, slippage zap, dan dampak harga sebelum menghitung net. Kartu PnL menampilkan net sebagai angka utama dan fee sebagai angka pendamping; rincian teknis tetap tersedia di jurnal untuk audit.
 
 ### 11.11 Manfaatkan sequencer 100 milidetik
 
