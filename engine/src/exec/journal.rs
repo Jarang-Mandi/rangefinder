@@ -52,6 +52,10 @@ pub struct CloseBasis {
     pub quote_decimals: u8,
     pub currency_id: String,
     pub currency_symbol: String,
+    #[serde(default)]
+    pub symbol0: Option<String>,
+    #[serde(default)]
+    pub symbol1: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

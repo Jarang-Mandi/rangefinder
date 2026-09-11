@@ -101,12 +101,13 @@ function Preview() {
     <main class="content" style="width:100%;max-width:480px;margin:0 auto">
       <ExecuteCard
         plan={plan}
+        preview={null}
         view={view}
         token={token}
-        result={null}
         busy={false}
         canExecute
         onQuote={setDeposit}
+        onPreview={setDeposit}
         onRun={() => setRuns((value) => value + 1)}
       />
       <output aria-label="Setoran terakhir" style="display:none">

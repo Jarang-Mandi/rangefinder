@@ -16,6 +16,7 @@ import {
   PROTOCOL_VERSION,
   asEngineStatus,
   asActionPlan,
+  asDepositPreview,
   asNotify,
   asSignals,
   asOpenPlan,
@@ -28,6 +29,7 @@ import {
   asTokenState,
   type ClientMessage,
   type Deposit,
+  type DepositPreview,
   type EnginePing,
   type EngineStatus,
   type ActionPlanView,
@@ -62,6 +64,7 @@ interface Handlers {
   onTokenState?: (token: TokenState) => void;
   onRangeView?: (view: RangeView) => void;
   onOpenPlan?: (plan: OpenPlanView) => void;
+  onDepositPreview?: (preview: DepositPreview) => void;
   onSendResult?: (result: SendResultView) => void;
   onPositions?: (view: PositionsView) => void;
   onTransactions?: (view: TransactionsView) => void;
@@ -87,6 +90,7 @@ export class EngineClient {
   private protocolReady = false;
   private hasConnected = false;
   private quoteRequest: string | null = null;
+  private previewRequest: string | null = null;
   private actionRequest: string | null = null;
 
   constructor(
@@ -210,6 +214,12 @@ export class EngineClient {
         this.handlers.onRangeView?.(view);
         return;
       }
+      const preview = asDepositPreview(msg);
+      if (preview) {
+        if (preview.request_id !== this.previewRequest) return;
+        this.handlers.onDepositPreview?.(preview);
+        return;
+      }
       const posisi = asPositions(msg);
       if (posisi) {
         this.handlers.onPositions?.(posisi);
@@ -293,7 +303,9 @@ export class EngineClient {
   private send(msg: ClientMessage) {
     if (this.protocolReady && this.socket?.readyState === WebSocket.OPEN) {
       this.socket.send(JSON.stringify(msg));
+      return true;
     }
+    return false;
   }
 
   requestStatus() {
@@ -347,8 +359,15 @@ export class EngineClient {
     this.send({ type: "quote_range", deposit, request_id: this.quoteRequest });
   }
 
+  /** Hitung nominal pasangan dari snapshot pool tanpa menjalankan gate transaksi. */
+  previewDeposit(deposit: Deposit) {
+    this.previewRequest = crypto.randomUUID();
+    this.send({ type: "preview_deposit", deposit, request_id: this.previewRequest });
+  }
+
   invalidatePlan() {
     this.quoteRequest = null;
+    this.previewRequest = null;
     this.send({ type: "invalidate_plan" });
   }
 
@@ -384,14 +403,18 @@ export class EngineClient {
 
   /** Susun rencana sebuah aksi pada posisi. Tidak mengirim apa pun. */
   planAction(positionId: string, action: JenisAksi, input: ActionInput = {}) {
-    this.actionRequest = crypto.randomUUID();
-    this.send({
+    const requestId = crypto.randomUUID();
+    this.actionRequest = requestId;
+    const sent = this.send({
       type: "plan_action",
       position_id: positionId,
-      request_id: this.actionRequest,
+      request_id: requestId,
       action,
       input,
     });
+    if (sent) return requestId;
+    this.actionRequest = null;
+    return null;
   }
 
   /** Setujui aksi terakhir. Ini yang benar benar memindahkan dana. */

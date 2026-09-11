@@ -59,6 +59,15 @@ pub enum ClientMessage {
     /// Input setoran sedang disunting, rencana yang tampil tidak lagi berlaku.
     InvalidatePlan,
 
+    /// Hitung nominal pasangan dari snapshot pool yang sudah ada.
+    ///
+    /// Jalur ini tidak membaca RPC, saldo, allowance, simulasi, atau gas. Ia
+    /// hanya membuat kotak nominal terasa langsung saat user mengetik.
+    PreviewDeposit {
+        deposit: super::deposit::Deposit,
+        request_id: String,
+    },
+
     /// Susun rencana membuka posisi sebesar sekian dolar pada range sekarang.
     ///
     /// Tidak mengirim apa pun. Seluruh gate dijalankan dan hasilnya
@@ -184,6 +193,14 @@ pub enum ServerMessage {
     RangeView(Box<crate::range::RangeView>),
     /// Rencana membuka posisi beserta hasil seluruh gate.
     OpenPlan(Box<crate::api::execute::OpenPlanView>),
+
+    /// Preview nominal kedua sisi yang tidak mengandung keputusan eksekusi.
+    DepositPreview {
+        request_id: String,
+        deposit: crate::api::deposit::Deposit,
+        setor: Option<crate::api::execute::SetoranView>,
+        error: Option<String>,
+    },
 
     /// Hasil satu pengiriman transaksi, `approve` maupun `open`.
     SendResult(Box<crate::api::execute::SendResultView>),
@@ -394,7 +411,7 @@ pub struct SignalsView {
     pub dihitung_pada: String,
 }
 
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// Tentukan apakah engine boleh mengeksekusi transaksi, beserta alasannya.
 ///
@@ -533,6 +550,19 @@ mod tests {
                     && deposit.side == super::super::deposit::Side::Quote
                     && deposit.amount == "25.5"
                     && deposit.zap
+        ));
+
+        let preview: ClientMessage = serde_json::from_str(
+            r#"{"type":"preview_deposit","request_id":"preview-1","deposit":{"side":"meme","amount":"12.5","zap":false}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            preview,
+            ClientMessage::PreviewDeposit { request_id, deposit }
+                if request_id == "preview-1"
+                    && deposit.side == super::super::deposit::Side::Meme
+                    && deposit.amount == "12.5"
+                    && !deposit.zap
         ));
 
         let execute_zap: ClientMessage =

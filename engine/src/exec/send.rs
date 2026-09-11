@@ -48,10 +48,10 @@ pub const GAS_LIMIT_MAKSIMUM: u64 = 5_000_000;
 
 /// Berapa lama menunggu receipt sebelum menyerah.
 ///
-/// Waktu blok rantai ini sekitar 100 ms, jadi enam puluh detik adalah enam
-/// ratus blok. Kalau selama itu transaksinya belum masuk, ada yang salah, dan
-/// menunggu lebih lama tidak akan memperbaikinya.
-pub const TUNGGU_RECEIPT_DETIK: u64 = 60;
+/// Waktu blok rantai ini sekitar 100 ms. Setelah lima belas detik UI mendapat
+/// status `menggantung` yang jujur dan jurnal melanjutkan pemeriksaan di latar,
+/// sehingga tombol tidak tampak macet selama satu menit.
+pub const TUNGGU_RECEIPT_DETIK: u64 = 15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]

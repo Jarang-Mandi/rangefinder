@@ -62,6 +62,8 @@ pub struct RencanaTersimpan {
     pub token1: Address,
     pub amount0: U256,
     pub amount1: U256,
+    /// Harga mentah token1 per token0 saat rencana disusun.
+    pub harga_buka: f64,
     pub disusun_pada: chrono::DateTime<chrono::Utc>,
 }
 
@@ -172,7 +174,7 @@ pub struct OpenPlanView {
 }
 
 /// Jumlah tiap sisi yang akan disetor, dalam satuan yang bisa dibaca.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SetoranView {
     pub simbol_memecoin: String,
     pub jumlah_memecoin: f64,
@@ -583,6 +585,7 @@ mod tests {
             token1: Address::ZERO,
             amount0: U256::ZERO,
             amount1: U256::ZERO,
+            harga_buka: 1.0,
             disusun_pada: chrono::Utc::now()
                 - chrono::Duration::seconds(RENCANA_KEDALUWARSA_DETIK + 1),
         };
@@ -610,6 +613,7 @@ mod tests {
             token1: Address::ZERO,
             amount0: U256::ZERO,
             amount1: U256::ZERO,
+            harga_buka: 1.0,
             disusun_pada: chrono::Utc::now(),
         };
         assert!(!plan.kedaluwarsa());

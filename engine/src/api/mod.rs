@@ -786,6 +786,72 @@ impl AppState {
         }
     }
 
+    /// Beri preview nominal dari snapshot pool yang sudah berada di memori.
+    ///
+    /// Jalur ini sengaja tidak menyentuh RPC, wallet, allowance, simulasi,
+    /// atau estimasi gas. Rencana penuh tetap menyusul lewat `quote_range`.
+    pub async fn on_preview_deposit(&self, deposit: deposit::Deposit, request_id: String) {
+        let hasil = {
+            let guard = self.active.read().await;
+            let active = guard
+                .as_ref()
+                .ok_or_else(|| "belum ada token yang dimuat".to_string());
+            active.and_then(|active| {
+                let pool = active
+                    .selected_pool()
+                    .ok_or_else(|| "pool terpilih tidak tersedia".to_string())?;
+                let kelompok = active
+                    .quotes
+                    .iter()
+                    .find(|q| q.quote.eq_ignore_ascii_case(&active.selected_quote))
+                    .ok_or_else(|| "pasangan kutipan tidak tersedia".to_string())?;
+                let mcap = active
+                    .chart_mcap_usd
+                    .ok_or_else(|| "harga chart belum tersedia".to_string())?;
+                let view = crate::range::build_view(
+                    pool,
+                    &active.meta,
+                    active.quote_decimals,
+                    mcap,
+                    active.requested,
+                    self.quote_adalah_eth(&active.selected_quote),
+                )
+                .map_err(|_| "range belum tersedia".to_string())?;
+                let (lower, upper) = execute::tick_menaik(view.lower.tick, view.upper.tick)
+                    .ok_or_else(|| "range terlalu sempit".to_string())?;
+                let meme0 = pool.token0.eq_ignore_ascii_case(&active.meta.address);
+                let source0 = (deposit.side == deposit::Side::Meme) == meme0;
+                let decimals = if deposit.side == deposit::Side::Meme {
+                    active.meta.decimals
+                } else {
+                    active.quote_decimals
+                };
+                let amount = deposit::units(&deposit.amount, decimals)?;
+                let (amount0, amount1) =
+                    deposit::budget(pool, lower, upper, amount, source0, deposit.zap)?;
+                Ok(Self::ringkas_jumlah_setoran(
+                    pool,
+                    &active.meta,
+                    &kelompok.quote_symbol,
+                    active.quote_decimals,
+                    amount0,
+                    amount1,
+                ))
+            })
+        };
+
+        let (setor, error) = match hasil {
+            Ok(setor) => (Some(setor), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
+        let _ = self.events.send(protocol::ServerMessage::DepositPreview {
+            request_id,
+            deposit,
+            setor,
+            error,
+        });
+    }
+
     async fn susun_rencana(
         &self,
         task: execute::QuoteTask,
@@ -1325,6 +1391,7 @@ impl AppState {
                 token1,
                 amount0,
                 amount1,
+                harga_buka: pool.raw_price,
                 disusun_pada,
             });
         }
@@ -1373,28 +1440,15 @@ impl AppState {
             return (None, None);
         };
 
-        let quote_adalah_token1 = pool.token0.eq_ignore_ascii_case(&meta.address);
-        let skala_meme = 10f64.powi(meta.decimals as i32);
-        let skala_quote = 10f64.powi(active.quote_decimals as i32);
-
-        let a0: f64 = plan.amount0.to_string().parse().unwrap_or(0.0);
-        let a1: f64 = plan.amount1.to_string().parse().unwrap_or(0.0);
-
-        let (mentah_meme, mentah_quote) = if quote_adalah_token1 {
-            (a0, a1)
-        } else {
-            (a1, a0)
-        };
-
-        let jumlah_memecoin = mentah_meme / skala_meme;
-        let jumlah_quote = mentah_quote / skala_quote;
-
-        let harga = if quote_adalah_token1 {
-            pool.raw_price * skala_meme / skala_quote
-        } else {
-            (1.0 / pool.raw_price) * skala_meme / skala_quote
-        };
-        let nilai_quote = jumlah_quote + jumlah_memecoin * harga;
+        let setor = Self::ringkas_jumlah_setoran(
+            pool,
+            meta,
+            &kelompok.quote_symbol,
+            active.quote_decimals,
+            plan.amount0.parse().unwrap_or_default(),
+            plan.amount1.parse().unwrap_or_default(),
+        );
+        let nilai_quote = setor.nilai_quote;
 
         // APR memakai modal yang benar benar disetor, bukan modal acuan.
         // Penyebutnya memuat modal kita sendiri, jadi angkanya tidak pernah
@@ -1413,16 +1467,41 @@ impl AppState {
             Some(per_jendela * periode * 100.0)
         });
 
-        (
-            Some(execute::SetoranView {
-                simbol_memecoin: meta.symbol.clone(),
-                jumlah_memecoin,
-                simbol_quote: kelompok.quote_symbol.clone(),
-                jumlah_quote,
-                nilai_quote,
-            }),
-            apr,
-        )
+        (Some(setor), apr)
+    }
+
+    fn ringkas_jumlah_setoran(
+        pool: &crate::pools::PoolInfo,
+        meta: &crate::pools::TokenMeta,
+        simbol_quote: &str,
+        quote_decimals: u8,
+        amount0: alloy::primitives::U256,
+        amount1: alloy::primitives::U256,
+    ) -> execute::SetoranView {
+        let quote_adalah_token1 = pool.token0.eq_ignore_ascii_case(&meta.address);
+        let skala_meme = 10f64.powi(meta.decimals as i32);
+        let skala_quote = 10f64.powi(quote_decimals as i32);
+        let a0 = f64::from(amount0);
+        let a1 = f64::from(amount1);
+        let (mentah_meme, mentah_quote) = if quote_adalah_token1 {
+            (a0, a1)
+        } else {
+            (a1, a0)
+        };
+        let jumlah_memecoin = mentah_meme / skala_meme;
+        let jumlah_quote = mentah_quote / skala_quote;
+        let harga = if quote_adalah_token1 {
+            pool.raw_price * skala_meme / skala_quote
+        } else {
+            (1.0 / pool.raw_price) * skala_meme / skala_quote
+        };
+        execute::SetoranView {
+            simbol_memecoin: meta.symbol.clone(),
+            jumlah_memecoin,
+            simbol_quote: simbol_quote.to_string(),
+            jumlah_quote,
+            nilai_quote: jumlah_quote + jumlah_memecoin * harga,
+        }
     }
 
     /// Hitung zap kalau modal tidak cocok dengan rasio range.
@@ -1666,17 +1745,68 @@ impl AppState {
         }
     }
 
-    /// Jalankan approval, zap, dan mint dari satu klik. Semua keputusan tetap
-    /// diambil ulang dari rencana engine setelah setiap receipt sehingga
-    /// perubahan saldo atau allowance tidak pernah ditebak oleh panel.
+    /// Jalankan approval, zap, dan mint dari satu klik.
     pub async fn on_run_open_flow(&self, plan_id: String) {
-        if let Err(pesan) = self.run_open_flow(plan_id).await {
-            self.alert_kritis("open_flow_failed", pesan);
+        let subject = {
+            let guard = self.pending_plan.read().await;
+            guard
+                .as_ref()
+                .filter(|r| r.plan_id == plan_id)
+                .map(|r| r.quote.request_id.clone())
+                .or_else(|| Some(plan_id.clone()))
+        };
+        self.beri_tahu_subjek(
+            protocol::AlertLevel::Info,
+            "open_started",
+            "Pembukaan posisi dimulai".into(),
+            subject.clone(),
+        )
+        .await;
+        match self.run_open_flow(plan_id).await {
+            Ok((status, terverifikasi)) => {
+                let (level, code, message) = match (status, terverifikasi) {
+                    (crate::exec::send::TxStatus::Sukses, true) => (
+                        protocol::AlertLevel::Info,
+                        "open_succeeded",
+                        "Posisi berhasil dibuka".to_string(),
+                    ),
+                    (crate::exec::send::TxStatus::Sukses, false) => (
+                        protocol::AlertLevel::Warning,
+                        "open_unverified",
+                        "Transaksi masuk, tetapi posisi belum terverifikasi. Muat ulang Positions sebelum mencoba lagi".to_string(),
+                    ),
+                    (crate::exec::send::TxStatus::Menggantung, _) => (
+                        protocol::AlertLevel::Warning,
+                        "open_pending",
+                        "Pembukaan masih diproses. Hasil akhirnya akan diberitahukan".to_string(),
+                    ),
+                    (crate::exec::send::TxStatus::Revert, _) => (
+                        protocol::AlertLevel::Critical,
+                        "open_failed",
+                        "Posisi gagal dibuka karena transaksi ditolak rantai".to_string(),
+                    ),
+                };
+                self.beri_tahu_subjek(level, code, message, subject).await;
+            }
+            Err(pesan) => {
+                self.alert_kritis("open_flow_failed", pesan.clone());
+                self.beri_tahu_subjek(
+                    protocol::AlertLevel::Critical,
+                    "open_failed",
+                    format!("Posisi gagal dibuka: {pesan}"),
+                    subject,
+                )
+                .await;
+            }
         }
     }
 
-    async fn run_open_flow(&self, mut plan_id: String) -> Result<(), String> {
+    async fn run_open_flow(
+        &self,
+        mut plan_id: String,
+    ) -> Result<(crate::exec::send::TxStatus, bool), String> {
         let _flow = self.flow_lock.lock().await;
+        let mut izin_selesai = false;
         for _ in 0..MAX_FLOW_STEPS {
             let (step_id, perlu_zap, siap) = {
                 let guard = self.pending_plan.read().await;
@@ -1692,7 +1822,7 @@ impl AppState {
             };
 
             if let Some(step_id) = step_id {
-                let view = self.kirim_approve(plan_id.clone(), step_id).await?;
+                let view = self.kirim_approve(plan_id.clone(), step_id.clone()).await?;
                 let status = view.outcome.status;
                 let _ = self
                     .events
@@ -1701,12 +1831,18 @@ impl AppState {
                     if status == crate::exec::send::TxStatus::Menggantung {
                         self.batalkan_flow_tidak_pasti(&plan_id).await;
                     }
-                    return Err(
-                        "Izin token belum berhasil. Tidak ada langkah berikutnya yang dikirim"
-                            .into(),
-                    );
+                    return Ok((status, false));
                 }
+                self.tandai_izin_selesai(&plan_id, &step_id).await?;
+                izin_selesai = true;
+                continue;
+            }
 
+            // Approval mengubah state rantai, tetapi seluruh allowance dalam
+            // rencana awal sudah terikat urutan dan diverifikasi receipt-nya.
+            // Susun ulang sekali setelah semuanya selesai, bukan sekali per
+            // approval. Gate akhir tetap memakai state rantai terbaru.
+            if izin_selesai {
                 let task = {
                     let guard = self.pending_plan.read().await;
                     let r = guard
@@ -1726,6 +1862,7 @@ impl AppState {
                 let _ = self
                     .events
                     .send(protocol::ServerMessage::OpenPlan(Box::new(view)));
+                izin_selesai = false;
                 continue;
             }
 
@@ -1736,9 +1873,10 @@ impl AppState {
                     .events
                     .send(protocol::ServerMessage::SendResult(Box::new(view)));
                 if status != crate::exec::send::TxStatus::Sukses {
-                    return Err(
-                        "Penyesuaian jumlah token belum berhasil. Posisi belum dibuka".into(),
-                    );
+                    if status == crate::exec::send::TxStatus::Menggantung {
+                        self.batalkan_flow_tidak_pasti(&plan_id).await;
+                    }
+                    return Ok((status, false));
                 }
                 let task = lanjut.ok_or("saldo hasil penyesuaian belum bisa dipakai")?;
                 let view = self.susun_rencana(task).await?;
@@ -1759,22 +1897,41 @@ impl AppState {
             let _ = self
                 .events
                 .send(protocol::ServerMessage::SendResult(Box::new(view)));
-            if status == crate::exec::send::TxStatus::Menggantung {
-                self.alert_kritis(
-                    "open_pending",
-                    "Status pembukaan posisi belum pasti. Muat ulang Positions sebelum mencoba lagi"
-                        .into(),
-                );
-            } else if status == crate::exec::send::TxStatus::Sukses && !terverifikasi {
-                self.alert_kritis(
-                    "open_unverified",
-                    "Posisi sudah dikirim tetapi hasil akhirnya belum terverifikasi. Muat ulang Positions sebelum mencoba lagi"
-                        .into(),
-                );
-            }
-            return Ok(());
+            return Ok((status, terverifikasi));
         }
         Err("Alur pembukaan berhenti karena terlalu banyak langkah".into())
+    }
+
+    /// Hapus approval pertama sesudah receipt-nya sukses.
+    async fn tandai_izin_selesai(&self, plan_id: &str, step_id: &str) -> Result<(), String> {
+        {
+            let mut guard = self.pending_plan.write().await;
+            if let Some(rencana) = guard.as_mut().filter(|r| r.plan_id == plan_id) {
+                let pertama = rencana
+                    .allowances
+                    .first()
+                    .ok_or("izin pembukaan sudah selesai")?;
+                if pertama.step_id != step_id {
+                    return Err("urutan izin pembukaan berubah".into());
+                }
+                rencana.allowances.remove(0);
+                return Ok(());
+            }
+        }
+        let mut guard = self.pending_action.write().await;
+        let rencana = guard
+            .as_mut()
+            .filter(|r| r.plan_id == plan_id)
+            .ok_or("rencana untuk izin sudah tidak tersedia")?;
+        let pertama = rencana
+            .allowances
+            .first()
+            .ok_or("izin aksi sudah selesai")?;
+        if pertama.step_id != step_id {
+            return Err("urutan izin aksi berubah".into());
+        }
+        rencana.allowances.remove(0);
+        Ok(())
     }
 
     async fn batalkan_flow_tidak_pasti(&self, plan_id: &str) {
@@ -2865,6 +3022,8 @@ impl AppState {
                             quote_decimals,
                             currency_id: currency.id,
                             currency_symbol: currency.symbol,
+                            symbol0: posisi.symbol0.clone(),
+                            symbol1: posisi.symbol1.clone(),
                         }
                     })
             })
@@ -2974,17 +3133,113 @@ impl AppState {
         }
     }
 
-    /// Jalankan seluruh izin lalu aksi posisi dari satu tombol. Rencana selalu
-    /// dihitung ulang setelah receipt approval agar jumlah dan gate yang
-    /// dipakai aksi akhir sesuai state rantai terbaru.
+    /// Jalankan seluruh izin lalu aksi posisi dari satu tombol.
     pub async fn on_run_action_flow(&self, plan_id: String) {
-        if let Err(pesan) = self.run_action_flow(plan_id).await {
-            self.alert_kritis("action_flow_failed", pesan);
+        let (action, subject) = {
+            let guard = self.pending_action.read().await;
+            guard
+                .as_ref()
+                .filter(|r| r.plan_id == plan_id)
+                .map(|r| (r.action, Some(r.request_id.clone())))
+                .unwrap_or((
+                    crate::exec::aksi::JenisAksi::Rebalance,
+                    Some(plan_id.clone()),
+                ))
+        };
+        let (awal, sukses, tertunda, gagal, nama) = Self::label_notifikasi_aksi(action);
+        self.beri_tahu_subjek(
+            protocol::AlertLevel::Info,
+            awal,
+            format!("{nama} dimulai"),
+            subject.clone(),
+        )
+        .await;
+        match self.run_action_flow(plan_id).await {
+            Ok((status, terverifikasi)) => {
+                let (level, code, message) = match (status, terverifikasi) {
+                    (crate::exec::send::TxStatus::Sukses, true) => (
+                        protocol::AlertLevel::Info,
+                        sukses,
+                        format!("{nama} berhasil"),
+                    ),
+                    (crate::exec::send::TxStatus::Sukses, false) => (
+                        protocol::AlertLevel::Warning,
+                        gagal,
+                        format!("{nama} masuk rantai, tetapi hasilnya belum terverifikasi"),
+                    ),
+                    (crate::exec::send::TxStatus::Menggantung, _) => (
+                        protocol::AlertLevel::Warning,
+                        tertunda,
+                        format!("{nama} masih diproses. Hasil akhirnya akan diberitahukan"),
+                    ),
+                    (crate::exec::send::TxStatus::Revert, _) => (
+                        protocol::AlertLevel::Critical,
+                        gagal,
+                        format!("{nama} gagal karena transaksi ditolak rantai"),
+                    ),
+                };
+                self.beri_tahu_subjek(level, code, message, subject).await;
+            }
+            Err(pesan) => {
+                self.alert_kritis("action_flow_failed", pesan.clone());
+                self.beri_tahu_subjek(
+                    protocol::AlertLevel::Critical,
+                    gagal,
+                    format!("{nama} gagal: {pesan}"),
+                    subject,
+                )
+                .await;
+            }
         }
     }
 
-    async fn run_action_flow(&self, mut plan_id: String) -> Result<(), String> {
+    fn label_notifikasi_aksi(
+        action: crate::exec::aksi::JenisAksi,
+    ) -> (
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+    ) {
+        match action {
+            crate::exec::aksi::JenisAksi::TambahLikuiditas => (
+                "increase_started",
+                "increase_succeeded",
+                "increase_pending",
+                "increase_failed",
+                "Tambah likuiditas",
+            ),
+            crate::exec::aksi::JenisAksi::Rebalance => (
+                "rebalance_started",
+                "rebalance_succeeded",
+                "rebalance_pending",
+                "rebalance_failed",
+                "Rebalance",
+            ),
+            crate::exec::aksi::JenisAksi::KlaimFee => (
+                "claim_started",
+                "claim_succeeded",
+                "claim_pending",
+                "claim_failed",
+                "Klaim fee",
+            ),
+            crate::exec::aksi::JenisAksi::TutupPosisi => (
+                "close_started",
+                "close_succeeded",
+                "close_pending",
+                "close_failed",
+                "Penutupan posisi",
+            ),
+        }
+    }
+
+    async fn run_action_flow(
+        &self,
+        mut plan_id: String,
+    ) -> Result<(crate::exec::send::TxStatus, bool), String> {
         let _flow = self.flow_lock.lock().await;
+        let mut izin_selesai = false;
         for _ in 0..MAX_FLOW_STEPS {
             let (step_id, siap) = {
                 let guard = self.pending_action.read().await;
@@ -2997,7 +3252,7 @@ impl AppState {
             };
 
             if let Some(step_id) = step_id {
-                let view = self.kirim_approve(plan_id.clone(), step_id).await?;
+                let view = self.kirim_approve(plan_id.clone(), step_id.clone()).await?;
                 let status = view.outcome.status;
                 let _ = self
                     .events
@@ -3006,9 +3261,15 @@ impl AppState {
                     if status == crate::exec::send::TxStatus::Menggantung {
                         self.batalkan_flow_tidak_pasti(&plan_id).await;
                     }
-                    return Err("Izin token belum berhasil. Aksi posisi tidak dikirim".into());
+                    return Ok((status, false));
                 }
 
+                self.tandai_izin_selesai(&plan_id, &step_id).await?;
+                izin_selesai = true;
+                continue;
+            }
+
+            if izin_selesai {
                 let (position_id, action, input, request_id) = {
                     let guard = self.pending_action.read().await;
                     let r = guard
@@ -3030,6 +3291,7 @@ impl AppState {
                 let _ = self
                     .events
                     .send(protocol::ServerMessage::ActionPlan(Box::new(view)));
+                izin_selesai = false;
                 continue;
             }
 
@@ -3043,18 +3305,12 @@ impl AppState {
                 .verification
                 .as_ref()
                 .is_some_and(|gate| !gate.passed);
+            let status = view.outcome.status;
             let _ = self
                 .events
                 .send(protocol::ServerMessage::SendResult(Box::new(view)));
-            if verifikasi_gagal {
-                self.alert_kritis(
-                    "action_unverified",
-                    "Transaksi selesai tetapi perubahan posisi belum terverifikasi. Muat ulang Positions sebelum melakukan aksi lain"
-                        .into(),
-                );
-            }
             self.on_get_positions().await;
-            return Ok(());
+            return Ok((status, !verifikasi_gagal));
         }
         Err("Alur aksi berhenti karena terlalu banyak langkah".into())
     }
@@ -4349,7 +4605,7 @@ impl AppState {
                         .as_ref()
                         .map(|a| a.amount1.clone())
                         .unwrap_or_else(|| tersimpan.plan.amount1.clone()),
-                    harga_buka: None,
+                    harga_buka: Some(tersimpan.harga_buka),
                     lengkap: false,
                     setoran_aktual: outcome.minted_amounts.is_some(),
                     gas_wei: (flow_costs.gas_wei > alloy::primitives::U256::ZERO)

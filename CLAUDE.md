@@ -8,14 +8,16 @@ digeser diinjeksi ke chart TradingView milik gmgn.ai.
 > `docs/PRD.md` menjelaskan apa dan kenapa. Berkas ini menjelaskan bagaimana,
 > beserta hal hal yang gampang dirusak kalau tidak tahu.
 
-## Keadaan sekarang, 10 September 2026
+## Keadaan sekarang, 11 September 2026
 
 Audit integrasi dan pekerjaan tertinggal di `docs/PERBAIKAN.md` sudah ditutup
-pada kode dan pengujian lokal. Protokol sekarang versi 3. Quote membawa aset
+pada kode dan pengujian lokal. Protokol sekarang versi 6. Quote membawa aset
 sumber, jumlah desimal, pilihan Zap, dan request ID. Persetujuan membawa plan
 ID, approval membawa step ID, dan hasil positions membawa versi kalibrasi.
 Engine serta ekstensi harus dibangun dan dimuat ulang bersama. Hasil async lama
 dibatasi generasi permintaan; pergantian input membatalkan rencana lama.
+`preview_deposit` menghitung pasangan langsung dari snapshot pool di memori,
+sedangkan `quote_range` tetap menjalankan seluruh pemeriksaan transaksi.
 
 Identitas posisi berbentuk chain:manager:token_id. Pemantauan engine berjalan
 tiap 30 detik, termasuk ketika panel tertutup. Jurnal `tx:v1` ditulis setelah
@@ -43,8 +45,8 @@ kode dan empat slot proxy tetap dibaca ulang sebelum modal masuk.
 `learning.rs` mencatat vektor fitur pada open terverifikasi dan hasil PnL pada
 close. Monitor mengakumulasi waktu di dalam range. Kalibrasi dipisahkan per
 rezim, butuh 30 hasil lengkap, dan menjadi penantang selama 20 hasil baru.
-Bobot, ambang sinyal, faktor APR, dan faktor waktu punya batas keras. Tab PnL
-memfilter hasil berdasarkan versi. `cargo xtask calibration` menyediakan
+Bobot, ambang sinyal, faktor APR, dan faktor waktu punya batas keras. Data
+kalibrasi tetap disimpan engine tanpa memenuhi tampilan PnL. `cargo xtask calibration` menyediakan
 status, kalibrasi manual, replay hasil, replay candle historis, dan rollback.
 
 Bridge chart mengikat attach dan createShape ke generasi navigasi. Hasil shape
@@ -55,6 +57,8 @@ Pembaruan range dari panel memindahkan kedua shape yang sudah ada lewat
 `setPoints`; membuat pasangan baru hanya jalur pemulihan kalau shape hilang.
 Event dari perpindahan terprogram dibedakan dari drag user supaya tidak
 memantul kembali ke engine.
+Pesan kesiapan chart untuk token yang sama selalu menggambar ulang range
+terakhir karena reload dokumen menghapus shape meski state panel tetap hidup.
 
 Kartu eksekusi mengikuti hierarki MMT Finance: header ringkas, sakelar Zap,
 satu input aset saat Zap aktif, dua input saat Zap mati, ticker dalam token pill,
@@ -64,6 +68,16 @@ selama protokol belum membawa aset terverifikasi. Fixture
 `fixtures/execution.html` menguji alur input serta lebar 320, 360, dan 480
 piksel. Rancangan pengganti dry run bernama `Simulasi | Tx Asli` sudah ada di
 PRD 9.2.1, tetapi belum diimplementasikan.
+
+Tombol buka posisi selalu terlihat sejak kartu eksekusi muncul. Approval dalam
+satu flow dijalankan berurutan lalu rencana disusun ulang sekali sebelum aksi
+akhir. Receipt ditunggu 15 detik di jalur interaktif; sesudah itu jurnal
+melanjutkan rekonsiliasi dan memancarkan notifikasi akhir. Open, tambah,
+rebalance, klaim, dan close masing masing punya kabar mulai, berhasil, tertunda,
+atau gagal. Rebalance, klaim, dan close langsung menyusun serta menjalankan flow
+dari tombol aksinya tanpa tombol konfirmasi kedua. Tambah likuiditas menyusun
+rencana selama input berubah dan memakai satu tombol final. Kartu PnL menampilkan waktu buka, durasi atau waktu tutup, setoran,
+nilai sekarang atau diterima, fee, net, dan persentase tanpa eyebrow teknis.
 
 Setelah fase 6 ditutup, seluruh pekerjaan berikutnya adalah perbaikan yang
 datang dari user memakai panelnya sendiri. Itu tercatat di PRD 6.15, dan
@@ -372,7 +386,7 @@ bytecode yang tidak cocok dengan yang dipin.
 | 4 | Eksekusi V4 dan zap | **selesai dan terbukti live**. ABI V4 dibuktikan ada di bytecode terpasang lewat `cargo xtask v4probe`, encoder aksi menghasilkan byte identik dengan transaksi V4 sungguhan sepanjang 868 byte, izin dua lapis lewat Permit2, gate G0 sampai G7 terangkai. Zap satu sisi memakai kutipan V4Quoter dan penyelesai bagi dua, dan encoder UniversalRouter fork membangun ulang transaksi swap sungguhan 1124 byte byte per byte termasuk field `minHopPriceX36`. Uji live PONS/ETH membuka posisi `2339246`, receipt mint sukses dan G7 cocok |
 | 5 | Positions, PnL, notifikasi | **selesai**. Posisi V3 lewat ERC721Enumerable dan V4 lewat pemindaian Transfer. Fee dibaca dari pertumbuhan fee. PnL memisahkan fee, IL, gas, dan slippage, serta mempertahankan `null` untuk komponen yang belum terbukti. Histori eksternal V3 direkonstruksi dari event; V4 memakai batas calldata sebagai perkiraan. Klaim, close, tambah likuiditas, dan rebalance tersedia lewat rencana dan klik eksplisit |
 | 6 | Signals dan doktrin penempatan | **selesai**. Detektor sideways serta dump lalu basis, doktrin penempatan, optimizer fee tier, dan scan berlabel tersedia. Gate hook mengukur kelima kriteria on chain dan dapat membuat allowlist otomatis 24 jam. Transfer tax jalur LP dan jual kecil dibuktikan melalui simulasi kontrak nyata |
-| 6b | Perbaikan dari pemakaian | **selesai**. Distribusi likuiditas V3/V4, histogram interaktif tanpa lompatan setelah drag, statistik pool, kartu setoran bergaya MMT dengan satu aset saat Zap aktif, saldo wallet, perkiraan gas, Settings, snapshot konsisten, isolasi tab, Zap satu sisi terhubung dari panel sampai engine, serta penyusunan rencana otomatis 400 ms setelah input stabil |
+| 6b | Perbaikan dari pemakaian | **selesai**. Distribusi likuiditas V3/V4, histogram interaktif tanpa lompatan setelah drag, statistik pool, kartu setoran bergaya MMT dengan satu aset saat Zap aktif, preview pasangan langsung dari memori, saldo wallet, perkiraan gas, Settings, snapshot konsisten, isolasi tab, Zap satu sisi terhubung dari panel sampai engine, serta penyusunan rencana penuh otomatis 90 ms setelah input stabil |
 | 7 | Self improvement | **selesai**. Vektor fitur dan hasil tersimpan per posisi, kalibrasi per rezim memakai minimum 30 hasil, penantang 20 hasil, batas keras, filter PnL per versi, replay hasil/candle, serta rollback satu perintah |
 
 ### Bukti fase 1 selesai

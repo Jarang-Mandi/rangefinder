@@ -108,6 +108,10 @@ async fn session(socket: WebSocket, state: AppState) {
                                 state.on_set_full_range().await;
                             }
                             Ok(ClientMessage::InvalidatePlan) => { state.intent.change(); }
+                            Ok(ClientMessage::PreviewDeposit { deposit, request_id }) => {
+                                let s = state.clone();
+                                tokio::spawn(async move { s.on_preview_deposit(deposit, request_id).await });
+                            }
                             // Tiga pesan berikut menyentuh dana. Masing masing
                             // dijalankan di tugas terpisah supaya loop ini tetap
                             // membalas denyut selama transaksi menunggu receipt,

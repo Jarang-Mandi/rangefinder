@@ -279,6 +279,12 @@ async fn reconcile_transactions(state: &AppState) {
             return;
         }
     };
+    let status_sebelum: std::collections::HashMap<_, _> =
+        rangefinder_engine::exec::journal::entries(&state.store, state.registry.chain.id, owner)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|entry| (entry.tx_hash, entry.status))
+            .collect();
     match rangefinder_engine::exec::journal::reconcile(
         &provider,
         &state.store,
@@ -289,12 +295,79 @@ async fn reconcile_transactions(state: &AppState) {
     {
         Ok(report) => {
             for entry in report.changed {
+                let status_berubah = status_sebelum
+                    .get(&entry.tx_hash)
+                    .is_none_or(|status| *status != entry.status);
                 tracing::info!(
                     tx = %entry.tx_hash,
                     status = ?entry.status,
                     confirmed = entry.confirmed_at.is_some(),
                     "jurnal transaksi diperbarui"
                 );
+                let (success_code, failed_code, name) = match entry.context.operation {
+                    rangefinder_engine::exec::journal::Operation::Approve => {
+                        ("approve_succeeded", "approve_failed", "Izin token")
+                    }
+                    rangefinder_engine::exec::journal::Operation::Zap => {
+                        ("zap_succeeded", "zap_failed", "Penyesuaian aset")
+                    }
+                    rangefinder_engine::exec::journal::Operation::Open => {
+                        ("open_succeeded", "open_failed", "Pembukaan posisi")
+                    }
+                    rangefinder_engine::exec::journal::Operation::Claim => {
+                        ("claim_succeeded", "claim_failed", "Klaim fee")
+                    }
+                    rangefinder_engine::exec::journal::Operation::Close => {
+                        ("close_succeeded", "close_failed", "Penutupan posisi")
+                    }
+                    rangefinder_engine::exec::journal::Operation::Increase => {
+                        ("increase_succeeded", "increase_failed", "Tambah likuiditas")
+                    }
+                    rangefinder_engine::exec::journal::Operation::Rebalance => {
+                        ("rebalance_succeeded", "rebalance_failed", "Rebalance")
+                    }
+                };
+                match entry.status {
+                    rangefinder_engine::exec::journal::Status::Succeeded => {
+                        if !status_berubah {
+                            continue;
+                        }
+                        let message = match entry.context.operation {
+                            rangefinder_engine::exec::journal::Operation::Approve => {
+                                "Izin token berhasil. Susun ulang rencana untuk melanjutkan"
+                                    .to_string()
+                            }
+                            rangefinder_engine::exec::journal::Operation::Zap => {
+                                "Penyesuaian aset berhasil. Susun ulang rencana untuk melanjutkan"
+                                    .to_string()
+                            }
+                            _ => format!("{name} berhasil"),
+                        };
+                        state
+                            .beri_tahu_subjek(
+                                AlertLevel::Info,
+                                success_code,
+                                message,
+                                Some(entry.context.flow_id.clone()),
+                            )
+                            .await;
+                    }
+                    rangefinder_engine::exec::journal::Status::Reverted
+                    | rangefinder_engine::exec::journal::Status::Replaced => {
+                        if !status_berubah {
+                            continue;
+                        }
+                        state
+                            .beri_tahu_subjek(
+                                AlertLevel::Critical,
+                                failed_code,
+                                format!("{name} gagal"),
+                                Some(entry.context.flow_id.clone()),
+                            )
+                            .await;
+                    }
+                    _ => {}
+                }
             }
             for error in report.errors {
                 tracing::warn!(error = %error, "satu receipt jurnal belum dapat dibaca");

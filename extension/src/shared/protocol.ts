@@ -10,7 +10,7 @@
  *   tidak mengizinkan memasang header pada koneksi WebSocket.
  */
 
-export const PROTOCOL_VERSION = 5;
+export const PROTOCOL_VERSION = 6;
 export const WS_SUBPROTOCOL = "rangefinder";
 export const DEFAULT_ENGINE_ORIGIN = "http://127.0.0.1:8787";
 
@@ -389,6 +389,14 @@ export interface TransactionsView {
 export interface HasilPnl {
   currency: { id: string; symbol: string };
   fee: number | null;
+  /** Nilai setoran awal dalam token kutipan. */
+  deposited: number | null;
+  /** Nilai principal sekarang, atau pokok yang diterima saat ditutup. */
+  value: number | null;
+  /** Net dibanding modal awal, dalam persen. */
+  pnl_percent: number | null;
+  /** Waktu posisi pertama kali dibuka. */
+  opened_at: string | null;
   /** Positif berarti rugi. Ditampilkan sebagai pengurang. */
   impermanent_loss: number;
   gas: number | null;
@@ -577,6 +585,8 @@ export interface PosisiTertutup {
   position_id: string;
   token0: string;
   token1: string;
+  symbol0: string | null;
+  symbol1: string | null;
   tx_hash: string;
   ditutup_pada: string;
   diterima0: string;
@@ -803,6 +813,7 @@ export type ServerMessage =
   | ({ type: "token_state" } & Partial<TokenState>)
   | ({ type: "range_view" } & Partial<RangeView>)
   | ({ type: "open_plan" } & Partial<OpenPlanView>)
+  | ({ type: "deposit_preview" } & Partial<DepositPreview>)
   | ({ type: "send_result" } & Partial<SendResultView>)
   | ({ type: "positions" } & Partial<PositionsView>)
   | ({ type: "transactions" } & Partial<TransactionsView>)
@@ -820,6 +831,14 @@ export interface Deposit {
   zap: boolean;
 }
 
+/** Preview ringan nominal kedua sisi tanpa pemeriksaan transaksi lengkap. */
+export interface DepositPreview {
+  request_id: string;
+  deposit: Deposit;
+  setor: OpenPlanView["setor"] | null;
+  error: string | null;
+}
+
 export type ClientMessage =
   | { type: "get_status" }
   | { type: "ping" }
@@ -831,6 +850,7 @@ export type ClientMessage =
   | { type: "set_range"; lower_mcap: number; upper_mcap: number }
   | { type: "set_full_range" }
   | { type: "invalidate_plan" }
+  | { type: "preview_deposit"; deposit: Deposit; request_id: string }
   | { type: "quote_range"; deposit: Deposit; request_id: string }
   | { type: "approve_token"; plan_id: string; step_id: string }
   | { type: "run_open_flow"; plan_id: string }
@@ -860,6 +880,10 @@ export function asRangeView(msg: unknown): RangeView | null {
   if (m.type !== "range_view") return null;
   const { type: _type, ...rest } = m;
   return rest as unknown as RangeView;
+}
+
+export function asDepositPreview(msg: unknown): DepositPreview | null {
+  return untag<DepositPreview>(msg, "deposit_preview");
 }
 
 export function asSignals(msg: unknown): SignalsView | null {

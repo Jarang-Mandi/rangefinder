@@ -744,13 +744,14 @@ pub fn lengkapi_pnl(
         // Kalau kutipannya token0, nilai dinyatakan dalam token0, sehingga
         // token1 yang dibagi harga. Membalik ini menghasilkan angka yang
         // meleset sebesar kuadrat harganya.
-        let ke_kutipan = |x0: f64, x1: f64| -> f64 {
+        let ke_kutipan_pada = |x0: f64, x1: f64, harga_raw: f64| -> f64 {
             if kutipan_token0 {
-                (x0 + x1 / harga) / skala
+                (x0 + x1 / harga_raw) / skala
             } else {
-                (x0 * harga + x1) / skala
+                (x0 * harga_raw + x1) / skala
             }
         };
+        let ke_kutipan = |x0: f64, x1: f64| ke_kutipan_pada(x0, x1, harga);
 
         let posisi0 = f(&p.amount0);
         let posisi1 = f(&p.amount1);
@@ -836,10 +837,27 @@ pub fn lengkapi_pnl(
             || slippage.is_none();
 
         let il = ke_kutipan(setor0, setor1) - ke_kutipan(posisi0, posisi1);
+        let harga_setor = catatan
+            .as_ref()
+            .and_then(|c| c.harga_buka)
+            .filter(|harga| harga.is_finite() && *harga > 0.0)
+            .unwrap_or(harga);
+        let deposited = ke_kutipan_pada(setor0, setor1, harga_setor);
+        let value = ke_kutipan(posisi0, posisi1);
+        let net = fee_kutipan
+            .zip(gas)
+            .zip(slippage)
+            .map(|((fee, gas), slippage)| fee - il - gas - slippage);
 
         p.pnl = Some(crate::pnl::Hasil {
             currency,
             fee: fee_kutipan,
+            deposited: Some(deposited),
+            value: Some(value),
+            pnl_percent: net
+                .filter(|_| deposited > 0.0)
+                .map(|net| net / deposited * 100.0),
+            opened_at: catatan.as_ref().map(|c| c.dibuka_pada.clone()),
             impermanent_loss: il,
             gas,
             slippage,
@@ -847,10 +865,7 @@ pub fn lengkapi_pnl(
             // cost basis direkonstruksi. `perkiraan` membuat statusnya jelas;
             // menyembunyikan hasil justru membuat user melihat empat angka
             // tetapi tidak tahu kesimpulannya.
-            net: fee_kutipan
-                .zip(gas)
-                .zip(slippage)
-                .map(|((fee, gas), slippage)| fee - il - gas - slippage),
+            net,
             perkiraan: perkiraan || fee_kutipan.is_none(),
         });
     }

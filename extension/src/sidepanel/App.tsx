@@ -20,6 +20,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { chartMatches, robinhoodToken } from "../shared/chart-messages";
+import { perluGambarUlang } from "../shared/range-recovery";
 import {
   EngineClient,
   type ConnectionState,
@@ -30,6 +31,7 @@ import {
   isEvmAddress,
   type EngineStatus,
   type Deposit,
+  type DepositPreview,
   type ActionInput,
   type ActionPlanView,
   type AlertLevel,
@@ -50,7 +52,6 @@ import {
   type SignalsView,
   type SinyalSideways,
   type QuoteGroup,
-  type SendResultView,
   type RangeBound,
   type RangeView,
   type TokenState,
@@ -90,8 +91,7 @@ export function App() {
   const [tokenLoading, setTokenLoading] = useState(false);
   const [rangeView, setRangeView] = useState<RangeView | null>(null);
   const [openPlan, setOpenPlan] = useState<OpenPlanView | null>(null);
-  const [sendResult, setSendResult] = useState<SendResultView | null>(null);
-  const [actionResult, setActionResult] = useState<SendResultView | null>(null);
+  const [depositPreview, setDepositPreview] = useState<DepositPreview | null>(null);
   /** Menunggu jawaban engine. Mencegah tombol ditekan dua kali. */
   const [execBusy, setExecBusy] = useState(false);
   const [positions, setPositions] = useState<PositionsView | null>(null);
@@ -154,6 +154,11 @@ export function App() {
    * transaksi berurutan di belakang layar. */
   const openFlowRunningRef = useRef(false);
   const actionFlowRunningRef = useRef(false);
+  const openFlowIdRef = useRef<string | null>(null);
+  const actionFlowIdRef = useRef<string | null>(null);
+  /** Permintaan aksi tanpa input yang diteruskan setelah planner selesai. */
+  const autoActionRequestRef = useRef<string | null>(null);
+  const activeActionRef = useRef<JenisAksi | null>(null);
   /** Tab gmgn yang sedang menampilkan chart. Tujuan perintah gambar garis. */
   const gmgnTabRef = useRef<number | null>(null);
   /** Alamat token yang sedang aktif, dipakai saat meneruskan harga chart. */
@@ -170,6 +175,9 @@ export function App() {
   const tokenPageRevisionRef = useRef(0);
   /** Garis terakhir yang dikirim, supaya tidak menggambar ulang tanpa alasan. */
   const drawnRef = useRef<string>("");
+  /** Tampilan dan fungsi gambar terbaru untuk memulihkan garis setelah reload. */
+  const latestViewRef = useRef<RangeView | null>(null);
+  const gambarRef = useRef<(lower: number, upper: number) => Promise<void>>(async () => {});
 
   useEffect(() => {
     chrome.storage.local.get(TOKEN_KEY).then((stored) => {
@@ -224,7 +232,6 @@ export function App() {
           // Rencana lama milik token lama. Membiarkannya berarti menawarkan
           // tombol buka posisi untuk pool yang sudah tidak dilihat lagi.
           setOpenPlan(null);
-          setSendResult(null);
           drawnRef.current = "";
         }
       },
@@ -254,6 +261,24 @@ export function App() {
         setDepth(v);
       },
       onActionPlan: (p) => {
+        if (p.request_id === autoActionRequestRef.current) {
+          autoActionRequestRef.current = null;
+          const dapatDijalankan = !p.dry_run && (p.allowances.length > 0 || p.siap);
+          if (!dapatDijalankan) {
+            setActionPlan(null);
+            setActionBusy(false);
+            setKabar({ level: "warning", message: `${namaAksi(p.action)} belum dapat dijalankan.` });
+            activeActionRef.current = null;
+            return;
+          }
+          // Klik tombol aksi sudah menjadi persetujuan user. Planner dan semua
+          // langkah rantai bekerja di engine tanpa menampilkan tombol kedua.
+          setActionPlan(null);
+          actionFlowRunningRef.current = true;
+          actionFlowIdRef.current = p.request_id;
+          client.runActionFlow(p.plan_id);
+          return;
+        }
         setActionPlan(p);
         if (!actionFlowRunningRef.current) setActionBusy(false);
       },
@@ -265,14 +290,15 @@ export function App() {
         setOpenPlan(plan);
         if (!openFlowRunningRef.current) setExecBusy(false);
       },
+      onDepositPreview: setDepositPreview,
       onSendResult: (result) => {
-        setSendResult(result);
-        if (result.kind === "action") setActionResult(result);
         if (result.kind === "open") {
           openFlowRunningRef.current = false;
+          openFlowIdRef.current = null;
           setExecBusy(false);
         } else if (result.kind === "action") {
           actionFlowRunningRef.current = false;
+          actionFlowIdRef.current = null;
           setActionBusy(false);
         } else if (!openFlowRunningRef.current && !actionFlowRunningRef.current) {
           setExecBusy(false);
@@ -286,6 +312,48 @@ export function App() {
         // lagi tepat. Rencananya dibuang supaya user menyusun ulang.
         if (result.kind === "zap" && result.status === "sukses") setOpenPlan(null);
         if (result.kind === "action") setActionPlan(null);
+
+        if (result.kind === "open") {
+          setKabar({
+            level: result.status === "sukses" ? "info" : result.status === "menggantung" ? "warning" : "critical",
+            message: result.status === "sukses"
+              ? "Posisi berhasil dibuka."
+              : result.status === "menggantung"
+                ? "Pembukaan masih diproses. Hasil akhirnya akan diberitahukan."
+                : "Posisi gagal dibuka.",
+          });
+        } else if (result.kind === "action") {
+          const nama = namaAksi(activeActionRef.current);
+          setKabar({
+            level: result.status === "sukses" ? "info" : result.status === "menggantung" ? "warning" : "critical",
+            message: result.status === "sukses"
+              ? `${nama} berhasil.`
+              : result.status === "menggantung"
+                ? `${nama} masih diproses. Hasil akhirnya akan diberitahukan.`
+                : `${nama} gagal.`,
+          });
+          activeActionRef.current = null;
+        }
+      },
+      onNotify: (notice) => {
+        setKabar({ level: notice.level, message: notice.message });
+        if (
+          notice.subject === openFlowIdRef.current &&
+          /^open_(succeeded|failed|pending|unverified)$/.test(notice.code)
+        ) {
+          openFlowRunningRef.current = false;
+          openFlowIdRef.current = null;
+          setExecBusy(false);
+        }
+        if (
+          notice.subject === actionFlowIdRef.current &&
+          /^(increase|rebalance|claim|close)_(succeeded|failed|pending)$/.test(notice.code)
+        ) {
+          actionFlowRunningRef.current = false;
+          actionFlowIdRef.current = null;
+          activeActionRef.current = null;
+          setActionBusy(false);
+        }
       },
       onAlert: (level, code, message) => {
         // Kegagalan eksekusi datang sebagai alert, dan tanpa ini tombolnya
@@ -294,6 +362,9 @@ export function App() {
         setActionBusy(false);
         openFlowRunningRef.current = false;
         actionFlowRunningRef.current = false;
+        openFlowIdRef.current = null;
+        actionFlowIdRef.current = null;
+        autoActionRequestRef.current = null;
         // Toast di halaman gmgn menangani kejadian yang layak mengganggu user,
         // sesuai PRD 3.7. Yang di sini adalah jawaban langsung atas aksi yang
         // baru saja user tekan, dan itu harus terlihat di tempat ia menekannya.
@@ -328,6 +399,7 @@ export function App() {
     setRangeView(null);
     selectedPoolRef.current = "";
     setOpenPlan(null);
+    setDepositPreview(null);
     setSignals(null);
     drawnRef.current = "";
     addressRef.current = clean;
@@ -373,7 +445,16 @@ export function App() {
                 if (activeToken?.toLowerCase() !== found.toLowerCase()) return;
 
                 gmgnTabRef.current = tabId;
-                loadToken(found, false);
+                const view = latestViewRef.current;
+                if (perluGambarUlang(addressRef.current, found, view)) {
+                  // Bridge mengirim `token_page` sesudah TradingView siap.
+                  // Pada reload tokennya sama, tetapi objek garis di halaman
+                  // sudah hilang, jadi kirim ulang tampilan terakhir sekarang.
+                  drawnRef.current = "";
+                  void gambarRef.current(view.lower.mcap_usd, view.upper.mcap_usd);
+                } else {
+                  loadToken(found, false);
+                }
               })
               .catch(() => {
                 // Ketika tab ditutup di tengah pemeriksaan, halaman itu memang
@@ -430,7 +511,6 @@ export function App() {
 
   // Ref supaya listener di atas selalu melihat tampilan terbaru tanpa harus
   // dipasang ulang setiap kali range berubah.
-  const latestViewRef = useRef<RangeView | null>(null);
   latestViewRef.current = rangeView;
 
   /**
@@ -511,6 +591,7 @@ export function App() {
       drawnRef.current = "";
     }
   }, []);
+  gambarRef.current = gambar;
 
   const savePairing = useCallback(async (value: string) => {
     await chrome.storage.local.set({ [TOKEN_KEY]: value });
@@ -568,11 +649,13 @@ export function App() {
             depth={depth}
             onSetRange={(lo, hi) => {
               setOpenPlan(null);
+              setDepositPreview(null);
               clientRef.current?.invalidatePlan();
               clientRef.current?.setRange(lo, hi);
             }}
             onSetFullRange={() => {
               setOpenPlan(null);
+              setDepositPreview(null);
               clientRef.current?.invalidatePlan();
               clientRef.current?.setFullRange();
             }}
@@ -582,6 +665,7 @@ export function App() {
               setRangeView(null);
               setDepth(null);
               setOpenPlan(null);
+              setDepositPreview(null);
               clientRef.current?.invalidatePlan();
               clientRef.current?.selectPool(id);
             }}
@@ -590,15 +674,15 @@ export function App() {
               setRangeView(null);
               setDepth(null);
               setOpenPlan(null);
+              setDepositPreview(null);
               clientRef.current?.invalidatePlan();
               clientRef.current?.selectQuote(q);
             }}
             openPlan={openPlan}
-            sendResult={sendResult}
+            depositPreview={depositPreview}
             execBusy={execBusy}
             onQuoteRange={(deposit) => {
               setOpenPlan(null);
-              setSendResult(null);
               if (!deposit) {
                 clientRef.current?.invalidatePlan();
                 setExecBusy(false);
@@ -607,10 +691,19 @@ export function App() {
               setExecBusy(true);
               clientRef.current?.quoteRange(deposit);
             }}
+            onPreviewDeposit={(deposit) => {
+              if (!deposit) {
+                setDepositPreview(null);
+                return;
+              }
+              clientRef.current?.previewDeposit(deposit);
+            }}
             onRunOpenFlow={() => {
               if (!openPlan) return;
               openFlowRunningRef.current = true;
+              openFlowIdRef.current = openPlan.request_id;
               setExecBusy(true);
+              setKabar({ level: "info", message: "Membuka posisi…" });
               clientRef.current?.runOpenFlow(openPlan.plan_id);
             }}
           />
@@ -653,21 +746,39 @@ export function App() {
             busy={posBusy}
             plan={actionPlan}
             actionBusy={actionBusy}
-            result={actionResult}
             onMuat={() => {
               setPosBusy(true);
               clientRef.current?.getPositions();
             }}
             onPlanAction={(id, a, input) => {
+              autoActionRequestRef.current = null;
               setActionPlan(null);
-              setActionResult(null);
               setActionBusy(true);
-              clientRef.current?.planAction(id, a, input);
+              activeActionRef.current = a;
+              const requestId = clientRef.current?.planAction(id, a, input);
+              if (!requestId) {
+                setActionBusy(false);
+                setKabar({ level: "warning", message: "Engine belum terhubung." });
+              }
+            }}
+            onStartAction={(id, a) => {
+              setActionPlan(null);
+              setActionBusy(true);
+              activeActionRef.current = a;
+              setKabar({ level: "info", message: `${namaAksi(a)} sedang diproses…` });
+              const requestId = clientRef.current?.planAction(id, a);
+              autoActionRequestRef.current = requestId ?? null;
+              if (!requestId) {
+                setActionBusy(false);
+                setKabar({ level: "warning", message: "Engine belum terhubung." });
+              }
             }}
             onRunAction={() => {
               if (!actionPlan) return;
               actionFlowRunningRef.current = true;
+              actionFlowIdRef.current = actionPlan.request_id;
               setActionBusy(true);
+              setKabar({ level: "info", message: `${namaAksi(actionPlan.action)} sedang diproses…` });
               clientRef.current?.runActionFlow(actionPlan.plan_id);
             }}
           />
@@ -763,9 +874,10 @@ function RangeTab({
   onSelectPool,
   onSelectQuote,
   openPlan,
-  sendResult,
+  depositPreview,
   execBusy,
   onQuoteRange,
+  onPreviewDeposit,
   onRunOpenFlow,
 }: {
   status: EngineStatus | null;
@@ -782,9 +894,10 @@ function RangeTab({
   onSelectPool: (poolId: string) => void;
   onSelectQuote: (quote: string) => void;
   openPlan: OpenPlanView | null;
-  sendResult: SendResultView | null;
+  depositPreview: DepositPreview | null;
   execBusy: boolean;
   onQuoteRange: (deposit: Deposit | null) => void;
+  onPreviewDeposit: (deposit: Deposit | null) => void;
   onRunOpenFlow: () => void;
 }) {
 
@@ -819,10 +932,11 @@ function RangeTab({
           view={rangeView}
           token={token}
           plan={openPlan}
-          result={sendResult}
+          preview={depositPreview}
           busy={execBusy}
           canExecute={status.can_execute}
           onQuote={onQuoteRange}
+          onPreview={onPreviewDeposit}
           onRun={onRunOpenFlow}
         />
         </>
@@ -1628,7 +1742,6 @@ export function PnlTab({
 
         {r.currencies.length === 0 ? (
           <div class="pnl-hero kosong">
-            <span>PNL</span>
             <strong>—</strong>
           </div>
         ) : r.currencies.map((c) => (
@@ -1636,12 +1749,6 @@ export function PnlTab({
             <PnlHero value={c.total_net} symbol={c.currency.symbol} estimated={c.total_net === null} />
             <div class="pnl-metrics">
               <PnlMetric label="Fee diperoleh" value={c.total_fee} symbol={c.currency.symbol} tone="naik" />
-              <PnlMetric label="Total biaya" value={c.total_biaya == null ? null : -c.total_biaya} symbol={c.currency.symbol} tone="turun" />
-              <PnlMetric
-                label="Win rate"
-                text={r.win_rate_bps == null ? "Belum lengkap" : `${(r.win_rate_bps / 100).toFixed(1)}%`}
-              />
-              <PnlMetric label="Posisi dinilai" text={`${c.jumlah}`} />
             </div>
           </div>
         ))}
@@ -1668,18 +1775,23 @@ export function PnlTab({
 
 function ClosedPnlCard({ pos }: { pos: PosisiTertutup }) {
   const h = pos.pnl;
+  const pair = namaPairTertutup(pos);
   return (
     <section class="card pnl-position">
       <div class="pnl-position-head">
-        <h2>Posisi ditutup</h2>
-        <span class="chip">Selesai</span>
+        <h2>{pair}</h2>
+        <span class="chip">Ditutup</span>
       </div>
-      <p class="pnl-date">{new Date(pos.ditutup_pada).toLocaleString("id-ID")}</p>
       {h ? (
         <>
           <PnlHero value={h.net} symbol={h.currency.symbol} estimated={h.perkiraan} />
           <div class="pnl-metrics">
+            <PnlMetric label="Dibuka" text={tanggalSingkat(h.opened_at)} />
+            <PnlMetric label="Ditutup" text={tanggalSingkat(pos.ditutup_pada)} />
+            <PnlMetric label="Disetor" value={h.deposited} symbol={h.currency.symbol} signed={false} />
+            <PnlMetric label="Diterima" value={h.value} symbol={h.currency.symbol} signed={false} />
             <PnlMetric label="Fee diperoleh" value={h.fee} symbol={h.currency.symbol} tone="naik" />
+            <PnlMetric label="PnL" text={formatPersen(h.pnl_percent)} tone={h.pnl_percent == null ? "" : h.pnl_percent >= 0 ? "naik" : "turun"} />
           </div>
         </>
       ) : null}
@@ -1702,12 +1814,16 @@ function PnlCard({ pos }: { pos: Posisi }) {
         <>
           <PnlHero value={h.net} symbol={h.currency.symbol} estimated={h.perkiraan} />
           <div class="pnl-metrics">
+            <PnlMetric label="Dibuka" text={tanggalSingkat(h.opened_at)} />
+            <PnlMetric label="Berjalan" text={durasiPosisi(h.opened_at)} />
+            <PnlMetric label="Disetor" value={h.deposited} symbol={h.currency.symbol} signed={false} />
+            <PnlMetric label="Nilai sekarang" value={h.value} symbol={h.currency.symbol} signed={false} />
             <PnlMetric label="Fee diperoleh" value={h.fee} symbol={h.currency.symbol} tone="naik" />
+            <PnlMetric label="PnL" text={formatPersen(h.pnl_percent)} tone={h.pnl_percent == null ? "" : h.pnl_percent >= 0 ? "naik" : "turun"} />
           </div>
         </>
       ) : (
         <div class="pnl-hero kosong">
-          <span>PNL</span>
           <strong>—</strong>
         </div>
       )}
@@ -1717,27 +1833,52 @@ function PnlCard({ pos }: { pos: Posisi }) {
 
 function PnlHero({ value, symbol, estimated }: { value: number | null; symbol: string; estimated: boolean }) {
   const tone = value == null ? "" : value >= 0 ? "naik" : "turun";
-  const label = value == null ? "PNL BELUM LENGKAP" : value >= 0 ? "PROFIT BERSIH" : "RUGI BERSIH";
   return (
     <div class={`pnl-hero ${tone}`}>
-      <span>{label}</span>
       <strong class="num">{value == null ? "—" : angka(value)}</strong>
-      <small>{symbol}{estimated ? " · perkiraan" : ""}</small>
+      <small>PnL bersih · {symbol}{estimated ? " · perkiraan" : ""}</small>
     </div>
   );
 }
 
-function PnlMetric({ label, value, symbol, text, tone = "" }: {
+function tanggalSingkat(value: string | null): string {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString("id-ID", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
+}
+
+function durasiPosisi(value: string | null, akhir = Date.now()): string {
+  if (!value) return "—";
+  const mulai = new Date(value).getTime();
+  if (!Number.isFinite(mulai)) return "—";
+  const menit = Math.max(0, Math.floor((akhir - mulai) / 60_000));
+  if (menit < 60) return `${menit}m`;
+  const jam = Math.floor(menit / 60);
+  if (jam < 24) return `${jam}j`;
+  return `${Math.floor(jam / 24)}h`;
+}
+
+function formatPersen(value: number | null): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
+}
+
+function PnlMetric({ label, value, symbol, text, tone = "", signed = true }: {
   label: string;
   value?: number | null;
   symbol?: string;
   text?: string;
   tone?: "" | "naik" | "turun";
+  signed?: boolean;
 }) {
   return (
     <div class="pnl-metric">
       <span>{label}</span>
-      <strong class={`num ${tone}`}>{text ?? `${angka(value ?? null)}${symbol ? ` ${symbol}` : ""}`}</strong>
+      <strong class={`num ${tone}`}>{text ?? `${angka(value ?? null, signed)}${symbol ? ` ${symbol}` : ""}`}</strong>
     </div>
   );
 }
@@ -1749,10 +1890,10 @@ function PnlMetric({ label, value, symbol, text, tone = "" }: {
  * stablecoin keduanya memang berdekatan, tapi menyebutnya dolar berarti
  * mengklaim ketepatan yang tidak kita punya.
  */
-function angka(v: number | null): string {
+function angka(v: number | null, signed = true): string {
   if (v == null) return "Belum diketahui";
   if (!Number.isFinite(v)) return "?";
-  const tanda = v > 0 ? "+" : "";
+  const tanda = signed && v > 0 ? "+" : "";
   const absolut = Math.abs(v);
   const max = absolut > 0 && absolut < 0.000001 ? 12
     : absolut < 0.001 ? 9
@@ -1766,6 +1907,14 @@ function angka(v: number | null): string {
 
 function namaPair(pos: Posisi): string {
   return `${pos.base_symbol ?? pos.symbol0 ?? "Token 0"}/${pos.quote_symbol ?? pos.symbol1 ?? "Token 1"}`;
+}
+
+function namaPairTertutup(pos: PosisiTertutup): string {
+  const simbol0 = pos.symbol0 ?? shortAddress(pos.token0);
+  const simbol1 = pos.symbol1 ?? shortAddress(pos.token1);
+  const kutipan = pos.pnl?.currency.symbol.toLowerCase();
+  if (kutipan && simbol0.toLowerCase() === kutipan) return `${simbol1}/${simbol0}`;
+  return `${simbol0}/${simbol1}`;
 }
 
 /** Ubah unit blockchain menjadi angka manusiawi tanpa membulatkan ke nol. */
@@ -1811,18 +1960,18 @@ function PositionsTab({
   busy,
   plan,
   actionBusy,
-  result,
   onMuat,
   onPlanAction,
+  onStartAction,
   onRunAction,
 }: {
   view: PositionsView | null;
   busy: boolean;
   plan: ActionPlanView | null;
   actionBusy: boolean;
-  result: SendResultView | null;
   onMuat: () => void;
   onPlanAction: (tokenId: string, action: JenisAksi, input?: ActionInput) => void;
+  onStartAction: (tokenId: string, action: JenisAksi) => void;
   onRunAction: () => void;
 }) {
   if (!view) {
@@ -1878,7 +2027,6 @@ function PositionsTab({
         >
           {busy ? "Memuat…" : "Muat ulang"}
         </button>
-        {result ? <SendResultRow result={result} /> : null}
       </section>
 
       {view.positions.map((p) => (
@@ -1888,6 +2036,7 @@ function PositionsTab({
           plan={plan?.position_id === p.position_id ? plan : null}
           busy={actionBusy}
           onPlanAction={onPlanAction}
+          onStartAction={onStartAction}
           onRunAction={onRunAction}
         />
       ))}
@@ -1912,12 +2061,14 @@ export function PositionCard({
   plan,
   busy,
   onPlanAction,
+  onStartAction,
   onRunAction,
 }: {
   pos: Posisi;
   plan: ActionPlanView | null;
   busy: boolean;
   onPlanAction: (tokenId: string, action: JenisAksi, input?: ActionInput) => void;
+  onStartAction: (tokenId: string, action: JenisAksi) => void;
   onRunAction: () => void;
 }) {
   const [amount0, setAmount0] = useState("");
@@ -2040,21 +2191,21 @@ export function PositionCard({
             type="button"
             class="position-actions-primary"
             disabled={busy || pos.kosong || pos.tick_sekarang === null}
-            onClick={() => onPlanAction(pos.position_id, "rebalance")}
+            onClick={() => onStartAction(pos.position_id, "rebalance")}
           >
             Rebalance
           </button>
           <button
             type="button"
             disabled={busy || !punyaFee(pos)}
-            onClick={() => onPlanAction(pos.position_id, "klaim_fee")}
+            onClick={() => onStartAction(pos.position_id, "klaim_fee")}
           >
             Klaim fee
           </button>
           <button
             type="button"
             disabled={busy}
-            onClick={() => onPlanAction(pos.position_id, "tutup_posisi")}
+            onClick={() => onStartAction(pos.position_id, "tutup_posisi")}
           >
             Tutup posisi
           </button>
@@ -2118,6 +2269,14 @@ function ActionPlanCard({
 function punyaFee(p: Posisi): boolean {
   return p.fee0 !== "0" || p.fee1 !== "0";
 }
+
+function namaAksi(action: JenisAksi | null): string {
+  if (action === "tambah_likuiditas") return "Tambah likuiditas";
+  if (action === "rebalance") return "Rebalance";
+  if (action === "klaim_fee") return "Klaim fee";
+  if (action === "tutup_posisi") return "Penutupan posisi";
+  return "Aksi posisi";
+}
 /**
  * Seberapa jauh harga sekarang di dalam range, sebagai porsi 0 sampai 1.
  *
@@ -2166,20 +2325,24 @@ function porsiDalamRange(p: Posisi): number {
  */
 export function SetoranCard({
   plan,
+  preview,
   view,
   token,
   busy,
   canExecute,
   onQuote,
+  onPreview,
 }: {
   plan: OpenPlanView | null;
+  preview: DepositPreview | null;
   view: RangeView | null;
   token: TokenState | null;
   busy: boolean;
   canExecute: boolean;
   onQuote: (deposit: Deposit | null) => void;
+  onPreview: (deposit: Deposit | null) => void;
 }) {
-  const setor = plan?.setor ?? null;
+  const setor = plan?.setor ?? preview?.setor ?? null;
   const saldo = token?.saldo ?? null;
 
   const simbolMeme = setor?.simbol_memecoin ?? token?.meta?.symbol ?? "token";
@@ -2233,6 +2396,15 @@ export function SetoranCard({
     onQuote({ side: sisi, amount: teks, zap });
   };
 
+  const tampilkanPasangan = (sisi: "meme" | "quote", teks: string, zapAktif = zap) => {
+    const n = Number(teks);
+    if (!Number.isFinite(n) || n <= 0 || !view) {
+      onPreview(null);
+      return;
+    }
+    onPreview({ side: sisi, amount: teks, zap: zapAktif });
+  };
+
   // Mengetik dan menggeser range bisa menghasilkan banyak perubahan dalam
   // satu detik. Debounce menunggu input stabil, sedangkan sidik jari mencegah
   // jawaban engine memicu permintaan identik berulang tanpa akhir.
@@ -2241,7 +2413,7 @@ export function SetoranCard({
     const harga = sisiAktif === "meme" ? hargaMeme : hargaQuote;
     const n = Number(teks);
     if (!canExecute || busy || !Number.isFinite(n) || n <= 0 || harga <= 0) return;
-    const timer = window.setTimeout(() => susun(sisiAktif), 250);
+    const timer = window.setTimeout(() => susun(sisiAktif), 90);
     return () => window.clearTimeout(timer);
   }, [
     isiMeme,
@@ -2263,7 +2435,12 @@ export function SetoranCard({
           type="button"
           class={`sakelar${zap ? " nyala" : ""}`}
           disabled={versi === "v3"}
-          onClick={() => { setZap(!zap); onQuote(null); }}
+          onClick={() => {
+            const berikut = !zap;
+            setZap(berikut);
+            onQuote(null);
+            tampilkanPasangan(sisiAktif, sisiAktif === "meme" ? isiMeme : isiQuote, berikut);
+          }}
           aria-pressed={zap}
         >
           <span class="sakelar-tuas" />
@@ -2278,10 +2455,15 @@ export function SetoranCard({
             nilai={isiMeme}
             usd={Number(isiMeme) * hargaMeme}
             saldo={saldo ? saldo.memecoin : null}
-            onGanti={() => { onQuote(null); setSisiAktif("quote"); }}
+            onGanti={() => {
+              onQuote(null);
+              setSisiAktif("quote");
+              tampilkanPasangan("quote", isiQuote);
+            }}
             onInput={(v) => {
               onQuote(null);
               setIsiMeme(v);
+              tampilkanPasangan("meme", v);
             }}
             onSelesai={() => susun("meme", plan === null)}
           />
@@ -2291,10 +2473,15 @@ export function SetoranCard({
             nilai={isiQuote}
             usd={Number(isiQuote) * hargaQuote}
             saldo={saldo ? saldo.quote : null}
-            onGanti={() => { onQuote(null); setSisiAktif("meme"); }}
+            onGanti={() => {
+              onQuote(null);
+              setSisiAktif("meme");
+              tampilkanPasangan("meme", isiMeme);
+            }}
             onInput={(v) => {
               onQuote(null);
               setIsiQuote(v);
+              tampilkanPasangan("quote", v);
             }}
             onSelesai={() => susun("quote", plan === null)}
           />
@@ -2311,6 +2498,7 @@ export function SetoranCard({
               setSisiAktif("meme");
               setIsiMeme(v);
               setIsiQuote("");
+              tampilkanPasangan("meme", v);
             }}
             onSelesai={() => susun("meme", plan === null)}
           />
@@ -2324,6 +2512,7 @@ export function SetoranCard({
               setSisiAktif("quote");
               setIsiQuote(v);
               setIsiMeme("");
+              tampilkanPasangan("quote", v);
             }}
             onSelesai={() => susun("quote", plan === null)}
           />
@@ -2411,60 +2600,45 @@ export function ExecuteCard({
   view,
   token,
   plan,
-  result,
+  preview,
   busy,
   canExecute,
   onQuote,
+  onPreview,
   onRun,
 }: {
   view: RangeView | null;
   token: TokenState | null;
   plan: OpenPlanView | null;
-  result: SendResultView | null;
+  preview: DepositPreview | null;
   busy: boolean;
   canExecute: boolean;
   onQuote: (deposit: Deposit | null) => void;
+  onPreview: (deposit: Deposit | null) => void;
   onRun: () => void;
 }) {
   return (
     <section class="card execution-card">
       <SetoranCard
         plan={plan}
+        preview={preview}
         view={view}
         token={token}
         busy={busy}
         canExecute={canExecute}
         onQuote={onQuote}
+        onPreview={onPreview}
       />
-      {plan ? (
-        <button
-          type="button"
-          class="primary lebar"
-          disabled={!canExecute || plan.dry_run || busy}
-          onClick={onRun}
-        >
-          {busy ? "Memproses…" : "Buka posisi"}
-        </button>
-      ) : busy ? (
-        <button type="button" class="primary lebar" disabled>
-          Menyiapkan…
-        </button>
-      ) : null}
+      <button
+        type="button"
+        class="primary lebar"
+        disabled={!plan || !canExecute || plan.dry_run || busy}
+        onClick={onRun}
+      >
+        {busy ? "Memproses…" : "Buka posisi"}
+      </button>
 
-      {result?.kind === "open" ? <SendResultRow result={result} /> : null}
     </section>
-  );
-}
-
-function SendResultRow({ result }: { result: SendResultView }) {
-  const nada = result.status === "sukses" ? "ok" : result.status === "revert" ? "bad" : "warn";
-  const label = result.status === "sukses"
-    ? result.kind === "open" ? "Posisi berhasil dibuka" : "Berhasil"
-    : result.status === "menggantung" ? "Status masih diproses" : "Transaksi gagal";
-  return (
-    <p class={`result-simple ${nada}`}>
-      <span class={`dot ${nada}`} /> {label}
-    </p>
   );
 }
 

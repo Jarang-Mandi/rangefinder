@@ -2,6 +2,10 @@ async (page) => {
   await page.reload();
   const state = async () => JSON.parse(await page.locator('output').textContent());
   const toggle = page.getByRole('button', { name: 'Zap in' });
+  const tombolAwal = page.getByRole('button', { name: 'Buka posisi' });
+  if (await tombolAwal.count() !== 1 || !await tombolAwal.isDisabled()) {
+    throw Error('Tombol Buka posisi harus langsung tampil dan menunggu rencana');
+  }
 
   if (await page.locator('.range-glyph').count() !== 0) throw Error('Header masih memuat ikon range');
   if (await page.locator('.token-emblem').count() !== 0) throw Error('Token masih memakai logo pengganti');
@@ -25,7 +29,7 @@ async (page) => {
   await quote.fill('7500');
   await page.waitForFunction(() => {
     const value = document.querySelector('output')?.textContent ?? 'null';
-    const deposit = JSON.parse(value);
+    const deposit = JSON.parse(value).deposit;
     return deposit?.side === 'quote' && deposit?.amount === '7500' && deposit?.zap === true;
   });
   const deposit = (await state()).deposit;
@@ -43,11 +47,13 @@ async (page) => {
 
   const meme = page.getByRole('spinbutton', { name: 'PONS Amount' });
   const quoteManual = page.getByRole('spinbutton', { name: 'USDG Amount' });
+  const mulaiPair = Date.now();
   await meme.fill('1');
   await page.waitForFunction(() => {
     const fields = [...document.querySelectorAll('.kotak-setor input')];
     return fields.some(field => field.value === '0.0000042');
   });
+  if (Date.now() - mulaiPair > 500) throw Error('Nominal pasangan tidak terasa langsung');
   const dariMeme = [await meme.inputValue(), await quoteManual.inputValue()];
 
   await quoteManual.fill('0.0000084');

@@ -12,6 +12,17 @@ async (page) => {
   if (await page.locator('.eyebrow, details').count() !== 0) {
     throw Error('Positions atau PnL masih memuat eyebrow/detail teknis');
   }
+  for (const label of ['Dibuka', 'Berjalan', 'Ditutup', 'Disetor', 'Nilai sekarang', 'Diterima', 'Fee diperoleh', 'PnL']) {
+    if (await page.getByText(label, { exact: true }).count() === 0) {
+      throw Error('Data kartu PnL belum lengkap: ' + label);
+    }
+  }
+  if (await page.getByRole('heading', { name: 'ETH/PONS' }).count() !== 0) {
+    throw Error('Pasangan posisi tertutup terbalik dari orientasi token kutipan');
+  }
+  if (!((await page.locator('.pnl-position').first().textContent()) ?? '').includes('-0.21%')) {
+    throw Error('PnL persen posisi aktif tidak searah dengan PnL bersih');
+  }
   for (const text of ['Versi kalibrasi', 'Impermanent loss', 'Slippage zap', 'Token id', 'Tick spacing']) {
     if (await page.getByText(text, { exact: false }).count() !== 0) {
       throw Error('Keterangan teknis masih terlihat: ' + text);
@@ -31,6 +42,20 @@ async (page) => {
     return fields[0]?.value === '0.00059862';
   });
   const dariPons = await inputs.evaluateAll((fields) => fields.map((field) => field.value));
+
+  const actions = [
+    ['Rebalance', 'rebalance'],
+    ['Klaim fee', 'klaim_fee'],
+    ['Tutup posisi', 'tutup_posisi'],
+  ];
+  for (const [label, expected] of actions) {
+    const button = page.getByRole('button', { name: label, exact: true });
+    if (await button.count() !== 1) throw Error(label + ' harus memakai satu tombol');
+    await button.click();
+    if (await page.locator('.fixture-grid').getAttribute('data-started') !== expected) {
+      throw Error(label + ' tidak langsung memulai alur engine');
+    }
+  }
 
   return { dariEth, dariPons };
 }

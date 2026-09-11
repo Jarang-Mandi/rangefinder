@@ -423,17 +423,8 @@
   border-bottom: 1px solid var(--border);
 }
 
-.pnl-hero > span {
-  display: block;
-  color: currentColor;
-  font-size: 9px;
-  font-weight: 800;
-  letter-spacing: .1em;
-}
-
 .pnl-hero > strong {
   display: block;
-  margin-top: 2px;
   color: currentColor;
   font-size: clamp(26px, 9vw, 38px);
   font-weight: 800;
@@ -464,7 +455,7 @@
 }
 
 .pnl-position .pnl-metrics {
-  grid-template-columns: 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .pnl-metric {
@@ -1067,17 +1058,6 @@ button.token-pill {
 .execution-card > .primary {
   margin-top: var(--s3);
 }
-
-.result-simple {
-  margin: var(--s3) 0 0;
-  text-align: center;
-  font-size: 11px;
-  font-weight: 700;
-}
-
-.result-simple.ok { color: var(--upper); }
-.result-simple.bad { color: var(--lower); }
-.result-simple.warn { color: var(--warn); }
 
 /* Kabar dari engine, jawaban langsung atas aksi yang baru ditekan.
  * Diletakkan di atas isi tab supaya terlihat tanpa menggulir. */

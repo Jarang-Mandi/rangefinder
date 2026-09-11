@@ -116,6 +116,14 @@ pub struct Hasil {
     pub currency: Currency,
     /// Fee yang diperoleh, yang sudah diklaim maupun belum.
     pub fee: Option<f64>,
+    /// Nilai setoran awal dalam token kutipan.
+    pub deposited: Option<f64>,
+    /// Nilai principal sekarang, atau pokok yang diterima saat ditutup.
+    pub value: Option<f64>,
+    /// Hasil bersih dibanding nilai setoran, dalam persen.
+    pub pnl_percent: Option<f64>,
+    /// Waktu posisi pertama kali dibuka.
+    pub opened_at: Option<String>,
     /// Kerugian akibat menjadi LP dibandingkan sekadar memegang.
     ///
     /// Positif berarti rugi. Ditampilkan sebagai pengurang, bukan sebagai nilai
@@ -135,6 +143,8 @@ pub struct PosisiTertutup {
     pub position_id: String,
     pub token0: String,
     pub token1: String,
+    pub symbol0: Option<String>,
+    pub symbol1: Option<String>,
     pub tx_hash: String,
     pub ditutup_pada: String,
     pub diterima0: String,
@@ -185,16 +195,23 @@ pub fn hitung(
 ) -> Hasil {
     let fee = nilai(fee0, fee1, harga_sekarang);
     let il = impermanent_loss(setor0, setor1, posisi0, posisi1, harga_sekarang);
+    let deposited = nilai(setor0, setor1, harga_sekarang);
+    let value = nilai(posisi0, posisi1, harga_sekarang);
+    let net = fee - il - gas - slippage;
     Hasil {
         currency: Currency {
             id: "unit".into(),
             symbol: "unit".into(),
         },
         fee: Some(fee),
+        deposited: Some(deposited),
+        value: Some(value),
+        pnl_percent: (deposited > 0.0).then_some(net / deposited * 100.0),
+        opened_at: None,
         impermanent_loss: il,
         gas: Some(gas),
         slippage: Some(slippage),
-        net: Some(fee - il - gas - slippage),
+        net: Some(net),
         perkiraan,
     }
 }
@@ -380,6 +397,16 @@ pub fn histori_tertutup(
                     .token1
                     .map(|v| v.to_string())
                     .unwrap_or_default(),
+                symbol0: entry
+                    .context
+                    .close_basis
+                    .as_ref()
+                    .and_then(|b| b.symbol0.clone()),
+                symbol1: entry
+                    .context
+                    .close_basis
+                    .as_ref()
+                    .and_then(|b| b.symbol1.clone()),
                 tx_hash: format!("{:#x}", entry.tx_hash),
                 ditutup_pada: entry.created_at,
                 diterima0: String::new(),
@@ -408,6 +435,16 @@ pub fn histori_tertutup(
                 .token1
                 .map(|v| v.to_string())
                 .unwrap_or_default(),
+            symbol0: entry
+                .context
+                .close_basis
+                .as_ref()
+                .and_then(|b| b.symbol0.clone()),
+            symbol1: entry
+                .context
+                .close_basis
+                .as_ref()
+                .and_then(|b| b.symbol1.clone()),
             tx_hash: format!("{:#x}", entry.tx_hash),
             ditutup_pada: entry.created_at,
             diterima0: received.amount0,
@@ -508,15 +545,16 @@ fn hasil_tertutup(
             .map_err(|_| "jumlah token terlalu besar untuk tampilan".to_string())
     };
     let scale = 10f64.powi(i32::from(basis.quote_decimals));
-    let to_quote = |amount0: U256, amount1: U256| -> Result<f64, String> {
+    let to_quote_at = |amount0: U256, amount1: U256, raw_price: f64| -> Result<f64, String> {
         let amount0 = number(amount0)?;
         let amount1 = number(amount1)?;
         Ok(if basis.quote_token0 {
-            (amount0 + amount1 / harga) / scale
+            (amount0 + amount1 / raw_price) / scale
         } else {
-            (amount0 * harga + amount1) / scale
+            (amount0 * raw_price + amount1) / scale
         })
     };
+    let to_quote = |amount0: U256, amount1: U256| to_quote_at(amount0, amount1, harga);
 
     let deposit0 = parse(&catatan.setor0, "setor0")?;
     let deposit1 = parse(&catatan.setor1, "setor1")?;
@@ -558,12 +596,26 @@ fn hasil_tertutup(
         .filter(|_| complete)
         .map(|((fee, gas), slippage)| fee - il - gas - slippage);
 
+    let harga_setor = catatan
+        .harga_buka
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(harga);
+    let deposited = to_quote_at(deposit0, deposit1, harga_setor)?;
+    // Nilai posisi yang dikembalikan dipisahkan dari fee agar kartu PnL tidak
+    // menghitung hasil fee dua kali.
+    let value = to_quote(principal0, principal1)?;
     Ok(Hasil {
         currency: Currency {
             id: basis.currency_id.clone(),
             symbol: basis.currency_symbol.clone(),
         },
         fee,
+        deposited: Some(deposited),
+        value: Some(value),
+        pnl_percent: net
+            .filter(|_| deposited > 0.0)
+            .map(|net| net / deposited * 100.0),
+        opened_at: Some(catatan.dibuka_pada.clone()),
         impermanent_loss: il,
         gas,
         slippage,
@@ -646,6 +698,9 @@ mod tests {
         assert!(hampir(h.fee.unwrap(), 5.0));
         assert!(hampir(h.impermanent_loss, 2.0));
         assert!(hampir(h.net.unwrap(), 5.0 - 2.0 - 0.5 - 0.3));
+        assert!(hampir(h.deposited.unwrap(), 20.0));
+        assert!(hampir(h.value.unwrap(), 18.0));
+        assert!(hampir(h.pnl_percent.unwrap(), 11.0));
     }
 
     #[test]
@@ -812,6 +867,8 @@ mod tests {
             quote_decimals: 0,
             currency_id: "4663:quote".into(),
             currency_symbol: "USDG".into(),
+            symbol0: Some("MEME".into()),
+            symbol1: Some("USDG".into()),
         });
         let tx_hash = B256::repeat_byte(8);
         let request = TransactionRequest::default()

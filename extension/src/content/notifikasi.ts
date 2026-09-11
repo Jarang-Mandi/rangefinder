@@ -29,6 +29,9 @@ import {
 } from "../shared/protocol";
 import { bunyikan, aktifkan, sudahAktif } from "./suara";
 import { tampilkanToast } from "./toast";
+import { judulUntuk } from "./notifikasi-label";
+
+export { judulUntuk } from "./notifikasi-label";
 
 const TOKEN_KEY = "rangefinder.pairingToken";
 const SUARA_KEY = "rangefinder.suaraAktif";
@@ -42,34 +45,6 @@ const DENYUT_MS = 20_000;
 let jeda = SAMBUNG_ULANG_MIN_MS;
 let socket: WebSocket | null = null;
 let denyut: number | undefined;
-
-/** Judul yang enak dibaca untuk tiap kode kejadian. */
-function judulUntuk(k: Kejadian): string {
-  switch (k.code) {
-    case "position_out_of_range":
-      return "Posisi keluar range";
-    case "position_back_in_range":
-      return "Posisi kembali masuk range";
-    case "open_unverified":
-      return "Posisi belum terverifikasi";
-    case "open_failed":
-      return "Gagal membuka posisi";
-    case "zap_failed":
-      return "Zap gagal";
-    case "approve_failed":
-      return "Pemberian izin gagal";
-    case "plan_failed":
-      return "Rencana tidak bisa disusun";
-    case "rpc_unhealthy":
-      return "RPC bermasalah";
-    case "rpc_healthy":
-      return "RPC kembali sehat";
-    case "wallet_auto_locked":
-      return "Wallet terkunci otomatis";
-    default:
-      return "Rangefinder";
-  }
-}
 
 function tampilkan(k: Kejadian): void {
   // Yang tertahan pendinginan tidak pernah dikirim engine, tapi penjaga ini
