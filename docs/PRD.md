@@ -272,8 +272,10 @@ karena itu selalu memicu penggambaran ulang dari `range_view` terakhir.
 - Posisi dari luar yang tidak punya catatan cost basis di basis data lokal direkonstruksi dari log on chain, yaitu event `IncreaseLiquidity`, `DecreaseLiquidity`, dan `Collect`, sehingga PnL-nya tetap terhitung. Jika rekonstruksi tidak lengkap, kartu menandainya sebagai perkiraan, bukan menyembunyikannya.
 - Setiap kartu menampilkan pair, range, harga sekarang relatif range, status in range atau out of range, jumlah token, fee terkumpul yang belum diklaim, dan aksi utama. Versi protokol, fee tier, tick mentah, liquidity mentah, serta rincian implementasi tidak tampil di kartu.
 - Indikator posisi harga di dalam range berupa bar horizontal solid, bukan gradient.
-- Klik kartu membuka daftar aksi: Tambah likuiditas, Rebalance ke range baru, Klaim fee, Tutup posisi, Tutup lalu swap ke ETH.
+- Klik kartu membuka aksi Tambah likuiditas, Rebalance ke range baru, Klaim fee, dan Tutup posisi.
 - Engine menjalankan simulasi dan seluruh gate sebelum transaksi, tetapi panel hanya menampilkan satu tombol aksi. Rebalance, klaim fee, dan tutup posisi mulai dari satu klik pada tombolnya; planner meneruskan hasil yang siap tanpa meminta klik kedua. Tambah likuiditas menyiapkan rencana selama user mengisi jumlah, lalu memakai satu tombol final. Approval dan penyusunan ulang berjalan berurutan di belakang layar setelah tombol ditekan.
+- Setelah close sukses, engine otomatis menjual token biasa yang baru diterima ke ETH. ETH asli, WETH, dan USDG dipertahankan. Pada pasangan dua token biasa, kedua sisi dicoba secara terpisah. Jumlah swap hanya delta hasil close, bukan saldo lama di wallet. Kegagalan konversi dilaporkan sebagai peringatan tanpa mengubah close yang sudah sukses menjadi gagal.
+- Rute konversi otomatis hanya memakai pool V4 langsung ke ETH tanpa hook, dipilih dari kutipan keluaran terbaik untuk jumlah aktual dan tetap melalui batas slippage serta simulasi calldata.
 - Tombol aksi selalu berada di tempatnya sejak kartu tampil. Selama rencana disusun tombol tetap terlihat dalam keadaan nonaktif, sehingga tata letak tidak melompat.
 - Posisi yang keluar range lebih dari ambang waktu yang diset user naik ke puncak daftar dan ditandai.
 - Data posisi diperbarui melalui WebSocket dari engine, tanpa polling dari sisi panel.
@@ -288,6 +290,7 @@ karena itu selalu memicu penggambaran ulang dari `range_view` terakhir.
 - Ada ringkasan agregat: total net, win rate, median time in range, dan fee APR terealisasi.
 - Ringkasan memuat seluruh posisi aktif dan tertutup tanpa filter versi teknis di tampilan utama.
 - Setiap kartu memuat pair, waktu buka, durasi atau waktu tutup, nilai yang disetor, nilai sekarang atau diterima, fee, PnL bersih, dan persentase PnL. Tidak ada eyebrow, versi protokol, tick, atau keterangan implementasi.
+- Net yang komponennya tersedia tetap ditampilkan dengan tanda perkiraan ketika cost basis historis belum lengkap. Angka tidak disembunyikan hanya karena statusnya perkiraan.
 - Kartu bisa diekspor jadi PNG.
 - Angka net PnL memakai basis yang bisa dipilih user antara USD atau ETH.
 
@@ -1166,9 +1169,11 @@ setiap swap di rantai untuk menemukan pool mana yang ramai, jadi jendelanya
 beberapa menit. Jendela sependek itu tidak boleh dipakai memproyeksikan hasil
 setahun: pengalinya ratusan ribu, dan satu ledakan volume dua menit pernah
 menghasilkan proyeksi 7.645.797 persen. Setelah poolnya diketahui, lognya bisa
-disaring menurut poolId, sehingga jendela satu jam menjadi murah. Jendela yang
-benar benar terpakai selalu ikut hasilnya, karena volume tanpa jendela tidak
-bisa dibandingkan.
+disaring menurut poolId, sehingga jendela bergulir 24 jam dapat dibaca dalam
+potongan satu jam. Semua potongan diteruskan sampai batas bawah periode semula,
+jadi batas jumlah log RPC tidak diam diam mengubah 24 jam menjadi satu jam.
+Jendela yang benar benar terpakai selalu ikut hasilnya, karena volume tanpa
+jendela tidak bisa dibandingkan.
 
 **Rasio efisiensi mengukur kelurusan jalan, bukan panjangnya.** Event `Swap`
 membawa tick, sehingga deret harga tersedia dari sumber paling berwenang tanpa
@@ -1429,6 +1434,15 @@ poolnya sering sama persis dengan tahap penuh. Sebelum ini keduanya dianggap
 identik, kiriman kedua ditahan, dan APR, TVL, serta volume tidak pernah sampai
 ke panel meski sudah terhitung.
 
+**Pool token dibandingkan dengan periode yang sama seperti halaman token
+Uniswap.** Volume dan APR pool memakai 24 jam bergulir, bukan satu jam. Setelah
+semua statistik tersedia, urutan pool memakai APR marginal yang dihitung dari
+volume, fee tier, dan TVL. Ukuran setoran aktual beserta pengencerannya dihitung
+lagi oleh planner setelah user mengisi amount. Peringkat ini membantu memilih
+pool relatif terhadap pool lain dan tidak menjamin posisi akan untung, karena
+gas, pergerakan harga, waktu di dalam range, serta slippage tetap menentukan
+hasil akhirnya.
+
 **Distribusi likuiditas berlaku untuk V3 maupun V4.** Keduanya menyimpan bitmap
 dan likuiditas tick dengan bentuk yang sama, hanya tempatnya berbeda: V3 di
 kontrak poolnya sendiri, V4 di PoolManager lewat StateView. Sebelum ini seluruh
@@ -1520,7 +1534,7 @@ pesan mulai ada. `cargo xtask docs-check` memeriksa satu arah: setiap pesan yang
 sudah ada di kode wajib tercantum di sini. Sebaliknya tidak diwajibkan, karena
 rencana boleh mendahului implementasi.
 
-Versi protokol saat ini 6. Nama field di kabel memakai snake_case. Engine dan
+Versi protokol saat ini 7. Nama field di kabel memakai snake_case. Engine dan
 ekstensi harus dimuat ulang bersama ketika kontrak ini berubah.
 
 Panel ke engine:
@@ -1552,7 +1566,7 @@ Panel ke engine:
 | `get_notifications` | tanpa isi. Minta riwayat notifikasi terakhir | 5 |
 | `plan_action` | `{ position_id, request_id, action, input }`. Identitas posisi adalah chain:manager:token_id. `input` membawa amount0/amount1 untuk tambah likuiditas; rebalance memakai range aktif yang terlihat di chart. Engine membaca ulang posisi dan kepemilikannya sebelum menyusun dan menyimulasikan aksi | 5 |
 | `execute_action` | `{ plan_id }`. Setujui ID aksi yang ditampilkan. Rencana lama, kedaluwarsa, atau belum lolos gate ditolak | 5 |
-| `run_action_flow` | `{ plan_id }`. Satu persetujuan user untuk aksi posisi. Engine menyelesaikan seluruh approval, menyusun ulang satu kali dari state rantai, lalu mengirim aksi akhir secara berurutan | 7 |
+| `run_action_flow` | `{ plan_id }`. Satu persetujuan user untuk aksi posisi. Engine menyelesaikan seluruh approval, menyusun ulang satu kali dari state rantai, lalu mengirim aksi akhir secara berurutan. Setelah close sukses, token biasa dari delta close dikonversi ke ETH di belakang layar; ETH, WETH, dan USDG dipertahankan | 7 |
 | `approve_hook` | `{ hook }`. Catat persetujuan sadar user atas sebuah hook V4 yang belum lolos kriteria adopsi 5.4. Engine menilai ulang hooknya sendiri sebelum mencatat, karena penilaian yang datang dari panel bisa saja sudah diubah, dan bagian yang paling menarik untuk diubah justru kesimpulan bisa diupgrade atau tidaknya. Hook yang masih bisa diupgrade ditolak di sini juga. Penilaian menyimpan code_hash; quote, approval token, zap, dan mint memeriksa ulang kode serta slot proxy. Pencabutan membatalkan revisi rencana, dan hasil penilaian lama tidak boleh menghidupkan kembali persetujuan | 6 |
 | `forget_hook` | `{ hook }`. Cabut persetujuan sebuah hook | 6 |
 | `set_rpc` | `{ http[] }`. Tulis daftar endpoint RPC baru ke config.toml. HANYA menulis: endpoint yang sedang dipakai tidak ditukar saat engine berjalan, karena permintaan yang sudah berangkat ke satu RPC tidak boleh ditunggu jawabannya dari yang lain. Panel diberi tahu bahwa engine perlu dijalankan ulang | 6 |
@@ -1568,17 +1582,17 @@ Engine ke panel:
 | `pong` | balasan denyut | 1 |
 | `open_plan` | `{ plan_id, request_id, deposit, ... }`, seluruh gate termasuk R1/R2, setor, APR yang sudah memakai versi kalibrasi aktif, gas_biaya, gas_gwei, version, zap, expires_at. Langkah izin membawa `{ step_id, jenis, token, spender, needed, current, label }`. Panel hanya menerima request_id miliknya dan memakai rencana untuk jumlah pasangan serta tombol utama; rincian gate dan izin tidak ditampilkan | 3 |
 | `deposit_preview` | `{ request_id, deposit, setor, error }`. Jawaban ringan untuk `preview_deposit`; request_id membuat jawaban input lama dibuang. `setor` hanya untuk tampilan dan tidak pernah dipakai sebagai rencana transaksi | 7 |
-| `send_result` | `{ kind, tx_hash, nonce, gas_limit, status, block_number, gas_used, gas_cost_wei, minted_amounts, token_id, verification, sent_at }`. Gas berasal dari gasUsed dan effectiveGasPrice receipt; null jika belum diketahui. minted_amounts berisi amount0/amount1 aktual dari event manager V3, null jika belum dibuktikan. `kind`: `approve`, `zap`, `open`, `action`. `status`: `sukses`, `revert`, `menggantung`. Setelah 15 detik tanpa receipt, UI menerima `menggantung` dan jurnal meneruskan rekonsiliasi di belakang layar; hasil akhirnya dipancarkan sebagai notifikasi | 3 |
+| `send_result` | `{ kind, tx_hash, nonce, gas_limit, status, block_number, gas_used, gas_cost_wei, minted_amounts, token_id, verification, sent_at }`. Gas berasal dari gasUsed dan effectiveGasPrice receipt; null jika belum diketahui. minted_amounts berisi amount0/amount1 aktual dari event manager V3, null jika belum dibuktikan. `kind`: `approve`, `zap`, `open`, `action`, `exit_swap`. `status`: `sukses`, `revert`, `menggantung`. Setelah 15 detik tanpa receipt, UI menerima `menggantung` dan jurnal meneruskan rekonsiliasi di belakang layar; hasil akhirnya dipancarkan sebagai notifikasi | 3 |
 | `alert` | `{ level, code, message, positionId }` | 1 |
 | `positions` | `{ positions[], tertutup[], owner, keluar_range, ringkasan, learning, error, dimuat_pada }`. Posisi membawa position_id berisi chain:manager:token_id. PnL membawa `deposited`, `value`, `pnl_percent`, `opened_at`, fee, gas, slippage, dan net; angka yang belum terbukti tetap null. `tertutup[]` direkonstruksi dari jurnal close serta membawa `symbol0` dan `symbol1` agar pasangan tetap terbaca tanpa permintaan token tambahan. Nilai posisi tertutup memisahkan pokok yang diterima dari fee. `learning` tetap membawa data kalibrasi untuk engine, tetapi tidak ditampilkan sebagai filter teknis di PnL. Pemuatan berkala tiap 30 detik tetap berjalan ketika panel tertutup | 5 |
-| `transactions` | `{ owner, items[], error }`. Tiap item memuat operasi, hash, plan/flow/position ID, nonce, gas, jumlah diterima, status, dan finalitas. Request lengkap serta calldata tidak keluar dari engine; detail error transport disunting karena dapat memuat URL RPC berkunci | 5 |
+| `transactions` | `{ owner, items[], error }`. Tiap item memuat operasi, termasuk `exit_swap`, hash, plan/flow/position ID, nonce, gas, jumlah diterima, status, dan finalitas. Request lengkap serta calldata tidak keluar dari engine; detail error transport disunting karena dapat memuat URL RPC berkunci | 5 |
 | `notify` | `{ level, code, message, subject, at, ditahan }`. Berbeda dari `alert`: pesan ini melewati pendinginan, masuk riwayat, dan membawa petunjuk durasi serta suara. `alert` dipakai untuk kegagalan seketika pada aksi yang sedang dijalankan user | 5 |
 | `notify_history` | daftar kejadian terakhir, terbaru lebih dulu, paling banyak 50 | 5 |
 | `depth` | `{ poolId, tickSekarang, hargaSekarang, tickSpacing, pita[], quoteAdalahToken1, error }`. Setiap pita membawa batas tick, batas harga, likuiditas, modal yang tertanam dalam token kutipan, dan penanda apakah harga sekarang ada di dalamnya. Batas harga selalu terurut naik apa pun sisi mana memecoinnya berada, karena panel tidak boleh mengulang perhitungan arah itu sendiri. Lihat 6.14 | 6 |
 | `scan_results` | `{ rows[], hooks[], adopsi_lengkap, jendelaPindaiMenit, jendelaVolumeMenit, volumeJendelaPendek, modalAcuan, totalSwap, dipindaiPada, error }`. Setiap baris membawa simbol, pasangan, market cap, volume, kedalaman, hasil jendela, APR, efisiensi, umur, risiko, label, dan alasan. `hooks[]` membawa code_hash, jumlah pool, umur, TVL USD, LP unik aktif, lima status kriteria, serta lolos_otomatis. `adopsi_lengkap` benar setelah sejarah Initialize dan ModifyLiquidity selesai | 6 |
 | `signals` | `{ address, barTerpakai, harga, sideways, basis, saran, konsentrasiDibandingLebar, dihitungPada }`. `sideways` dan `basis` kosong berarti datanya belum cukup, BUKAN berarti kondisinya tidak menarik | 6 |
 | `action_plan` | `{ plan_id, position_id, request_id, token_id, action, nama, gates[], gas_estimate, dry_run, menutup, siap, expires_at, fee0, fee1, allowances[], amounts, tick_lower_baru, tick_upper_baru }`. Tambah dan rebalance memakai R1; tambah modal baru juga memakai R2. Panel memakai hasilnya untuk mengaktifkan satu tombol, sedangkan gate, simulasi, dan approval tetap berada di alur engine | 5 |
-| `token_state` | `{ address, meta, quotes[], pools[], selectedQuote, selectedPoolId, saldo, error }`. `saldo` memuat saldo wallet untuk kedua sisi pasangan terpilih beserta saldo token gas, dan bernilai kosong kalau wallet belum dibuka, yang berbeda dari saldo nol. Setiap pool membawa `stats` berisi volume, TVL, dan proyeksi APR kalau sudah terukur. Setiap `quote` membawa `{ quote, quoteSymbol, quoteDecimals, canonical, pools[] }`. Dikirim dua kali saat memuat: sekali cepat dari kunci pool yang tersimpan, sekali lagi setelah pemindaian selesai kalau ada yang berubah. Lihat 4.3c | 2 |
+| `token_state` | `{ address, meta, quotes[], pools[], selectedQuote, selectedPoolId, saldo, error }`. `saldo` memuat saldo wallet untuk kedua sisi pasangan terpilih beserta saldo token gas, dan bernilai kosong kalau wallet belum dibuka, yang berbeda dari saldo nol. Setiap pool membawa `stats` berisi volume 24 jam, TVL, dan proyeksi APR kalau sudah terukur. Setiap `quote` membawa `{ quote, quoteSymbol, quoteDecimals, canonical, pools[] }`. Keadaan pool dikirim lebih dulu, saldo menyusul segera setelah RPC saldo menjawab, lalu statistik menyusul tanpa menahan input setoran. Lihat 4.3c | 2 |
 | `range_view` | `{ poolId, tickSpacing, ethUsd, current, lower, upper, widthPct, inRange, warnings[] }`. Tiap batas memuat `tick`, `priceWeth`, `priceUsd`, `mcapUsd`, dan `driftBps`, yaitu selisih akibat pembulatan ke grid tick | 2 |
 | `price_tick` | `{ address, priceUsd, priceWeth, mcapUsd }` | 2 |
 | `range_quote` | `{ quoteId, feeApr, expectedHoursInRange, ilBreakevenHours, crowdedLiquidityUsd, ourSharePct, amount0, amount1, swapNeeded, priceImpact, gasEstimate, warnings[] }` | 3 |
@@ -1909,7 +1923,18 @@ Kalau jam impas lebih panjang daripada ekspektasi waktu bertahan dari 11.2, posi
 
 Satu pair bisa punya pool di beberapa fee tier. Yang paling likuid belum tentu paling menguntungkan untuk LP. Engine menghitung `volume x fee_tier / likuiditas` untuk setiap pool yang ada, termasuk lintas V3 dan V4, lalu mengurutkan berdasarkan proyeksi fee per dolar modal. Pada memecoin, pool 1 persen sering mengalahkan pool 0,3 persen meski volumenya lebih kecil.
 
+Discovery menampilkan pilihan kasar lebih dulu agar panel tidak menunggu
+pemindaian log. Setelah statistik 24 jam selesai, pilihan aktif ikut berpindah
+ke pool ber-APR marginal tertinggi yang lolos ambang kapasitas selama user belum
+memilih pool lain.
+
 Pemeringkatan ini berjalan **setelah** penyaringan fee di luar akal sehat pada 4.3b, bukan sebelumnya. Tanpa urutan itu, rumus `volume x fee_tier / likuiditas` justru memilih pool fee 80 persen yang volumenya nol.
+
+APR marginal pool yang nyaris kosong mudah membesar hanya karena penyebutnya
+kecil. Karena itu kandidat utama harus mempunyai sedikitnya satu persen volume
+24 jam dan TVL aktif terbesar pada kelompok pasangan yang sama. Pool di bawah
+ambang tetap terlihat, tetapi tidak dipilih otomatis mengalahkan pasar yang
+benar benar aktif.
 
 Terpasang di `signals::optimizer` dan bisa dijalankan langsung lewat
 `cargo xtask optimizer <alamat_token>`. Pool tanpa volume tidak diberi proyeksi

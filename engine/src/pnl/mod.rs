@@ -593,7 +593,6 @@ fn hasil_tertutup(
     let net = fee
         .zip(gas)
         .zip(slippage)
-        .filter(|_| complete)
         .map(|((fee, gas), slippage)| fee - il - gas - slippage);
 
     let harga_setor = catatan
@@ -622,6 +621,65 @@ fn hasil_tertutup(
         net,
         perkiraan: !complete,
     })
+}
+
+/// Isi simbol histori lama yang belum sempat disimpan saat posisi ditutup.
+///
+/// Versi jurnal awal hanya membawa alamat token. Membiarkan simbol kosong
+/// membuat kartu histori menampilkan dua potongan alamat meski metadata masih
+/// bisa dibaca dari rantai. Angka PnL tidak diubah oleh fungsi ini.
+pub async fn lengkapi_simbol_tertutup<P: alloy::providers::Provider>(
+    provider: &P,
+    registry: &crate::chain::registry::Registry,
+    positions: &mut [PosisiTertutup],
+) -> Result<(), String> {
+    let mut alamat = Vec::<Address>::new();
+    for posisi in positions.iter() {
+        for (token, symbol) in [
+            (&posisi.token0, &posisi.symbol0),
+            (&posisi.token1, &posisi.symbol1),
+        ] {
+            if symbol.is_some() {
+                continue;
+            }
+            let parsed = token
+                .parse::<Address>()
+                .map_err(|_| format!("alamat token histori tidak valid: {token}"))?;
+            if !alamat.contains(&parsed) {
+                alamat.push(parsed);
+            }
+        }
+    }
+    if alamat.is_empty() {
+        return Ok(());
+    }
+
+    let meta = crate::pools::token_meta_batch(provider, registry, &alamat)
+        .await
+        .map_err(|e| format!("metadata token histori tidak terbaca: {e}"))?;
+    let simbol: std::collections::HashMap<Address, String> = alamat
+        .into_iter()
+        .zip(meta)
+        .filter_map(|(address, meta)| meta.map(|meta| (address, meta.symbol)))
+        .collect();
+
+    for posisi in positions {
+        if posisi.symbol0.is_none() {
+            posisi.symbol0 = posisi
+                .token0
+                .parse::<Address>()
+                .ok()
+                .and_then(|a| simbol.get(&a).cloned());
+        }
+        if posisi.symbol1.is_none() {
+            posisi.symbol1 = posisi
+                .token1
+                .parse::<Address>()
+                .ok()
+                .and_then(|a| simbol.get(&a).cloned());
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -929,6 +987,18 @@ mod tests {
         assert_eq!(result.gas, Some(0.25));
         assert_eq!(result.net, Some(-0.25));
         assert!(!result.perkiraan);
+
+        let mut catatan = ambil(&store, position_id).unwrap();
+        catatan.setoran_aktual = false;
+        simpan(&store, &catatan);
+        let perkiraan = histori_tertutup(&store, 4663, owner).unwrap();
+        let result = perkiraan[0].pnl.as_ref().unwrap();
+        assert_eq!(
+            result.net,
+            Some(-0.25),
+            "komponen yang tersedia tetap harus menghasilkan net"
+        );
+        assert!(result.perkiraan);
     }
 
     #[test]

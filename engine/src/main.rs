@@ -320,6 +320,11 @@ async fn reconcile_transactions(state: &AppState) {
                     rangefinder_engine::exec::journal::Operation::Close => {
                         ("close_succeeded", "close_failed", "Penutupan posisi")
                     }
+                    rangefinder_engine::exec::journal::Operation::ExitSwap => (
+                        "exit_swap_succeeded",
+                        "exit_swap_failed",
+                        "Konversi hasil ke ETH",
+                    ),
                     rangefinder_engine::exec::journal::Operation::Increase => {
                         ("increase_succeeded", "increase_failed", "Tambah likuiditas")
                     }

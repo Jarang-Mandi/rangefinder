@@ -39,10 +39,17 @@ use crate::chain::registry::Registry;
 
 /// Jendela pengukuran volume, dalam blok.
 ///
-/// Waktu blok rantai ini sekitar 100 ms, jadi 36.000 blok kira kira satu jam.
-/// Itu jendela yang sama dengan yang dipakai PRD untuk volume 1 jam, dan cukup
-/// pendek untuk masih menggambarkan keadaan sekarang.
-pub const JENDELA_VOLUME_BLOK: u64 = 36_000;
+/// Waktu blok rantai ini sekitar 100 ms, jadi 864.000 blok kira kira 24 jam.
+/// Uniswap menampilkan volume 24 jam pada halaman token. Memakai periode yang
+/// sama membuat angka dapat dibandingkan dan meredam ledakan singkat yang
+/// sebelumnya dibesarkan 8.760 kali saat diproyeksikan menjadi APR tahunan.
+pub const JENDELA_VOLUME_BLOK: u64 = 864_000;
+
+/// Ukuran awal tiap permintaan log.
+///
+/// Seluruh 24 jam tetap dibaca. Potongan ini hanya menjaga satu jawaban di
+/// bawah batas jumlah log milik RPC publik.
+pub const POTONGAN_VOLUME_BLOK: u64 = 36_000;
 
 /// Jendela terpendek yang masih diterima untuk pengukuran volume.
 ///
@@ -130,11 +137,12 @@ pub async fn ukur_volume_v3<P: Provider>(
         });
     }
 
-    let terbaca = crate::chain::logs::baca_mundur(
+    let terbaca = crate::chain::logs::baca_mundur_lengkap(
         provider,
         latest,
         registry.chain.deploy_block,
         JENDELA_VOLUME_BLOK,
+        POTONGAN_VOLUME_BLOK,
         JENDELA_VOLUME_MINIMUM,
         |dari, sampai| {
             Filter::new()
@@ -211,11 +219,12 @@ pub async fn ukur_volume<P: Provider>(
 
     let pool_manager: Address = registry.contract("uniswap_v4", "pool_manager")?;
 
-    let terbaca = crate::chain::logs::baca_mundur(
+    let terbaca = crate::chain::logs::baca_mundur_lengkap(
         provider,
         latest,
         registry.chain.deploy_block,
         JENDELA_VOLUME_BLOK,
+        POTONGAN_VOLUME_BLOK,
         JENDELA_VOLUME_MINIMUM,
         |dari, sampai| {
             Filter::new()
@@ -260,13 +269,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn jendela_kira_kira_satu_jam() {
-        // Waktu blok sekitar 100 ms, jadi 36.000 blok kira kira satu jam. Kalau
+    fn jendela_kira_kira_satu_hari() {
+        // Waktu blok sekitar 100 ms, jadi 864.000 blok kira kira 24 jam. Kalau
         // angka ini diubah, keterangan di kartu panel harus ikut berubah.
         let detik = JENDELA_VOLUME_BLOK as f64 * 0.1;
         assert!(
-            (detik - 3_600.0).abs() < 60.0,
-            "jendela {detik} detik, seharusnya sekitar satu jam"
+            (detik - 86_400.0).abs() < 1_500.0,
+            "jendela {detik} detik, seharusnya sekitar satu hari"
         );
     }
 

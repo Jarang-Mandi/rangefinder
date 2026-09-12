@@ -19,6 +19,7 @@ pub enum Operation {
     Open,
     Claim,
     Close,
+    ExitSwap,
     Increase,
     Rebalance,
 }
@@ -105,7 +106,7 @@ pub struct Entry {
 pub struct ReceivedAmounts {
     pub amount0: String,
     pub amount1: String,
-    /// `v3_collect_event` atau `wallet_balance_delta`.
+    /// `v3_collect_event`, `wallet_balance_delta`, atau `exit_balance_delta`.
     pub evidence: String,
 }
 
@@ -316,8 +317,11 @@ pub fn record_received(
     store.update(&key(chain, owner, tx_hash), |old: Option<Entry>| {
         let mut old = old.context("transaksi aksi tidak ada dalam jurnal")?;
         ensure!(
-            matches!(old.context.operation, Operation::Claim | Operation::Close),
-            "transaksi bukan claim atau close"
+            matches!(
+                old.context.operation,
+                Operation::Claim | Operation::Close | Operation::ExitSwap
+            ),
+            "transaksi bukan claim, close, atau exit swap"
         );
         ensure!(
             old.status == Status::Succeeded,
@@ -382,6 +386,7 @@ pub fn position_ledger(
                 Operation::Approve
                     | Operation::Claim
                     | Operation::Close
+                    | Operation::ExitSwap
                     | Operation::Increase
                     | Operation::Rebalance
             )
@@ -439,6 +444,7 @@ pub fn position_ledger(
                 out.closed_at = Some(entry.updated_at.clone());
                 out.close_received = Some(received.clone());
             }
+            Operation::ExitSwap => {}
             Operation::Approve | Operation::Increase | Operation::Rebalance => unreachable!(),
             Operation::Zap | Operation::Open => unreachable!(),
         }
@@ -808,6 +814,56 @@ mod tests {
         assert_eq!(ledger.claimed0, U256::from(13));
         assert_eq!(ledger.claimed1, U256::from(17));
         assert_eq!(ledger.action_gas_wei, U256::from(21_000_000_000_000u64));
+        assert!(ledger.complete);
+    }
+
+    #[test]
+    fn exit_swap_masuk_gas_posisi_tanpa_mengubah_hasil_close() {
+        let (_, store, template) = setup("position-exit-swap");
+        let owner = template.owner;
+        let mut context = test_context();
+        context.operation = Operation::ExitSwap;
+        context.position_id = Some("4663:manager:8".into());
+        context.deployment_usd = None;
+        context.token0 = Some(Address::repeat_byte(7));
+        context.token1 = Some(Address::ZERO);
+        let swap = Journal {
+            store: &store,
+            context,
+        }
+        .prepare(
+            4663,
+            owner,
+            B256::repeat_byte(8),
+            template.request.clone().with_nonce(9),
+        )
+        .unwrap();
+        let swap = record_receipt(&store, &swap, receipt(&swap, true)).unwrap();
+        record_received(
+            &store,
+            4663,
+            owner,
+            swap.tx_hash,
+            ReceivedAmounts {
+                amount0: "100".into(),
+                amount1: "25".into(),
+                evidence: "exit_balance_delta".into(),
+            },
+        )
+        .unwrap();
+        store
+            .update(&key(4663, owner, swap.tx_hash), |old: Option<Entry>| {
+                let mut old = old.unwrap();
+                old.confirmed_at = Some(chrono::Utc::now().to_rfc3339());
+                Ok(old)
+            })
+            .unwrap();
+
+        let ledger = position_ledger(&store, 4663, owner, "4663:manager:8").unwrap();
+        assert_eq!(ledger.action_gas_wei, U256::from(21_000_000_000_000u64));
+        assert_eq!(ledger.claimed0, U256::ZERO);
+        assert_eq!(ledger.claimed1, U256::ZERO);
+        assert!(ledger.close_received.is_none());
         assert!(ledger.complete);
     }
 }

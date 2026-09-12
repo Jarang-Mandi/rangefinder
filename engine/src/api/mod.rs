@@ -153,6 +153,17 @@ pub struct ActiveToken {
     pub chart_mcap_usd: Option<f64>,
 }
 
+#[derive(Debug, Default)]
+struct RingkasanKonversi {
+    berhasil: usize,
+    gagal: Vec<String>,
+}
+
+struct HasilKirimAksi {
+    view: execute::SendResultView,
+    konversi: Option<RingkasanKonversi>,
+}
+
 impl ActiveToken {
     pub fn selected_pool(&self) -> Option<&crate::pools::PoolInfo> {
         self.pools.iter().find(|p| p.id == self.selected_pool_id)
@@ -390,6 +401,7 @@ impl AppState {
                 let _ = state
                     .events
                     .send(protocol::ServerMessage::TokenState(Box::new(cepat)));
+                state.kirim_saldo_menyusul().await;
             }
 
             let penuh = state
@@ -406,6 +418,7 @@ impl AppState {
                 let _ = state
                     .events
                     .send(protocol::ServerMessage::TokenState(Box::new(penuh)));
+                state.kirim_saldo_menyusul().await;
             }
         });
     }
@@ -503,8 +516,6 @@ impl AppState {
                 "token berpasangan dengan lebih dari satu kutipan"
             );
         }
-
-        out.saldo = self.baca_saldo(&provider, &out.meta, &terpilih).await;
 
         // Simpan sebagai token aktif supaya laporan harga dari chart yang
         // datang berikutnya punya konteks untuk dikalibrasi.
@@ -660,7 +671,7 @@ impl AppState {
                 return;
             };
 
-            let (meta, kelompok) = {
+            let (meta, kelompok, pool_awal) = {
                 let guard = s.active.read().await;
                 let Some(active) = guard.as_ref() else { return };
                 let Some(k) = active
@@ -671,7 +682,11 @@ impl AppState {
                 else {
                     return;
                 };
-                (Some(active.meta.clone()), k)
+                (
+                    Some(active.meta.clone()),
+                    k,
+                    active.selected_pool_id.clone(),
+                )
             };
 
             let saldo = s.baca_saldo(&provider, &meta, &kelompok).await;
@@ -679,6 +694,7 @@ impl AppState {
             // Saldo adalah angka yang langsung dibutuhkan kotak amount. Kirim
             // begitu RPC menjawab; pengukuran APR/TVL di bawah tidak boleh
             // menahannya beberapa detik.
+            let mut pool_berganti = false;
             {
                 let guard = s.active.read().await;
                 let Some(active) = guard.as_ref() else { return };
@@ -726,11 +742,34 @@ impl AppState {
                     {
                         return;
                     }
+                    let kelompok_masih_sama = active
+                        .quotes
+                        .iter()
+                        .find(|g| g.quote.eq_ignore_ascii_case(&kelompok.quote))
+                        .is_some_and(|g| {
+                            g.pools.len() == kelompok.pools.len()
+                                && g.pools
+                                    .iter()
+                                    .all(|a| kelompok.pools.iter().any(|b| a.id == b.id))
+                        });
+                    if !kelompok_masih_sama {
+                        return;
+                    }
                     if !active.selected_quote.eq_ignore_ascii_case(&kelompok.quote) {
                         return;
                     }
-                    if active.selected_quote.eq_ignore_ascii_case(&kelompok.quote) {
-                        active.pools = kelompok.pools.clone();
+                    active.pools = kelompok.pools.clone();
+
+                    // Pilihan kasar pertama hanya menjaga panel segera punya
+                    // pool. Setelah angka 24 jam tersedia, pindahkan pilihan
+                    // ke APR marginal tertinggi yang punya kapasitas memadai,
+                    // selama user belum memilih pool lain ketika pengukuran
+                    // berjalan.
+                    if active.selected_pool_id == pool_awal {
+                        if let Some(terbaik) = kelompok.pools.first() {
+                            pool_berganti = active.selected_pool_id != terbaik.id;
+                            active.selected_pool_id = terbaik.id.clone();
+                        }
                     }
                     if let Some(g) = active
                         .quotes
@@ -763,6 +802,13 @@ impl AppState {
                     error: None,
                 },
             )));
+            drop(guard);
+
+            // TokenState harus tiba lebih dulu agar panel menerima range milik
+            // pool baru, bukan membuangnya sebagai jawaban pool lama.
+            if pool_berganti {
+                s.broadcast_range_view().await;
+            }
         });
     }
 
@@ -2008,6 +2054,30 @@ impl AppState {
         };
         let mut context = context;
         context.operation = crate::exec::journal::Operation::Approve;
+        let provider = self.chain.provider().await.map_err(|e| e.to_string())?;
+        let signer = self
+            .wallet
+            .lock()
+            .await
+            .signer()
+            .map_err(|e| e.to_string())?
+            .clone();
+        self.kirim_langkah_izin(&provider, &signer, &langkah, context)
+            .await
+    }
+
+    /// Kirim satu izin yang sudah dibuktikan masih kurang.
+    ///
+    /// Pemisahan ini membuat alur close dapat menyelesaikan izin router di
+    /// belakang layar dengan pintu kirim dan jurnal yang sama seperti open.
+    async fn kirim_langkah_izin<P: alloy::providers::Provider>(
+        &self,
+        provider: &P,
+        signer: &alloy::signers::local::PrivateKeySigner,
+        langkah: &crate::exec::plan::LangkahIzin,
+        mut context: crate::exec::journal::Context,
+    ) -> Result<execute::SendResultView, String> {
+        context.operation = crate::exec::journal::Operation::Approve;
         let target: alloy::primitives::Address = langkah
             .token
             .parse()
@@ -2023,16 +2093,8 @@ impl AppState {
         if jumlah.is_zero() {
             return Err("jumlah izin nol".into());
         }
-        let provider = self.chain.provider().await.map_err(|e| e.to_string())?;
         let alamat = crate::exec::plan::AlamatEksekusi::dari_registry(&self.registry)
             .map_err(|e| e.to_string())?;
-        let signer = self
-            .wallet
-            .lock()
-            .await
-            .signer()
-            .map_err(|e| e.to_string())?
-            .clone();
         let journal = crate::exec::journal::Journal {
             store: &self.store,
             context,
@@ -2040,9 +2102,9 @@ impl AppState {
         let outcome = match langkah.jenis {
             "erc20_ke_permit2" | "erc20_ke_position_manager" | "erc20_ke_router" => {
                 crate::exec::send::send_approve(
-                    &provider,
+                    provider,
                     &self.nonce,
-                    &signer,
+                    signer,
                     alamat.multicall,
                     target,
                     spender,
@@ -2064,9 +2126,9 @@ impl AppState {
                     sekarang + crate::exec::v4::permit::MASA_BERLAKU_DETIK,
                 )?;
                 let terkirim = crate::exec::send::send_calldata(
-                    &provider,
+                    provider,
                     &self.nonce,
-                    &signer,
+                    signer,
                     alamat.permit2,
                     calldata,
                     alloy::primitives::U256::ZERO,
@@ -2085,6 +2147,261 @@ impl AppState {
             kind: "approve",
             outcome,
         })
+    }
+
+    /// Tukar token spekulatif yang baru diterima dari close menjadi ETH.
+    ///
+    /// Jumlahnya selalu berasal dari bukti delta saldo close. Setiap token
+    /// dicoba terpisah supaya satu pool yang bermasalah tidak menahan token
+    /// lain pada pasangan dua token biasa.
+    async fn konversi_hasil_close<P: alloy::providers::Provider>(
+        &self,
+        provider: &P,
+        signer: &alloy::signers::local::PrivateKeySigner,
+        aksi: &execute::AksiTersimpan,
+        received: &crate::exec::journal::ReceivedAmounts,
+    ) -> RingkasanKonversi {
+        let mut ringkasan = RingkasanKonversi::default();
+        let Some((token0, token1)) = aksi.journal_context.token0.zip(aksi.journal_context.token1)
+        else {
+            ringkasan
+                .gagal
+                .push("alamat token hasil close tidak tersedia".into());
+            return ringkasan;
+        };
+        let Ok(amount0) = received.amount0.parse::<alloy::primitives::U256>() else {
+            ringkasan
+                .gagal
+                .push("jumlah token0 hasil close tidak valid".into());
+            return ringkasan;
+        };
+        let Ok(amount1) = received.amount1.parse::<alloy::primitives::U256>() else {
+            ringkasan
+                .gagal
+                .push("jumlah token1 hasil close tidak valid".into());
+            return ringkasan;
+        };
+        let daftar =
+            crate::exec::exit::token_yang_ditukar(&self.registry, token0, amount0, token1, amount1);
+        if daftar.is_empty() {
+            return ringkasan;
+        }
+
+        let alamat = match crate::exec::plan::AlamatEksekusi::dari_registry(&self.registry) {
+            Ok(value) => value,
+            Err(error) => {
+                ringkasan.gagal.push(error.to_string());
+                return ringkasan;
+            }
+        };
+        let router = match self.registry.contract("uniswap_v4", "universal_router") {
+            Ok(value) => value,
+            Err(error) => {
+                ringkasan.gagal.push(error.to_string());
+                return ringkasan;
+            }
+        };
+
+        for (token, jumlah) in daftar {
+            let hasil: Result<(), String> = async {
+                let deadline = || {
+                    alloy::primitives::U256::from(
+                        chrono::Utc::now().timestamp().max(0) as u64 + DEADLINE_DETIK,
+                    )
+                };
+                let awal = crate::exec::exit::susun_ke_eth(
+                    provider,
+                    &self.registry,
+                    token,
+                    jumlah,
+                    self.cfg.limits.max_slippage_bps,
+                    deadline(),
+                )
+                .await?;
+                let mut context = crate::exec::journal::Context {
+                    operation: crate::exec::journal::Operation::Approve,
+                    plan_id: aksi.plan_id.clone(),
+                    flow_id: aksi.request_id.clone(),
+                    pool_id: Some(awal.pool_id),
+                    position_id: Some(aksi.position_id.clone()),
+                    token0: Some(token),
+                    token1: Some(alloy::primitives::Address::ZERO),
+                    deployment_usd: None,
+                    close_basis: None,
+                };
+
+                for _ in 0..3 {
+                    let sekarang = chrono::Utc::now().timestamp().max(0) as u64;
+                    let kurang = crate::exec::plan::izin_permit2_untuk(
+                        provider,
+                        &alamat,
+                        signer.address(),
+                        router,
+                        "UniversalRouter",
+                        token,
+                        jumlah,
+                        sekarang,
+                    )
+                    .await?;
+                    let Some(langkah) = kurang.first() else {
+                        break;
+                    };
+                    let view = self
+                        .kirim_langkah_izin(provider, signer, langkah, context.clone())
+                        .await?;
+                    let status = view.outcome.status;
+                    let _ = self
+                        .events
+                        .send(protocol::ServerMessage::SendResult(Box::new(view)));
+                    match status {
+                        crate::exec::send::TxStatus::Sukses => {}
+                        crate::exec::send::TxStatus::Menggantung => {
+                            return Err("izin router masih diproses".into())
+                        }
+                        crate::exec::send::TxStatus::Revert => {
+                            return Err("izin router ditolak rantai".into())
+                        }
+                    }
+                }
+                let sisa = crate::exec::plan::izin_permit2_untuk(
+                    provider,
+                    &alamat,
+                    signer.address(),
+                    router,
+                    "UniversalRouter",
+                    token,
+                    jumlah,
+                    chrono::Utc::now().timestamp().max(0) as u64,
+                )
+                .await?;
+                if !sisa.is_empty() {
+                    return Err("izin router belum lengkap".into());
+                }
+
+                // Kutipan dibaca ulang setelah approval karena harga dapat
+                // bergerak selama transaksi izin masuk blok.
+                let rencana = crate::exec::exit::susun_ke_eth(
+                    provider,
+                    &self.registry,
+                    token,
+                    jumlah,
+                    self.cfg.limits.max_slippage_bps,
+                    deadline(),
+                )
+                .await?;
+                context.operation = crate::exec::journal::Operation::ExitSwap;
+                context.pool_id = Some(rencana.pool_id.clone());
+
+                provider
+                    .call(
+                        alloy::rpc::types::TransactionRequest::default()
+                            .from(signer.address())
+                            .to(router)
+                            .input(rencana.calldata.clone().into()),
+                    )
+                    .await
+                    .map_err(|error| {
+                        format!(
+                            "simulasi konversi ditolak: {}",
+                            crate::exec::simulate::jelaskan_revert(&error.to_string())
+                        )
+                    })?;
+                let eth_sebelum =
+                    provider
+                        .get_balance(signer.address())
+                        .await
+                        .map_err(|error| {
+                            format!("saldo ETH sebelum konversi tidak terbaca: {error}")
+                        })?;
+                let terkirim = crate::exec::send::send_calldata(
+                    provider,
+                    &self.nonce,
+                    signer,
+                    router,
+                    rencana.calldata,
+                    alloy::primitives::U256::ZERO,
+                    self.registry.chain.id,
+                    &self.cfg.execution,
+                    &self.cfg.limits,
+                    &crate::exec::journal::Journal {
+                        store: &self.store,
+                        context,
+                    },
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+                let tx_hash = terkirim.tx_hash;
+                let outcome = crate::exec::send::jadikan_hasil(terkirim);
+                let status = outcome.status;
+                let gas_wei = outcome
+                    .gas_cost_wei
+                    .as_deref()
+                    .and_then(|value| value.parse::<alloy::primitives::U256>().ok());
+                let _ = self
+                    .events
+                    .send(protocol::ServerMessage::SendResult(Box::new(
+                        execute::SendResultView {
+                            kind: "exit_swap",
+                            outcome,
+                        },
+                    )));
+                match status {
+                    crate::exec::send::TxStatus::Menggantung => {
+                        return Err("konversi masih diproses".into())
+                    }
+                    crate::exec::send::TxStatus::Revert => {
+                        return Err("konversi ditolak rantai".into())
+                    }
+                    crate::exec::send::TxStatus::Sukses => {}
+                }
+                let gas_wei = gas_wei.ok_or("biaya gas konversi tidak terbaca")?;
+                let eth_sesudah =
+                    provider
+                        .get_balance(signer.address())
+                        .await
+                        .map_err(|error| {
+                            format!("saldo ETH setelah konversi tidak terbaca: {error}")
+                        })?;
+                let diterima = eth_sesudah
+                    .checked_add(gas_wei)
+                    .and_then(|value| value.checked_sub(eth_sebelum))
+                    .ok_or("hasil ETH konversi tidak dapat dibuktikan dari saldo")?;
+                if diterima.is_zero() {
+                    return Err("hasil ETH konversi nol".into());
+                }
+                crate::exec::journal::record_received(
+                    &self.store,
+                    self.registry.chain.id,
+                    signer.address(),
+                    tx_hash,
+                    crate::exec::journal::ReceivedAmounts {
+                        amount0: jumlah.to_string(),
+                        amount1: diterima.to_string(),
+                        evidence: "exit_balance_delta".into(),
+                    },
+                )
+                .map_err(|error| format!("hasil konversi tidak dapat dicatat: {error}"))?;
+                tracing::info!(
+                    token = %token,
+                    amount = %jumlah,
+                    expected_eth = %rencana.perkiraan_eth,
+                    minimum_eth = %rencana.minimum_eth,
+                    actual_eth = %diterima,
+                    "hasil close dikonversi ke ETH"
+                );
+                Ok(())
+            }
+            .await;
+
+            match hasil {
+                Ok(()) => ringkasan.berhasil += 1,
+                Err(error) => {
+                    tracing::warn!(token = %token, %error, "konversi hasil close tidak selesai");
+                    ringkasan.gagal.push(format!("{token}: {error}"));
+                }
+            }
+        }
+        ringkasan
     }
     /// Catat sebuah kejadian, lalu siarkan kalau ia tidak tertahan pendinginan.
     ///
@@ -3109,7 +3426,7 @@ impl AppState {
     pub async fn on_execute_action(&self, plan_id: String) {
         let _flow = self.flow_lock.lock().await;
         match self.kirim_aksi(plan_id).await {
-            Ok(view) => {
+            Ok(HasilKirimAksi { view, konversi }) => {
                 let verifikasi_gagal = view
                     .outcome
                     .verification
@@ -3123,6 +3440,16 @@ impl AppState {
                         "action_unverified",
                         "transaksi sukses tetapi keadaan posisi tidak cocok dengan rencana. Periksa posisi sebelum melakukan aksi lain"
                             .into(),
+                    );
+                }
+                if let Some(konversi) = konversi.filter(|value| !value.gagal.is_empty()) {
+                    self.alert_peringatan(
+                        "close_conversion_incomplete",
+                        format!(
+                            "Posisi berhasil ditutup. {} konversi selesai, tetapi hasil lain tetap di wallet: {}",
+                            konversi.berhasil,
+                            konversi.gagal.join("; ")
+                        ),
                     );
                 }
                 // Keadaan posisi berubah setelah aksi, jadi daftarnya dimuat
@@ -3155,8 +3482,36 @@ impl AppState {
         )
         .await;
         match self.run_action_flow(plan_id).await {
-            Ok((status, terverifikasi)) => {
+            Ok((status, terverifikasi, konversi)) => {
                 let (level, code, message) = match (status, terverifikasi) {
+                    (crate::exec::send::TxStatus::Sukses, true)
+                        if action == crate::exec::aksi::JenisAksi::TutupPosisi
+                            && konversi
+                                .as_ref()
+                                .is_some_and(|value| !value.gagal.is_empty()) =>
+                    {
+                        let hasil = konversi.as_ref().expect("ringkasan sudah diperiksa");
+                        (
+                            protocol::AlertLevel::Warning,
+                            sukses,
+                            format!(
+                                "Posisi berhasil ditutup. {} konversi selesai, tetapi hasil lain tetap di wallet: {}",
+                                hasil.berhasil,
+                                hasil.gagal.join("; ")
+                            ),
+                        )
+                    }
+                    (crate::exec::send::TxStatus::Sukses, true)
+                        if action == crate::exec::aksi::JenisAksi::TutupPosisi
+                            && konversi.as_ref().is_some_and(|value| value.berhasil > 0) =>
+                    {
+                        let jumlah = konversi.as_ref().map_or(0, |value| value.berhasil);
+                        (
+                            protocol::AlertLevel::Info,
+                            sukses,
+                            format!("Posisi ditutup dan hasil {jumlah} token dikonversi ke ETH"),
+                        )
+                    }
                     (crate::exec::send::TxStatus::Sukses, true) => (
                         protocol::AlertLevel::Info,
                         sukses,
@@ -3237,7 +3592,7 @@ impl AppState {
     async fn run_action_flow(
         &self,
         mut plan_id: String,
-    ) -> Result<(crate::exec::send::TxStatus, bool), String> {
+    ) -> Result<(crate::exec::send::TxStatus, bool, Option<RingkasanKonversi>), String> {
         let _flow = self.flow_lock.lock().await;
         let mut izin_selesai = false;
         for _ in 0..MAX_FLOW_STEPS {
@@ -3261,7 +3616,7 @@ impl AppState {
                     if status == crate::exec::send::TxStatus::Menggantung {
                         self.batalkan_flow_tidak_pasti(&plan_id).await;
                     }
-                    return Ok((status, false));
+                    return Ok((status, false, None));
                 }
 
                 self.tandai_izin_selesai(&plan_id, &step_id).await?;
@@ -3299,7 +3654,7 @@ impl AppState {
                 return Err("Aksi belum siap. Muat ulang posisi lalu coba lagi".into());
             }
 
-            let view = self.kirim_aksi(plan_id).await?;
+            let HasilKirimAksi { view, konversi } = self.kirim_aksi(plan_id).await?;
             let verifikasi_gagal = view
                 .outcome
                 .verification
@@ -3310,12 +3665,12 @@ impl AppState {
                 .events
                 .send(protocol::ServerMessage::SendResult(Box::new(view)));
             self.on_get_positions().await;
-            return Ok((status, !verifikasi_gagal));
+            return Ok((status, !verifikasi_gagal, konversi));
         }
         Err("Alur aksi berhenti karena terlalu banyak langkah".into())
     }
 
-    async fn kirim_aksi(&self, plan_id: String) -> Result<execute::SendResultView, String> {
+    async fn kirim_aksi(&self, plan_id: String) -> Result<HasilKirimAksi, String> {
         let _eksekusi = self.execution_lock.lock().await;
         self.ensure_execution().await?;
         if self.cfg.execution.dry_run {
@@ -3374,7 +3729,7 @@ impl AppState {
             &self.nonce,
             &signer,
             tersimpan.tujuan,
-            tersimpan.calldata,
+            tersimpan.calldata.clone(),
             tersimpan.value,
             self.registry.chain.id,
             &self.cfg.execution,
@@ -3390,6 +3745,7 @@ impl AppState {
         let mut minted_amounts = None;
         let mut hasil_token_id = None;
         let mut verification = None;
+        let mut received_actual = None;
         if let Some(receipt) = terkirim.receipt.as_ref().filter(|receipt| receipt.status()) {
             let token_id = tersimpan.token_id.parse().ok();
             let from_event = (catat_penerimaan && tersimpan.versi == crate::pools::PoolVersion::V3)
@@ -3435,13 +3791,14 @@ impl AppState {
                 }
                 _ => None,
             };
-            if let Some(received) = from_event.or(from_balances) {
+            received_actual = from_event.or(from_balances);
+            if let Some(received) = received_actual.as_ref() {
                 if let Err(error) = crate::exec::journal::record_received(
                     &self.store,
                     self.registry.chain.id,
                     signer.address(),
                     terkirim.tx_hash,
-                    received,
+                    received.clone(),
                 ) {
                     tracing::warn!(error = %error, tx = %terkirim.tx_hash, "hasil aksi tidak dapat dicatat");
                 }
@@ -3730,9 +4087,31 @@ impl AppState {
                 | crate::exec::aksi::JenisAksi::TutupPosisi => {}
             }
         }
-        Ok(execute::SendResultView {
-            kind: "action",
-            outcome,
+        let konversi = if tersimpan.action == crate::exec::aksi::JenisAksi::TutupPosisi
+            && outcome.status == crate::exec::send::TxStatus::Sukses
+        {
+            Some(match received_actual.as_ref() {
+                Some(received) => {
+                    self.konversi_hasil_close(&provider, &signer, &tersimpan, received)
+                        .await
+                }
+                None => RingkasanKonversi {
+                    berhasil: 0,
+                    gagal: vec![
+                        "jumlah hasil close belum dapat dibuktikan, sehingga konversi tidak dijalankan"
+                            .into(),
+                    ],
+                },
+            })
+        } else {
+            None
+        };
+        Ok(HasilKirimAksi {
+            view: execute::SendResultView {
+                kind: "action",
+                outcome,
+            },
+            konversi,
         })
     }
 
@@ -4198,7 +4577,7 @@ impl AppState {
 
         let posisi = snapshot.positions;
         let mut errors = snapshot.errors;
-        let tertutup =
+        let mut tertutup =
             match crate::pnl::histori_tertutup(&self.store, self.registry.chain.id, pemilik) {
                 Ok(items) => items,
                 Err(_) => {
@@ -4206,6 +4585,11 @@ impl AppState {
                     Vec::new()
                 }
             };
+        if let Err(error) =
+            crate::pnl::lengkapi_simbol_tertutup(&provider, &self.registry, &mut tertutup).await
+        {
+            errors.push(error);
+        }
 
         if let Err(error) =
             crate::learning::synchronize(&self.store, &posisi, &tertutup, chrono::Utc::now())
@@ -4647,6 +5031,15 @@ impl AppState {
         tracing::info!(code, %message, "kabar untuk panel");
         let _ = self.events.send(protocol::ServerMessage::Alert {
             level: protocol::AlertLevel::Info,
+            code: code.to_string(),
+            message,
+        });
+    }
+
+    fn alert_peringatan(&self, code: &str, message: String) {
+        tracing::warn!(code, %message, "peringatan untuk panel");
+        let _ = self.events.send(protocol::ServerMessage::Alert {
+            level: protocol::AlertLevel::Warning,
             code: code.to_string(),
             message,
         });

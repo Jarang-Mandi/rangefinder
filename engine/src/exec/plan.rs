@@ -8,8 +8,8 @@
 //! sama pasti menyimpang.
 //!
 //! Jadi engine yang memutuskan jalur mana yang dipakai, dan mengembalikan
-//! daftar langkah izin yang bentuknya seragam. Panel hanya menekan tombolnya
-//! satu per satu sampai daftarnya kosong.
+//! daftar langkah izin yang bentuknya seragam. Alur satu tombol menjalankannya
+//! satu per satu sampai daftar itu kosong.
 //!
 //! INVARIAN
 //! - Versi pool menentukan segalanya. Tidak ada jalur yang bisa dipakai untuk

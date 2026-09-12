@@ -1,10 +1,9 @@
 //! Jalur eksekusi yang dipakai panel: susun rencana, beri izin, buka posisi.
 //!
 //! INVARIAN
-//! - Tiga langkah ini sengaja terpisah, dan panel harus melewatinya berurutan.
-//!   Menggabungkannya jadi satu tombol berarti user menyetujui sesuatu yang
-//!   belum pernah ia lihat. PRD baris 18 menyebutnya eksplisit: tidak ada
-//!   transaksi tanpa persetujuan per aksi.
+//! - Rencana, izin, dan pengiriman tetap berupa langkah engine yang terpisah.
+//!   Satu klik user memberi persetujuan untuk satu flow, lalu engine
+//!   menjalankannya berurutan tanpa membuka detail implementasi di panel.
 //! - Rencana disimpan di engine, bukan dikirim bolak balik. Rencana yang datang
 //!   kembali dari panel bisa saja sudah diubah, dan yang diubah itu justru
 //!   calldata. Panel hanya menyebut bahwa ia menyetujui rencana terakhir.
@@ -314,7 +313,7 @@ pub struct ActionPlanView {
 /// Hasil satu pengiriman, apa pun jenisnya.
 #[derive(Debug, Clone, Serialize)]
 pub struct SendResultView {
-    /// `approve`, `zap`, `open`, atau `action`, supaya panel tahu kartu mana
+    /// `approve`, `zap`, `open`, `action`, atau `exit_swap`.
     pub kind: &'static str,
     #[serde(flatten)]
     pub outcome: SendOutcome,

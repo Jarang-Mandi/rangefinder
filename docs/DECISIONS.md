@@ -287,3 +287,30 @@ Keduanya memakai bukti yang berbeda dan tidak boleh saling menggantikan.
 **Konsekuensi.** Versi kalibrasi dapat meningkatkan atau menurunkan skor dan
 prediksi, tetapi tidak dapat membuat token atau hook yang gagal pemeriksaan
 kontrak menerima modal.
+
+---
+
+## 0010 Close mengubah token biasa hasil posisi menjadi ETH
+
+**Tanggal** 12 September 2026. **Status** berlaku.
+
+**Konteks.** Close sebelumnya hanya menarik kedua aset dari NFT ke wallet.
+Pada pasangan USDG/ZZZ atau ETH/ZZZ, user masih memegang ZZZ sesudah menekan
+Tutup posisi. Pada pasangan PONS/ZZZ, kedua aset spekulatif tetap tertinggal.
+Hasil itu tidak sesuai arti keluar dari posisi bagi user.
+
+**Pilihan.** Sesudah receipt close sukses dan jumlah penerimaan terbukti,
+engine menjual setiap token biasa melalui pool V4 langsung ke ETH. ETH asli,
+WETH, dan USDG dipertahankan. Jumlah input berasal dari delta close saja.
+Approval Permit2, kutipan ulang, simulasi calldata, pengiriman, gas, dan ETH
+aktual dicatat dalam jurnal posisi yang sama.
+
+**Alasan.** Satu klik Tutup posisi harus menyelesaikan niat user tanpa membuka
+rincian approval dan router di panel. Memakai delta close mencegah saldo token
+lama ikut terjual. Menjalankan kedua sisi secara terpisah membuat satu rute
+yang gagal tidak menahan sisi lainnya.
+
+**Konsekuensi.** Close yang sudah sukses tidak dibatalkan oleh kegagalan swap
+lanjutan. Token yang belum dapat dikonversi tetap berada di wallet dan panel
+memberi peringatan. Saat tidak ada pool langsung ke ETH, engine tidak menebak
+rute multi hop.

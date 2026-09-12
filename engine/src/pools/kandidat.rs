@@ -526,6 +526,30 @@ pub fn proyeksi_apr(
     Some(per_jendela * (DETIK_SETAHUN / jendela_detik))
 }
 
+/// APR pool untuk modal baru yang kecil dibanding likuiditas aktif.
+///
+/// Ini bentuk yang dipakai tabel pool Uniswap: fee pada jendela dibagi TVL,
+/// lalu direntangkan menjadi setahun. Daftar pool belum mengetahui nominal
+/// user, jadi memakai modal acuan tetap dapat membalik urutan antara pool ETH
+/// dan pool stablecoin. Setelah nominal diisi, planner tetap menghitung ulang
+/// dengan pengenceran dari jumlah aktual user.
+pub fn proyeksi_apr_pool(
+    volume_quote: f64,
+    fee_ppm: u32,
+    tvl_quote: f64,
+    jendela_detik: f64,
+) -> Option<f64> {
+    if jendela_detik <= 0.0
+        || tvl_quote <= 0.0
+        || !tvl_quote.is_finite()
+        || jendela_tak_masuk_akal(volume_quote)
+    {
+        return None;
+    }
+    let fee = fee_ppm as f64 / 1_000_000.0;
+    Some(volume_quote * fee / tvl_quote * (DETIK_SETAHUN / jendela_detik) * 100.0)
+}
+
 /// Lengkapi hasil pemindaian menjadi baris siap tampil.
 ///
 /// Dua batch: satu untuk metadata token, satu untuk keadaan pool. Pool yang
@@ -1223,6 +1247,13 @@ mod tests {
         let sejam = proyeksi_apr(1_000.0, 10_000, 100_000.0, 3_600.0).unwrap();
         let setengah_jam = proyeksi_apr(1_000.0, 10_000, 100_000.0, 1_800.0).unwrap();
         assert!((setengah_jam / sejam - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn apr_pool_memakai_fee_24_jam_dibagi_tvl() {
+        let apr = proyeksi_apr_pool(1_000.0, 10_000, 2_000.0, 86_400.0).unwrap();
+        assert!((apr - 182.5).abs() < 1e-9);
+        assert!(proyeksi_apr_pool(1_000.0, 10_000, 0.0, 86_400.0).is_none());
     }
 
     #[test]

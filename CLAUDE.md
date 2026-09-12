@@ -8,10 +8,10 @@ digeser diinjeksi ke chart TradingView milik gmgn.ai.
 > `docs/PRD.md` menjelaskan apa dan kenapa. Berkas ini menjelaskan bagaimana,
 > beserta hal hal yang gampang dirusak kalau tidak tahu.
 
-## Keadaan sekarang, 11 September 2026
+## Keadaan sekarang, 12 September 2026
 
 Audit integrasi dan pekerjaan tertinggal di `docs/PERBAIKAN.md` sudah ditutup
-pada kode dan pengujian lokal. Protokol sekarang versi 6. Quote membawa aset
+pada kode dan pengujian lokal. Protokol sekarang versi 7. Quote membawa aset
 sumber, jumlah desimal, pilihan Zap, dan request ID. Persetujuan membawa plan
 ID, approval membawa step ID, dan hasil positions membawa versi kalibrasi.
 Engine serta ekstensi harus dibangun dan dimuat ulang bersama. Hasil async lama
@@ -28,6 +28,13 @@ ada setelah NFT dibakar. Posisi V3 eksternal merekonstruksi lot setoran, collect
 dan decrease dari log. V4 eksternal memakai batas jumlah dari calldata bertipe
 dan tetap ditandai perkiraan karena eventnya tidak membawa jumlah aktual. Nilai
 gas atau slippage yang tidak dapat dikonversi tidak diisi nol.
+
+Close memakai satu klik dan otomatis menjual token biasa yang baru diterima ke
+ETH melalui pool V4 langsung dengan kutipan terbaik. ETH asli, WETH, dan USDG
+dipertahankan. Pasangan dua token biasa mencoba menjual kedua sisinya secara
+terpisah. Jumlah swap berasal dari delta close, bukan seluruh saldo wallet.
+Approval, kutipan ulang, simulasi, swap, dan bukti ETH aktual berjalan di
+engine. Kegagalan swap tidak mengubah close yang sudah sukses menjadi gagal.
 
 Tambah likuiditas dan rebalance tersedia untuk V3 serta V4 melalui alur
 rencana, approval, simulasi, klik eksplisit, dan verifikasi. Rebalance V3
@@ -76,8 +83,14 @@ melanjutkan rekonsiliasi dan memancarkan notifikasi akhir. Open, tambah,
 rebalance, klaim, dan close masing masing punya kabar mulai, berhasil, tertunda,
 atau gagal. Rebalance, klaim, dan close langsung menyusun serta menjalankan flow
 dari tombol aksinya tanpa tombol konfirmasi kedua. Tambah likuiditas menyusun
-rencana selama input berubah dan memakai satu tombol final. Kartu PnL menampilkan waktu buka, durasi atau waktu tutup, setoran,
-nilai sekarang atau diterima, fee, net, dan persentase tanpa eyebrow teknis.
+rencana selama input berubah dan memakai satu tombol final. Kartu PnL
+menampilkan waktu buka, durasi atau waktu tutup, setoran, nilai sekarang atau
+diterima, fee, net, dan persentase tanpa eyebrow teknis. Net tetap ditampilkan
+dengan tanda perkiraan ketika komponennya tersedia tetapi basis historis belum
+lengkap. Simbol histori lama diisi dari metadata on chain. Statistik pool token
+memakai volume bergulir 24 jam, dibaca dalam potongan yang tetap mencakup
+seluruh periode, lalu pool diurutkan menurut APR terukur. Saldo pasangan dikirim
+segera setelah RPC saldo menjawab tanpa menunggu statistik itu.
 
 Setelah fase 6 ditutup, seluruh pekerjaan berikutnya adalah perbaikan yang
 datang dari user memakai panelnya sendiri. Itu tercatat di PRD 6.15, dan

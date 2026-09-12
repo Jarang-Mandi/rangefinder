@@ -10,7 +10,7 @@
  *   tidak mengizinkan memasang header pada koneksi WebSocket.
  */
 
-export const PROTOCOL_VERSION = 6;
+export const PROTOCOL_VERSION = 7;
 export const WS_SUBPROTOCOL = "rangefinder";
 export const DEFAULT_ENGINE_ORIGIN = "http://127.0.0.1:8787";
 
@@ -343,6 +343,7 @@ export type JournalOperation =
   | "open"
   | "claim"
   | "close"
+  | "exit_swap"
   | "increase"
   | "rebalance";
 export type JournalStatus =

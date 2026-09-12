@@ -165,7 +165,7 @@ pub struct PoolStats {
     /// yang isinya kira kira 360, karena likuiditas berubah di setiap tick yang
     /// terinisialisasi dan satu titik tidak mewakili seluruhnya.
     pub tvl: Option<f64>,
-    /// Proyeksi fee setahun terhadap modal acuan, dalam persen.
+    /// Proyeksi fee marginal setahun terhadap TVL aktif, dalam persen.
     ///
     /// `None` untuk fee dinamis, yang besarannya baru diketahui saat swap
     /// terjadi, dan untuk pool yang kedalamannya tidak terbaca.
@@ -862,20 +862,7 @@ pub async fn muat_token<P: Provider>(
     // ternyata memakai 6.
     let dikenal = kenali_lawan_asing(provider, registry, token, &semua).await;
 
-    let mut quotes = kelompokkan(semua, token, registry, &dikenal);
-
-    // Angka pembanding diukur untuk kelompok kutipan teratas saja. Kelompok
-    // lain jarang dibuka, dan mengukur semuanya berarti satu permintaan log
-    // tambahan per kelompok pada jalur yang harus terasa seketika.
-    //
-    // Tahap cepat dilewati sama sekali. Ia ada supaya panel punya sesuatu
-    // untuk ditampilkan dalam beberapa ratus milidetik, dan menambahkan
-    // pemindaian log di sana menghapus alasan keberadaannya.
-    if mode == ModePencarian::Penuh {
-        if let (Some(m), Some(k)) = (meta.as_ref(), quotes.first_mut()) {
-            ukur_stats(provider, registry, m, k).await;
-        }
-    }
+    let quotes = kelompokkan(semua, token, registry, &dikenal);
 
     Ok(TokenSnapshot { meta, quotes })
 }
@@ -1006,7 +993,7 @@ pub async fn ukur_stats<P: Provider>(
             .then_some(())
             .and(tvl)
             .zip(volume)
-            .and_then(|(d, v)| kandidat::proyeksi_apr(v, pool.fee, d, jendela_detik));
+            .and_then(|(d, v)| kandidat::proyeksi_apr_pool(v, pool.fee, d, jendela_detik));
 
         pool.stats = Some(PoolStats {
             volume,
@@ -1015,6 +1002,82 @@ pub async fn ukur_stats<P: Provider>(
             apr,
         });
     }
+
+    urutkan_pool_terukur(&mut kelompok.pools);
+}
+
+/// Urutkan pool menurut APR marginal setelah statistik tersedia.
+///
+/// Likuiditas mentah tidak dapat dibandingkan sebagai hasil LP. Pool yang
+/// sangat dalam memang aman dari price impact, tetapi porsi fee modal baru
+/// juga lebih kecil. APR di sini sudah memasukkan volume, fee tier, dan TVL,
+/// sehingga ia ukuran yang lebih dekat dengan tujuan user daripada `fee x
+/// liquidity`. Pengenceran dari ukuran posisi aktual dihitung planner setelah
+/// user mengisi amount. Pool tanpa pengukuran tetap dipertahankan di bawah
+/// hasil yang berhasil diukur.
+pub fn urutkan_pool_terukur(pools: &mut [PoolInfo]) {
+    // APR pada pool yang nyaris kosong mudah terlihat sangat tinggi hanya
+    // karena penyebutnya kecil. Bandingkan APR sebagai kandidat utama setelah
+    // pool mempunyai sedikitnya satu persen volume dan TVL aktif terbesar di
+    // kelompok yang sama. Pool kecil tetap terlihat di daftar.
+    const AMBANG_KAPASITAS: f64 = 0.01;
+    let maksimum = |ambil: fn(&PoolStats) -> Option<f64>| {
+        pools
+            .iter()
+            .filter_map(|p| p.stats.as_ref().and_then(ambil))
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .fold(0.0_f64, f64::max)
+    };
+    let volume_maksimum = maksimum(|s| s.volume);
+    let tvl_maksimum = maksimum(|s| s.tvl);
+    let kapasitas_layak = |p: &PoolInfo| {
+        let Some(stats) = p.stats.as_ref() else {
+            return false;
+        };
+        let Some(apr) = stats.apr else { return false };
+        let Some(volume) = stats.volume else {
+            return false;
+        };
+        let Some(tvl) = stats.tvl else { return false };
+        apr.is_finite()
+            && volume.is_finite()
+            && tvl.is_finite()
+            && volume >= volume_maksimum * AMBANG_KAPASITAS
+            && tvl >= tvl_maksimum * AMBANG_KAPASITAS
+    };
+
+    pools.sort_by(|a, b| {
+        let apr_a = a.stats.as_ref().and_then(|s| s.apr);
+        let apr_b = b.stats.as_ref().and_then(|s| s.apr);
+        kapasitas_layak(b)
+            .cmp(&kapasitas_layak(a))
+            .then_with(|| apr_b.is_some().cmp(&apr_a.is_some()))
+            .then_with(|| {
+                apr_b
+                    .unwrap_or(f64::NEG_INFINITY)
+                    .partial_cmp(&apr_a.unwrap_or(f64::NEG_INFINITY))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| {
+                let volume = |p: &PoolInfo| {
+                    p.stats
+                        .as_ref()
+                        .and_then(|s| s.volume)
+                        .unwrap_or(f64::NEG_INFINITY)
+                };
+                volume(b)
+                    .partial_cmp(&volume(a))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| {
+                let kasar = |p: &PoolInfo| {
+                    p.liquidity.parse::<f64>().unwrap_or(0.0) * ranking_fee(p) as f64
+                };
+                kasar(b)
+                    .partial_cmp(&kasar(a))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
 }
 
 /// Baca simbol dan desimal token lawan yang belum dikenal registry.
@@ -1789,9 +1852,9 @@ pub async fn discover_all<P: Provider>(
 /// pool yang benar benar likuid melaporkan 2,63e3. Selisihnya 37 kali lipat.
 ///
 /// PEMERINGKATAN
-/// Untuk sekarang urutannya memakai `fee x likuiditas` sebagai pendekatan
-/// kasar. Peringkat yang sebenarnya, yaitu proyeksi fee per dolar modal seperti
-/// di PRD 11.5, butuh data volume dari gmgn dan baru dipasang di fase 6.
+/// Urutan awal memakai `fee x likuiditas` agar panel segera punya pilihan saat
+/// discovery selesai. Pengukuran volume 24 jam dan TVL aktif kemudian mengganti
+/// urutan ini dengan APR marginal lewat `urutkan_pool_terukur`.
 pub fn usable_pools(mut pools: Vec<PoolInfo>) -> Vec<PoolInfo> {
     pools.retain(|p| {
         let likuid = p.liquidity.parse::<u128>().unwrap_or(0) > 0;
@@ -1984,6 +2047,52 @@ mod tests {
         ];
         let hasil = usable_pools(pools);
         assert_eq!(hasil[0].id, "mahal");
+    }
+
+    #[test]
+    fn statistik_24_jam_menggantikan_peringkat_kasar() {
+        let mut besar_tapi_sepi = pool("besar", 10_000, "1000000", 1.0);
+        besar_tapi_sepi.stats = Some(PoolStats {
+            volume: Some(1.0),
+            jendela_menit: Some(1_440.0),
+            tvl: Some(1_000.0),
+            apr: Some(2.0),
+        });
+        let mut kecil_tapi_menghasilkan = pool("menghasilkan", 3_000, "1000", 1.0);
+        kecil_tapi_menghasilkan.stats = Some(PoolStats {
+            volume: Some(100.0),
+            jendela_menit: Some(1_440.0),
+            tvl: Some(100.0),
+            apr: Some(40.0),
+        });
+        let mut pools = vec![besar_tapi_sepi, kecil_tapi_menghasilkan];
+
+        urutkan_pool_terukur(&mut pools);
+
+        assert_eq!(pools[0].id, "menghasilkan");
+    }
+
+    #[test]
+    fn apr_pool_yang_nyaris_kosong_tidak_menjadi_rekomendasi() {
+        let mut pasar = pool("pasar", 10_000, "1000000", 1.0);
+        pasar.stats = Some(PoolStats {
+            volume: Some(100.0),
+            jendela_menit: Some(1_440.0),
+            tvl: Some(100.0),
+            apr: Some(1_000.0),
+        });
+        let mut tipis = pool("tipis", 96_500, "1000", 1.0);
+        tipis.stats = Some(PoolStats {
+            volume: Some(0.01),
+            jendela_menit: Some(1_440.0),
+            tvl: Some(0.01),
+            apr: Some(10_000.0),
+        });
+        let mut pools = vec![tipis, pasar];
+
+        urutkan_pool_terukur(&mut pools);
+
+        assert_eq!(pools[0].id, "pasar");
     }
 
     #[test]

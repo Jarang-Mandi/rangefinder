@@ -161,6 +161,78 @@ where
     }
 }
 
+/// Baca seluruh jendela mundur dengan memecahnya menjadi beberapa potongan.
+///
+/// Berbeda dari `baca_mundur`, fungsi ini tidak mengorbankan panjang jendela
+/// ketika satu jawaban memuat terlalu banyak log. Potongannya yang diperkecil,
+/// lalu pembacaan diteruskan sampai batas bawah semula. Ini diperlukan untuk
+/// statistik 24 jam: mengambil satu jam terakhir lalu menamainya satu hari
+/// akan menghasilkan angka yang terlihat sah tetapi salah.
+pub async fn baca_mundur_lengkap<P, F>(
+    provider: &P,
+    sampai: u64,
+    lantai: u64,
+    jendela_total: u64,
+    potongan_awal: u64,
+    potongan_minimum: u64,
+    bangun: F,
+) -> Result<LogTerjendela>
+where
+    P: Provider,
+    F: Fn(u64, u64) -> Filter,
+{
+    let target = sampai.saturating_sub(jendela_total).max(lantai);
+    let mut ujung = sampai;
+    let mut ukuran = potongan_awal.max(1).min(jendela_total.max(1));
+    let minimum = potongan_minimum.max(1).min(ukuran);
+    let mut logs = Vec::new();
+    let mut dipersempit = false;
+
+    'bagian: loop {
+        let mut sabar = SABAR_MAKSIMUM;
+        loop {
+            let awal = ujung.saturating_sub(ukuran.saturating_sub(1)).max(target);
+            match provider.get_logs(&bangun(awal, ujung)).await {
+                Ok(mut hasil) => {
+                    logs.append(&mut hasil);
+                    if awal == target {
+                        break 'bagian;
+                    }
+                    ujung = awal - 1;
+                    continue 'bagian;
+                }
+                Err(e) if lebar_dibatasi(&e) => {
+                    return Err(anyhow::Error::new(e).context(format!(
+                        "endpoint RPC ini membatasi lebar rentang eth_getLogs. \
+                         Gagal pada blok {awal} sampai {ujung}"
+                    )))
+                }
+                Err(e) if ukuran > minimum && terlalu_banyak(&e) => {
+                    ukuran = (ukuran / 2).max(minimum);
+                    dipersempit = true;
+                    tokio::time::sleep(Duration::from_millis(JEDA_PERSEMPIT_MS)).await;
+                }
+                Err(e) if sabar > 0 && dibatasi_laju(&e) => {
+                    sabar -= 1;
+                    tokio::time::sleep(Duration::from_millis(JEDA_DIBATASI_MS)).await;
+                }
+                Err(e) => {
+                    return Err(anyhow::Error::new(e).context(format!(
+                        "pembacaan log gagal pada blok {awal} sampai {ujung}"
+                    )))
+                }
+            }
+        }
+    }
+
+    Ok(LogTerjendela {
+        logs,
+        dari_blok: target,
+        sampai_blok: sampai,
+        dipersempit,
+    })
+}
+
 /// Baca log pada rentang tetap, tanpa mempersempit.
 ///
 /// Dipakai saat rentangnya sudah ditentukan pemanggil dan tidak boleh berubah,
@@ -250,5 +322,25 @@ mod tests {
             jendela = (jendela / 2).max(minimum);
         }
         assert_eq!(jendela, minimum);
+    }
+
+    #[tokio::test]
+    async fn pembacaan_lengkap_meneruskan_semua_potongan() {
+        let rpc = alloy::transports::mock::Asserter::new();
+        rpc.push_success(&Vec::<Log>::new());
+        rpc.push_success(&Vec::<Log>::new());
+        let provider = alloy::providers::ProviderBuilder::new().connect_mocked_client(rpc.clone());
+
+        let hasil = baca_mundur_lengkap(&provider, 1_000, 0, 199, 100, 25, |dari, sampai| {
+            Filter::new().from_block(dari).to_block(sampai)
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(hasil.dari_blok, 801);
+        assert_eq!(hasil.sampai_blok, 1_000);
+        assert!(hasil.logs.is_empty());
+        assert!(!hasil.dipersempit);
+        assert!(rpc.read_q().is_empty(), "dua potongan harus dibaca semua");
     }
 }

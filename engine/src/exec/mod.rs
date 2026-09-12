@@ -11,6 +11,7 @@ pub mod abi_write;
 pub mod aksi;
 pub mod approve;
 pub mod calldata;
+pub mod exit;
 pub mod golden;
 pub mod journal;
 pub mod limits;

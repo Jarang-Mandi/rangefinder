@@ -220,13 +220,18 @@ export function App() {
         // state yang basi selamanya kalau membacanya langsung.
         const alamatBaru = (t.address ?? "").toLowerCase();
         const tokenBerganti = alamatBaru !== alamatTerakhirRef.current;
+        const poolBerganti = Boolean(
+          selectedPoolRef.current &&
+          t.selected_pool_id &&
+          selectedPoolRef.current !== t.selected_pool_id,
+        );
         alamatTerakhirRef.current = alamatBaru;
         selectedPoolRef.current = t.selected_pool_id ?? "";
 
         setTokenState(t);
         setTokenLoading(false);
 
-        if (tokenBerganti) {
+        if (tokenBerganti || poolBerganti) {
           setRangeView(null);
           setDepth(null);
           // Rencana lama milik token lama. Membiarkannya berarti menawarkan
@@ -1043,10 +1048,6 @@ function TokenCard({
   onSelectPool: (poolId: string) => void;
   onSelectQuote: (quote: string) => void;
 }) {
-  const jendelaMenit =
-    token.pools.find((p) => p.stats?.jendela_menit != null)?.stats?.jendela_menit ??
-    null;
-
   // Pool aktif ditentukan engine, bukan panel, supaya tidak ada dua sumber
   // kebenaran. Selama tampilan range belum datang, pilihan awal dari
   // token_state yang dipakai.
@@ -1084,15 +1085,6 @@ function TokenCard({
           <h2>Pool</h2>
           <span class="chip">{token.pools.length} layak</span>
         </div>
-
-        {/* Jendela disebut supaya angka nol terbaca sebagai tidak ada
-            perdagangan, bukan sebagai data yang belum sampai. Keduanya
-            terlihat sama persis di layar tanpa keterangan ini. */}
-        {jendelaMenit !== null ? (
-          <p class="hint" style="margin: var(--s2) 0 0">
-            APR dan volume atas {jendelaMenit.toFixed(0)} menit terakhir.
-          </p>
-        ) : null}
 
         <QuotePicker
           quotes={token.quotes}
@@ -1835,8 +1827,9 @@ function PnlHero({ value, symbol, estimated }: { value: number | null; symbol: s
   const tone = value == null ? "" : value >= 0 ? "naik" : "turun";
   return (
     <div class={`pnl-hero ${tone}`}>
-      <strong class="num">{value == null ? "—" : angka(value)}</strong>
-      <small>PnL bersih · {symbol}{estimated ? " · perkiraan" : ""}</small>
+      <strong class="num">
+        {value == null ? "—" : `${estimated ? "≈ " : ""}${angka(value)} ${symbol}`}
+      </strong>
     </div>
   );
 }
@@ -2736,12 +2729,19 @@ function PoolRow({
           {s?.tvl != null ? formatCompact(s.tvl) : "-"}
         </span>
         <span>
-          <i>vol</i>
+          <i>{labelJendelaVolume(s?.jendela_menit ?? null)}</i>
           {s?.volume == null ? "-" : formatCompact(s.volume)}
         </span>
       </span>
     </button>
   );
+}
+
+function labelJendelaVolume(menit: number | null): string {
+  if (menit === null || !Number.isFinite(menit) || menit <= 0) return "vol";
+  if (menit >= 1_440) return `vol ${Math.round(menit / 1_440)}D`;
+  if (menit >= 60) return `vol ${Math.round(menit / 60)}j`;
+  return `vol ${Math.round(menit)}m`;
 }
 
 /** Preset lebar range, dalam persen ke tiap arah. */
