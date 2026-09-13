@@ -708,8 +708,9 @@ pub struct TokenSnapshot {
 /// Pada mode `CacheSaja` fungsi ini tidak menyentuh log sama sekali, sehingga
 /// seluruh pemuatan ulang sebuah token yang pernah dibuka berbiaya satu
 /// permintaan.
-pub async fn muat_token<P: Provider>(
-    provider: &P,
+pub async fn muat_token<L: Provider, S: Provider>(
+    provider_logs: &L,
+    provider_state: &S,
     registry: &Registry,
     store: Option<&crate::store::Store>,
     token: Address,
@@ -726,7 +727,7 @@ pub async fn muat_token<P: Provider>(
         ModePencarian::CacheSaja => store
             .map(|s| cache::baca(s, &alamat_token).keys)
             .unwrap_or_default(),
-        ModePencarian::Penuh => pindai_dan_gabung(provider, registry, store, token).await?,
+        ModePencarian::Penuh => pindai_dan_gabung(provider_logs, registry, store, token).await?,
     };
 
     let quotes: Vec<Address> = registry
@@ -804,7 +805,7 @@ pub async fn muat_token<P: Provider>(
     }
 
     let jam = std::time::Instant::now();
-    let hasil = crate::chain::multicall::batch_call(provider, multicall, calls).await?;
+    let hasil = crate::chain::multicall::batch_call(provider_state, multicall, calls).await?;
     tracing::debug!(
         ms = jam.elapsed().as_millis(),
         panggilan = hasil.len(),
@@ -854,7 +855,7 @@ pub async fn muat_token<P: Provider>(
     // Permintaan kedua hanya kalau ada yang perlu dibaca. Pada rantai ini V3
     // umumnya kosong, jadi biaya ini biasanya nol.
     if !v3_ada.is_empty() {
-        match hydrate_v3(provider, multicall, v3_ada).await {
+        match hydrate_v3(provider_state, multicall, v3_ada).await {
             Ok(mut v) => semua.append(&mut v),
             Err(e) => tracing::warn!(error = %e, "pembacaan pool V3 gagal"),
         }
@@ -865,7 +866,7 @@ pub async fn muat_token<P: Provider>(
     // berbeda, dan menganggap semuanya berdesimal 18 akan menampilkan harga
     // yang meleset sepuluh pangkat selisihnya untuk setiap pasangan yang
     // ternyata memakai 6.
-    let dikenal = kenali_lawan_asing(provider, registry, token, &semua).await;
+    let dikenal = kenali_lawan_asing(provider_state, registry, token, &semua).await;
 
     let quotes = kelompokkan(semua, token, registry, &dikenal);
 
@@ -877,12 +878,60 @@ pub async fn muat_token<P: Provider>(
 /// Kegagalan tidak menggagalkan pemuatan token: `stats` tetap `None`, dan panel
 /// menampilkan garis alih alih angka. Angka nol akan terbaca sebagai pool yang
 /// sepi, kesimpulan yang sangat berbeda dari tidak bisa diukur.
-pub async fn ukur_stats<P: Provider>(
-    provider: &P,
+pub async fn ukur_stats<L: Provider, S: Provider>(
+    provider_logs: &L,
+    provider_state: &S,
     registry: &Registry,
     meta: &TokenMeta,
     kelompok: &mut QuoteGroup,
     tugas_latar: Option<&crate::chain::logs::TugasLatar>,
+) {
+    ukur_stats_dengan_jendela(
+        provider_logs,
+        provider_state,
+        registry,
+        meta,
+        kelompok,
+        tugas_latar,
+        false,
+    )
+    .await;
+}
+
+/// Isi statistik tiga jam untuk snapshot pertama.
+///
+/// Volume memakai satu permintaan log besar, sedangkan TVL dibaca dari RPC
+/// interaktif secara terpisah. Setelah hasil ini tampil, `ukur_stats` tetap
+/// memperbaruinya dengan jendela 24 jam di belakang layar.
+pub async fn ukur_stats_cepat<L: Provider, S: Provider>(
+    provider_logs: &L,
+    provider_state: &S,
+    registry: &Registry,
+    meta: &TokenMeta,
+    kelompok: &mut QuoteGroup,
+    tugas_latar: Option<&crate::chain::logs::TugasLatar>,
+) {
+    ukur_stats_dengan_jendela(
+        provider_logs,
+        provider_state,
+        registry,
+        meta,
+        kelompok,
+        tugas_latar,
+        true,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn ukur_stats_dengan_jendela<L: Provider, S: Provider>(
+    provider_logs: &L,
+    provider_state: &S,
+    registry: &Registry,
+    meta: &TokenMeta,
+    kelompok: &mut QuoteGroup,
+    tugas_latar: Option<&crate::chain::logs::TugasLatar>,
+    cepat: bool,
 ) {
     use crate::pools::kandidat;
 
@@ -893,53 +942,19 @@ pub async fn ukur_stats<P: Provider>(
     // Volume diukur per protokol, karena sumbernya berbeda: V4 memancarkan
     // Swap dari PoolManager dengan poolId sebagai topic, V3 dari kontrak pool
     // masing masing tanpa pengenal apa pun selain alamat log.
-    let (v4, v3): (Vec<&PoolInfo>, Vec<&PoolInfo>) = kelompok
+    let ids_v4: Vec<String> = kelompok
         .pools
         .iter()
-        .partition(|p| p.version == PoolVersion::V4);
+        .filter(|p| p.version == PoolVersion::V4)
+        .map(|p| p.id.clone())
+        .collect();
+    let alamat_v3: Vec<String> = kelompok
+        .pools
+        .iter()
+        .filter(|p| p.version == PoolVersion::V3)
+        .map(|p| p.id.clone())
+        .collect();
 
-    let mut per_pool: std::collections::HashMap<String, u128> = Default::default();
-    let mut per_pool1: std::collections::HashMap<String, u128> = Default::default();
-    let mut durasi: std::collections::HashMap<String, f64> = Default::default();
-
-    if !v4.is_empty() {
-        let ids: Vec<String> = v4.iter().map(|p| p.id.clone()).collect();
-        match volume::ukur_volume(provider, registry, &ids, tugas_latar).await {
-            Ok(v) => {
-                let j = v.jendela_detik(registry.chain.block_time_ms);
-                durasi.extend(v.per_pool.keys().map(|id| (id.clone(), j)));
-                per_pool.extend(v.per_pool);
-                per_pool1.extend(v.per_pool1);
-            }
-            Err(e) if crate::chain::logs::latar_dibatalkan(&e) => {
-                tracing::debug!("pengukuran statistik V4 lama dibatalkan");
-                return;
-            }
-            Err(e) => tracing::warn!(error = %format!("{e:#}"), "volume V4 gagal diukur"),
-        }
-    }
-
-    if !v3.is_empty() {
-        let alamat: Vec<String> = v3.iter().map(|p| p.id.clone()).collect();
-        match volume::ukur_volume_v3(provider, registry, &alamat, tugas_latar).await {
-            Ok(v) => {
-                // Setiap volume mempertahankan jendela aslinya. Memendekkan
-                // penyebut tanpa memangkas event akan membesarkan APR.
-                let j = v.jendela_detik(registry.chain.block_time_ms);
-                durasi.extend(v.per_pool.keys().map(|id| (id.clone(), j)));
-                per_pool.extend(v.per_pool);
-                per_pool1.extend(v.per_pool1);
-            }
-            Err(e) if crate::chain::logs::latar_dibatalkan(&e) => {
-                tracing::debug!("pengukuran statistik V3 lama dibatalkan");
-                return;
-            }
-            Err(e) => tracing::warn!(error = %format!("{e:#}"), "volume V3 gagal diukur"),
-        }
-    }
-    if tugas_latar.is_some_and(|tugas| !tugas.aktif()) {
-        return;
-    }
     let skala_meme = 10f64.powi(meta.decimals as i32);
     let skala_quote = 10f64.powi(kelompok.quote_decimals as i32);
     // TVL sebenarnya, dijumlahkan dari distribusi seluruh pool sekaligus.
@@ -978,10 +993,137 @@ pub async fn ukur_stats<P: Provider>(
         })
         .collect();
 
-    let tvl_pool = match registry.contract("common", "multicall3") {
-        Ok(mc) => distribusi::tvl_beberapa(provider, mc, &daftar).await,
-        Err(_) => Default::default(),
+    // Volume dan TVL tidak saling bergantung dan memakai endpoint yang berbeda.
+    // Menjalankannya berurutan pernah membuat snapshot cepat tiga jam nyaris
+    // melewati sasaran tujuh detik meski kedua RPC sehat.
+    // Tinggi blok dibaca dari RPC interaktif agar RPC log hanya menerima satu
+    // permintaan berat. Sepuluh blok terakhir dilewati karena node publik bisa
+    // tertinggal sesaat dari endpoint interaktif.
+    let sampai_blok = provider_state
+        .get_block_number()
+        .await
+        .ok()
+        .map(|blok| blok.saturating_sub(10));
+    let volume_future = async {
+        let mulai = std::time::Instant::now();
+        let mut per_pool: std::collections::HashMap<String, u128> = Default::default();
+        let mut per_pool1: std::collections::HashMap<String, u128> = Default::default();
+        let mut durasi: std::collections::HashMap<String, f64> = Default::default();
+
+        if !ids_v4.is_empty() {
+            let hasil = match (cepat, sampai_blok) {
+                (true, Some(blok)) => {
+                    volume::ukur_volume_cepat_pada(
+                        provider_logs,
+                        registry,
+                        &ids_v4,
+                        tugas_latar,
+                        blok,
+                    )
+                    .await
+                }
+                (false, Some(blok)) => {
+                    volume::ukur_volume_pada(provider_logs, registry, &ids_v4, tugas_latar, blok)
+                        .await
+                }
+                (true, None) => {
+                    volume::ukur_volume_cepat(provider_logs, registry, &ids_v4, tugas_latar).await
+                }
+                (false, None) => {
+                    volume::ukur_volume(provider_logs, registry, &ids_v4, tugas_latar).await
+                }
+            };
+            match hasil {
+                Ok(v) => {
+                    let j = v.jendela_detik(registry.chain.block_time_ms);
+                    durasi.extend(v.per_pool.keys().map(|id| (id.clone(), j)));
+                    per_pool.extend(v.per_pool);
+                    per_pool1.extend(v.per_pool1);
+                }
+                Err(e) if crate::chain::logs::latar_dibatalkan(&e) => {
+                    tracing::debug!("pengukuran statistik V4 lama dibatalkan");
+                    return None;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %format!("{e:#}"), "volume V4 gagal diukur")
+                }
+            }
+        }
+
+        if !alamat_v3.is_empty() {
+            let hasil = match (cepat, sampai_blok) {
+                (true, Some(blok)) => {
+                    volume::ukur_volume_v3_cepat_pada(
+                        provider_logs,
+                        registry,
+                        &alamat_v3,
+                        tugas_latar,
+                        blok,
+                    )
+                    .await
+                }
+                (false, Some(blok)) => {
+                    volume::ukur_volume_v3_pada(
+                        provider_logs,
+                        registry,
+                        &alamat_v3,
+                        tugas_latar,
+                        blok,
+                    )
+                    .await
+                }
+                (true, None) => {
+                    volume::ukur_volume_v3_cepat(provider_logs, registry, &alamat_v3, tugas_latar)
+                        .await
+                }
+                (false, None) => {
+                    volume::ukur_volume_v3(provider_logs, registry, &alamat_v3, tugas_latar).await
+                }
+            };
+            match hasil {
+                Ok(v) => {
+                    // Setiap volume mempertahankan jendela aslinya.
+                    let j = v.jendela_detik(registry.chain.block_time_ms);
+                    durasi.extend(v.per_pool.keys().map(|id| (id.clone(), j)));
+                    per_pool.extend(v.per_pool);
+                    per_pool1.extend(v.per_pool1);
+                }
+                Err(e) if crate::chain::logs::latar_dibatalkan(&e) => {
+                    tracing::debug!("pengukuran statistik V3 lama dibatalkan");
+                    return None;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %format!("{e:#}"), "volume V3 gagal diukur")
+                }
+            }
+        }
+        tracing::info!(
+            cepat,
+            durasi_ms = mulai.elapsed().as_millis(),
+            "pengukuran volume pool selesai"
+        );
+        Some((per_pool, per_pool1, durasi))
     };
+    let tvl_future = async {
+        let mulai = std::time::Instant::now();
+        let hasil = match registry.contract("common", "multicall3") {
+            Ok(mc) => distribusi::tvl_beberapa(provider_state, mc, &daftar).await,
+            Err(_) => Default::default(),
+        };
+        tracing::info!(
+            cepat,
+            durasi_ms = mulai.elapsed().as_millis(),
+            "pengukuran TVL pool selesai"
+        );
+        hasil
+    };
+    let (volume, tvl_pool) = tokio::join!(volume_future, tvl_future);
+    let Some((per_pool, per_pool1, durasi)) = volume else {
+        return;
+    };
+    if tugas_latar.is_some_and(|tugas| !tugas.aktif()) {
+        return;
+    }
 
     for pool in &mut kelompok.pools {
         let kunci = pool.id.to_lowercase();

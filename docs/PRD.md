@@ -500,14 +500,18 @@ Konsekuensinya panel memuat dua tahap, dan `token_state` bisa datang dua kali:
 
 | Tahap | Yang dilakukan | Biaya |
 | --- | --- | --- |
-| 1 | Baca keadaan pool yang kuncinya sudah tersimpan. Tidak menyentuh log sama sekali | satu permintaan, sekitar 400 ms |
+| 1 | Baca keadaan pool yang kuncinya sudah tersimpan. Tidak menyentuh log sama sekali | satu batch state dari RPC interaktif |
 | 2 | Pindai blok yang belum pernah dilihat, gabungkan, baca ulang | dua sampai tiga permintaan |
 
 Kiriman kedua hanya terjadi kalau kumpulan poolnya benar benar berubah. Panel yang menerima dua kiriman identik akan menggambar ulang garis chart tanpa alasan, dan itu terlihat seperti kedipan.
 
-Token yang belum pernah dibuka tidak punya tahap satu, dan itu memang tidak bisa dihindari: pool V4 hanya bisa ditemukan lewat log, dan log harus dipindai sekali.
+Token yang belum pernah dibuka tidak punya tahap satu, dan itu memang tidak bisa dihindari: pool V4 hanya bisa ditemukan lewat log, dan log harus dipindai sekali. Panel tetap menahan daftar parsial sampai statistik awal seluruh pool siap.
 
-**Permintaan interaktif mendapat giliran lebih dulu.** Statistik volume 24 jam
+**Permintaan interaktif memakai RPC tersendiri.** `rpc.http` melayani state,
+saldo, rencana, simulasi, dan transaksi, sedangkan `rpc.logs_http` melayani
+discovery serta volume. Pemisahan ini diperlukan karena endpoint yang menjawab
+`eth_call` paling cepat dapat membatasi `eth_getLogs` sampai rentangnya tidak
+berguna. Statistik volume 24 jam
 berjalan di latar dan memeriksa penanda prioritas sebelum membaca setiap
 potongan log. Saat user meminta rencana posisi atau menjalankan transaksi,
 potongan yang sedang berjalan diselesaikan, lalu pemindaian menunggu sampai
@@ -521,14 +525,24 @@ endpoint publik terbukti membalas 429 ketika dua pemindaian berat berjalan
 bersamaan. Subscribe baru juga membatalkan task discovery token lama, bukan
 hanya membuang hasil akhirnya.
 
-**APR, TVL, dan volume memakai cache singkat.** Snapshot statistik 24 jam
-disimpan di redb menurut token dan pairing, lalu diterapkan per ID pool. Pool
-yang masih ada langsung menerima statistiknya meskipun satu pool baru muncul
-atau pool lama hilang. Pool baru memicu penyegaran. Cache berumur paling banyak
-lima menit langsung dipakai. Cache berumur lima menit sampai satu jam tetap
-ditampilkan sambil disegarkan di latar. Hasil yang lebih lama atau hasil volume
-yang gagal tidak dipakai. Kegagalan TVL satu pool tidak membuang volume valid
-milik pool lain.
+**APR, TVL, dan volume memakai dua jendela serta cache singkat.** Jika cache
+belum lengkap, 108.000 blok menghasilkan snapshot awal sekitar tiga jam.
+Daftar pool baru ditampilkan setelah volume dan jendela seluruh pool
+siap, sehingga kolom tidak terisi satu per satu. Target jalur normalnya paling
+lama tujuh detik. Pengukuran 24 jam meneruskan pekerjaan di belakang layar lalu
+mengganti snapshot awal. Keduanya disimpan di redb menurut token dan pairing,
+tetapi snapshot tiga jam tetap berstatus perlu penyegaran sampai hasil 24 jam
+tersedia. Cache berumur paling banyak lima menit langsung dipakai. Cache berumur
+lima menit sampai satu jam tetap ditampilkan sambil disegarkan di latar. Hasil
+yang lebih lama atau hasil volume yang gagal tidak dipakai. Kegagalan TVL satu
+pool tidak membuang volume valid milik pool lain.
+
+Probe build release pada 13 September 2026 untuk token
+`0xba527c23903eff094a987197ccd643f2da76e4ff` menghasilkan snapshot cache dingin
+yang utuh pada 4,703 detik. Saldo sudah tiba pada 0,321 detik. Setelah cache 24
+jam tersedia, pembukaan ulang menampilkan seluruh statistik pada 0,228 detik
+dan saldo pada 0,349 detik. Pengukuran ini memakai endpoint sehat dan menjadi
+bukti untuk sasaran tujuh detik, bukan jaminan saat RPC log tidak tersedia.
 
 **Yang tidak pernah di-cache adalah harga dan likuiditas.** Keduanya selalu dibaca ulang dari rantai. Pada alat yang mengirim transaksi, angka basi yang terlihat sah jauh lebih berbahaya daripada menunggu sebentar.
 
@@ -1484,9 +1498,11 @@ poolnya sering sama persis dengan tahap penuh. Sebelum ini keduanya dianggap
 identik, kiriman kedua ditahan, dan APR, TVL, serta volume tidak pernah sampai
 ke panel meski sudah terhitung.
 
-**Pool token dibandingkan dengan periode yang sama seperti halaman token
-Uniswap.** Volume dan APR pool memakai 24 jam bergulir, bukan satu jam. Setelah
-semua statistik tersedia, urutan pool memakai APR marginal yang dihitung dari
+**Pool token akhirnya dibandingkan dengan periode yang sama seperti halaman
+token Uniswap.** Snapshot awal memakai sekitar tiga jam agar daftar siap dalam
+tujuh detik, lalu volume dan APR pool diganti dengan 24 jam bergulir. Label
+volume selalu membawa jendela yang benar. Setelah statistik tersedia, urutan
+pool memakai APR marginal yang dihitung dari
 volume, fee tier, dan TVL. Ukuran setoran aktual beserta pengencerannya dihitung
 lagi oleh planner setelah user mengisi amount. Peringkat ini membantu memilih
 pool relatif terhadap pool lain dan tidak menjamin posisi akan untung, karena
@@ -1517,8 +1533,9 @@ gas, gate, dan penyusunan ulang rencana dikerjakan engine di belakang layar.
 
 Saldo wallet ikut di `token_state`. `None` berarti wallet belum dibuka, bukan
 saldo nol: yang pertama menuntun ke membuka wallet, yang kedua ke membeli
-tokennya dulu. Saat user berpindah pasangan, engine mengirim saldo segera
-setelah pembacaan RPC selesai dan baru mengukur statistik pool sesudahnya.
+tokennya dulu. Saat user berpindah pasangan, saldo dan statistik awal dimulai
+bersamaan pada RPC yang berbeda. Panel menampilkan keduanya sebagai snapshot
+pool utuh setelah statistik siap.
 Saldo native dan batch ERC20 dibaca bersamaan. Pada pasangan ETH asli, saldo
 yang sama dipakai juga sebagai saldo gas supaya tidak ada pembacaan RPC kedua.
 Discovery penuh menunggu pembacaan saldo cache selesai, lalu dibatalkan jika
@@ -1647,7 +1664,7 @@ Engine ke panel:
 | `scan_results` | `{ rows[], hooks[], adopsi_lengkap, jendelaPindaiMenit, jendelaVolumeMenit, volumeJendelaPendek, modalAcuan, totalSwap, dipindaiPada, error }`. Setiap baris membawa simbol, pasangan, market cap, volume, kedalaman, hasil jendela, APR, efisiensi, umur, risiko, label, dan alasan. `hooks[]` membawa code_hash, jumlah pool, umur, TVL USD, LP unik aktif, lima status kriteria, serta lolos_otomatis. `adopsi_lengkap` benar setelah sejarah Initialize dan ModifyLiquidity selesai | 6 |
 | `signals` | `{ address, barTerpakai, harga, sideways, basis, saran, konsentrasiDibandingLebar, dihitungPada }`. `sideways` dan `basis` kosong berarti datanya belum cukup, BUKAN berarti kondisinya tidak menarik | 6 |
 | `action_plan` | `{ plan_id, position_id, request_id, token_id, action, nama, gates[], gas_estimate, dry_run, menutup, siap, expires_at, fee0, fee1, allowances[], amounts, tick_lower_baru, tick_upper_baru }`. Tambah dan rebalance memakai R1; tambah modal baru juga memakai R2. Panel memakai hasilnya untuk mengaktifkan satu tombol, sedangkan gate, simulasi, dan approval tetap berada di alur engine | 5 |
-| `token_state` | `{ address, meta, quotes[], pools[], selectedQuote, selectedPoolId, saldo, error }`. `saldo` memuat saldo wallet untuk kedua sisi pasangan terpilih beserta saldo token gas, dan bernilai kosong kalau wallet belum dibuka, yang berbeda dari saldo nol. Setiap pool membawa `stats` berisi volume 24 jam, TVL, dan proyeksi APR kalau sudah terukur. Setiap `quote` membawa `{ quote, quoteSymbol, quoteDecimals, canonical, pools[] }`. Keadaan pool dan statistik cache dikirim lebih dulu, saldo menyusul segera setelah RPC saldo menjawab, lalu penyegaran statistik berjalan di latar tanpa menahan input setoran. Lihat 4.3c | 2 |
+| `token_state` | `{ address, meta, quotes[], pools[], selectedQuote, selectedPoolId, saldo, error }`. `saldo` memuat saldo wallet untuk kedua sisi pasangan terpilih beserta saldo token gas, dan bernilai kosong kalau wallet belum dibuka, yang berbeda dari saldo nol. Setiap pool membawa `stats` berisi volume beserta jendelanya, TVL, dan proyeksi APR kalau sudah terukur. Setiap `quote` membawa `{ quote, quoteSymbol, quoteDecimals, canonical, pools[] }`. Panel menahan snapshot parsial. Snapshot pertama yang terlihat memakai cache atau pengukuran sekitar tiga jam, lalu pengukuran 24 jam menggantikannya di latar. Lihat 4.3c | 2 |
 | `range_view` | `{ poolId, tickSpacing, ethUsd, current, lower, upper, widthPct, inRange, warnings[] }`. Tiap batas memuat `tick`, `priceWeth`, `priceUsd`, `mcapUsd`, dan `driftBps`, yaitu selisih akibat pembulatan ke grid tick | 2 |
 | `price_tick` | `{ address, priceUsd, priceWeth, mcapUsd }` | 2 |
 | `range_quote` | `{ quoteId, feeApr, expectedHoursInRange, ilBreakevenHours, crowdedLiquidityUsd, ourSharePct, amount0, amount1, swapNeeded, priceImpact, gasEstimate, warnings[] }` | 3 |
@@ -1986,10 +2003,10 @@ Kalau jam impas lebih panjang daripada ekspektasi waktu bertahan dari 11.2, posi
 
 Satu pair bisa punya pool di beberapa fee tier. Yang paling likuid belum tentu paling menguntungkan untuk LP. Engine menghitung `volume x fee_tier / likuiditas` untuk setiap pool yang ada, termasuk lintas V3 dan V4, lalu mengurutkan berdasarkan proyeksi fee per dolar modal. Pada memecoin, pool 1 persen sering mengalahkan pool 0,3 persen meski volumenya lebih kecil.
 
-Discovery menampilkan pilihan kasar lebih dulu agar panel tidak menunggu
-pemindaian log. Setelah statistik 24 jam selesai, pilihan aktif ikut berpindah
-ke pool ber-APR marginal tertinggi yang lolos ambang kapasitas selama user belum
-memilih pool lain.
+Discovery menyiapkan pilihan kasar di engine, lalu panel membukanya bersama
+snapshot statistik awal sekitar tiga jam. Setelah statistik 24 jam selesai,
+pilihan aktif dapat berpindah ke pool ber-APR marginal tertinggi yang lolos
+ambang kapasitas selama user belum memilih pool lain.
 
 Pemeringkatan ini berjalan **setelah** penyaringan fee di luar akal sehat pada 4.3b, bukan sebelumnya. Tanpa urutan itu, rumus `volume x fee_tier / likuiditas` justru memilih pool fee 80 persen yang volumenya nol.
 

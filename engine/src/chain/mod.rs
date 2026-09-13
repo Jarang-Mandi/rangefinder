@@ -142,6 +142,20 @@ impl ChainClient {
         Self::provider_for(&endpoint)
     }
 
+    /// Penyedia RPC untuk pemindaian log bersejarah.
+    ///
+    /// Jangan memakai endpoint ini untuk saldo atau rencana posisi. Endpoint
+    /// log sengaja boleh lebih lambat pada `eth_call` selama menerima rentang
+    /// `eth_getLogs` lebar yang dibutuhkan discovery dan volume.
+    pub async fn logs_provider(&self) -> Result<impl Provider> {
+        let endpoint = if let Some(endpoint) = self.cfg.logs_http.first() {
+            endpoint.clone()
+        } else {
+            self.current_endpoint().await
+        };
+        Self::provider_for(&endpoint)
+    }
+
     /// Bangun penyedia dengan percobaan ulang otomatis.
     ///
     /// RPC publik Robinhood Chain membatasi laju dan menjawab 429 pada

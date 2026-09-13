@@ -181,6 +181,16 @@ struct PenjagaStatistik {
     kunci: String,
 }
 
+/// Dua batas selesai yang dibutuhkan lookup utama.
+///
+/// Discovery inkremental boleh mulai setelah saldo dan snapshot statistik awal
+/// selesai. Kalau hanya menunggu saldo, discovery berat mengambil prioritas dan
+/// snapshot tiga jam justru tertahan di belakangnya.
+struct SusulanToken {
+    saldo: tokio::sync::oneshot::Receiver<()>,
+    statistik_awal: tokio::sync::oneshot::Receiver<()>,
+}
+
 impl Drop for PenjagaStatistik {
     fn drop(&mut self) {
         self.berjalan
@@ -451,14 +461,18 @@ impl AppState {
             let punya_isi = !cepat.pools.is_empty();
             let sidik_awal = sidik_pool(&cepat);
             if punya_isi {
+                let statistik_awal_siap = statistik_pool_siap(&cepat.pools);
                 let _ = state
                     .events
                     .send(protocol::ServerMessage::TokenState(Box::new(cepat)));
                 // Discovery penuh memakai pemindaian log berat. Tunggu baca
                 // saldo yang pendek selesai supaya input amount tidak berebut
                 // RPC dengannya.
-                let saldo_selesai = state.kirim_saldo_menyusul().await;
-                let _ = saldo_selesai.await;
+                let susulan = state.kirim_saldo_menyusul().await;
+                let _ = susulan.saldo.await;
+                if !statistik_awal_siap {
+                    let _ = susulan.statistik_awal.await;
+                }
             }
 
             let penuh = state
@@ -507,27 +521,47 @@ impl AppState {
             }
         };
 
-        let provider = match self.chain.provider().await {
-            Ok(p) => p,
-            Err(e) => {
-                out.error = Some(format!("RPC tidak bisa dipakai: {e}"));
-                return out;
-            }
-        };
-
         // Metadata token, pool V3, dan keadaan pool V4 dibaca dalam satu
         // permintaan. Pasangannya TIDAK ditebak: token bisa berpasangan dengan
         // stablecoin, ETH asli, atau apa pun. Menebak WETH pernah membuat kita
         // melaporkan nol pool padahal ada puluhan. Lihat pools::muat_token.
-        let snapshot = match crate::pools::muat_token(
-            &provider,
-            &self.registry,
-            Some(&self.store),
-            token,
-            mode,
-        )
-        .await
-        {
+        // Mode cache memakai RPC interaktif yang cepat untuk pembacaan state.
+        // Discovery penuh memakai RPC log karena ia perlu rentang sejarah
+        // lebar yang ditolak sebagian penyedia berbayar.
+        let snapshot_result = match mode {
+            crate::pools::ModePencarian::CacheSaja => match self.chain.provider().await {
+                Ok(provider) => {
+                    crate::pools::muat_token(
+                        &provider,
+                        &provider,
+                        &self.registry,
+                        Some(&self.store),
+                        token,
+                        mode,
+                    )
+                    .await
+                }
+                Err(e) => Err(e),
+            },
+            crate::pools::ModePencarian::Penuh => match self.chain.logs_provider().await {
+                Ok(provider_logs) => match self.chain.provider().await {
+                    Ok(provider_state) => {
+                        crate::pools::muat_token(
+                            &provider_logs,
+                            &provider_state,
+                            &self.registry,
+                            Some(&self.store),
+                            token,
+                            mode,
+                        )
+                        .await
+                    }
+                    Err(e) => Err(e),
+                },
+                Err(e) => Err(e),
+            },
+        };
+        let snapshot = match snapshot_result {
             Ok(s) => s,
             Err(e) => {
                 out.error = Some(format!("pencarian pool gagal: {e}"));
@@ -743,15 +777,20 @@ impl AppState {
     ///
     /// Kegagalannya tidak mengubah apa pun: panel tetap menampilkan keadaan
     /// yang sudah diterima, hanya tanpa angka.
-    async fn kirim_saldo_menyusul(&self) -> tokio::sync::oneshot::Receiver<()> {
+    async fn kirim_saldo_menyusul(&self) -> SusulanToken {
         // Setiap pemuatan ulang atau pergantian pasangan membatalkan statistik
         // lama. Tanpa tiket ini, pemindaian pairing awal tetap menghabiskan 24
         // jam log dan menahan pairing yang baru dipilih di belakangnya.
         let tugas_stats = self.jeda_latar.tugas_baru();
         let (saldo_selesai_tx, saldo_selesai_rx) = tokio::sync::oneshot::channel();
+        let (statistik_awal_tx, statistik_awal_rx) = tokio::sync::oneshot::channel();
         let s = self.clone();
         tokio::spawn(async move {
+            let mut statistik_awal_tx = Some(statistik_awal_tx);
             let Ok(provider) = s.chain.provider().await else {
+                return;
+            };
+            let Ok(provider_logs) = s.chain.logs_provider().await else {
                 return;
             };
 
@@ -782,7 +821,6 @@ impl AppState {
             // Saldo adalah angka yang langsung dibutuhkan kotak amount. Kirim
             // begitu RPC menjawab; pengukuran APR/TVL di bawah tidak boleh
             // menahannya beberapa detik.
-            let mut pool_berganti = false;
             {
                 let guard = s.active.read().await;
                 let Some(active) = guard.as_ref() else { return };
@@ -811,7 +849,7 @@ impl AppState {
             // yang teratas. Tanpa ini, setiap kali user berpindah pasangan,
             // kolom APR, TVL, dan volume kosong tanpa penjelasan.
             let mut kelompok = kelompok;
-            let perlu_stats = crate::pools::stats_cache::status(
+            let status_stats = crate::pools::stats_cache::status(
                 &s.store,
                 meta.as_ref()
                     .map(|m| m.address.as_str())
@@ -819,9 +857,17 @@ impl AppState {
                 &kelompok.quote,
                 &kelompok.pools,
                 chrono::Utc::now().timestamp(),
-            )
-            .perlu_penyegaran();
-            if !perlu_stats {
+            );
+            if matches!(
+                status_stats,
+                crate::pools::stats_cache::StatusCache::Segar
+                    | crate::pools::stats_cache::StatusCache::PerluPenyegaran
+            ) {
+                if let Some(selesai) = statistik_awal_tx.take() {
+                    let _ = selesai.send(());
+                }
+            }
+            if !status_stats.perlu_penyegaran() {
                 return;
             }
             let Some(meta_stats) = meta.as_ref() else {
@@ -843,105 +889,163 @@ impl AppState {
                 );
                 return;
             };
+            let mut pilihan_yang_diharapkan = pool_awal;
+
+            // Cache kosong memakai satu potongan tiga jam agar daftar pertama
+            // sudah mempunyai APR, TVL, dan volume dalam batas interaktif.
+            // Angka 24 jam tetap dihitung sesudahnya, tanpa menahan panel.
+            if matches!(
+                status_stats,
+                crate::pools::stats_cache::StatusCache::Kosong
+                    | crate::pools::stats_cache::StatusCache::Parsial
+            ) {
+                let mut cepat = kelompok.clone();
+                crate::pools::ukur_stats_cepat(
+                    &provider_logs,
+                    &provider,
+                    &s.registry,
+                    meta_stats,
+                    &mut cepat,
+                    Some(&tugas_stats),
+                )
+                .await;
+                if !tugas_stats.aktif() {
+                    return;
+                }
+                if statistik_pool_siap(&cepat.pools) {
+                    crate::pools::stats_cache::simpan(
+                        &s.store,
+                        &meta_stats.address,
+                        &cepat.quote,
+                        &cepat.pools,
+                        chrono::Utc::now().timestamp(),
+                    );
+                    let Some((pilihan, berganti)) = s
+                        .terapkan_dan_siarkan_stats(
+                            meta_stats,
+                            &cepat,
+                            &pilihan_yang_diharapkan,
+                            saldo.clone(),
+                        )
+                        .await
+                    else {
+                        return;
+                    };
+                    kelompok = cepat;
+                    pilihan_yang_diharapkan = pilihan;
+                    if berganti {
+                        s.broadcast_range_view().await;
+                    }
+                    if let Some(selesai) = statistik_awal_tx.take() {
+                        let _ = selesai.send(());
+                    }
+                }
+            }
+
+            let mut penuh = kelompok.clone();
             crate::pools::ukur_stats(
+                &provider_logs,
                 &provider,
                 &s.registry,
                 meta_stats,
-                &mut kelompok,
+                &mut penuh,
                 Some(&tugas_stats),
             )
             .await;
-            if !tugas_stats.aktif() {
+            if !tugas_stats.aktif() || !statistik_pool_siap(&penuh.pools) {
                 return;
             }
             crate::pools::stats_cache::simpan(
                 &s.store,
                 &meta_stats.address,
-                &kelompok.quote,
-                &kelompok.pools,
+                &penuh.quote,
+                &penuh.pools,
                 chrono::Utc::now().timestamp(),
             );
-
-            {
-                // Hasil pengukuran disimpan ke keadaan aktif supaya tidak
-                // diukur ulang setiap kali user bolak balik antar pasangan.
-                let mut guard = s.active.write().await;
-                if let Some(active) = guard.as_mut() {
-                    if !meta
-                        .as_ref()
-                        .is_some_and(|m| m.address.eq_ignore_ascii_case(&active.meta.address))
-                    {
-                        return;
-                    }
-                    let kelompok_masih_sama = active
-                        .quotes
-                        .iter()
-                        .find(|g| g.quote.eq_ignore_ascii_case(&kelompok.quote))
-                        .is_some_and(|g| {
-                            g.pools.len() == kelompok.pools.len()
-                                && g.pools
-                                    .iter()
-                                    .all(|a| kelompok.pools.iter().any(|b| a.id == b.id))
-                        });
-                    if !kelompok_masih_sama {
-                        return;
-                    }
-                    if !active.selected_quote.eq_ignore_ascii_case(&kelompok.quote) {
-                        return;
-                    }
-                    active.pools = kelompok.pools.clone();
-
-                    // Pilihan kasar pertama hanya menjaga panel segera punya
-                    // pool. Setelah angka 24 jam tersedia, pindahkan pilihan
-                    // ke APR marginal tertinggi yang punya kapasitas memadai,
-                    // selama user belum memilih pool lain ketika pengukuran
-                    // berjalan.
-                    if active.selected_pool_id == pool_awal {
-                        if let Some(terbaik) = kelompok.pools.first() {
-                            pool_berganti = active.selected_pool_id != terbaik.id;
-                            active.selected_pool_id = terbaik.id.clone();
-                        }
-                    }
-                    if let Some(g) = active
-                        .quotes
-                        .iter_mut()
-                        .find(|g| g.quote.eq_ignore_ascii_case(&kelompok.quote))
-                    {
-                        *g = kelompok.clone();
-                    }
-                }
-            }
-
-            let guard = s.active.read().await;
-            let Some(active) = guard.as_ref() else { return };
-            if !meta
-                .as_ref()
-                .is_some_and(|m| m.address.eq_ignore_ascii_case(&active.meta.address))
-                || !active.selected_quote.eq_ignore_ascii_case(&kelompok.quote)
-            {
+            let Some((_, berganti)) = s
+                .terapkan_dan_siarkan_stats(meta_stats, &penuh, &pilihan_yang_diharapkan, saldo)
+                .await
+            else {
                 return;
-            }
-            let _ = s.events.send(protocol::ServerMessage::TokenState(Box::new(
-                protocol::TokenState {
-                    address: active.meta.address.clone(),
-                    meta: Some(active.meta.clone()),
-                    quotes: active.quotes.clone(),
-                    pools: active.pools.clone(),
-                    selected_quote: Some(active.selected_quote.clone()),
-                    selected_pool_id: Some(active.selected_pool_id.clone()),
-                    saldo,
-                    error: None,
-                },
-            )));
-            drop(guard);
-
-            // TokenState harus tiba lebih dulu agar panel menerima range milik
-            // pool baru, bukan membuangnya sebagai jawaban pool lama.
-            if pool_berganti {
+            };
+            if berganti {
                 s.broadcast_range_view().await;
             }
+            if let Some(selesai) = statistik_awal_tx.take() {
+                let _ = selesai.send(());
+            }
         });
-        saldo_selesai_rx
+        SusulanToken {
+            saldo: saldo_selesai_rx,
+            statistik_awal: statistik_awal_rx,
+        }
+    }
+
+    /// Terapkan satu hasil statistik ke token aktif dan kirim snapshot utuh.
+    ///
+    /// Pilihan pool hanya ikut berubah bila user belum memilih pool lain sejak
+    /// pengukuran dimulai. Fungsi ini dipakai dua kali, untuk snapshot tiga jam
+    /// dan penggantinya yang mencakup 24 jam.
+    async fn terapkan_dan_siarkan_stats(
+        &self,
+        meta: &crate::pools::TokenMeta,
+        kelompok: &crate::pools::QuoteGroup,
+        pilihan_yang_diharapkan: &str,
+        saldo: Option<protocol::SaldoPasangan>,
+    ) -> Option<(String, bool)> {
+        let mut guard = self.active.write().await;
+        let active = guard.as_mut()?;
+        if !meta.address.eq_ignore_ascii_case(&active.meta.address)
+            || !active.selected_quote.eq_ignore_ascii_case(&kelompok.quote)
+        {
+            return None;
+        }
+        let kelompok_masih_sama = active
+            .quotes
+            .iter()
+            .find(|g| g.quote.eq_ignore_ascii_case(&kelompok.quote))
+            .is_some_and(|g| {
+                g.pools.len() == kelompok.pools.len()
+                    && g.pools
+                        .iter()
+                        .all(|a| kelompok.pools.iter().any(|b| a.id == b.id))
+            });
+        if !kelompok_masih_sama {
+            return None;
+        }
+
+        active.pools = kelompok.pools.clone();
+        let mut pool_berganti = false;
+        if active.selected_pool_id == pilihan_yang_diharapkan {
+            if let Some(terbaik) = kelompok.pools.first() {
+                pool_berganti = active.selected_pool_id != terbaik.id;
+                active.selected_pool_id = terbaik.id.clone();
+            }
+        }
+        if let Some(g) = active
+            .quotes
+            .iter_mut()
+            .find(|g| g.quote.eq_ignore_ascii_case(&kelompok.quote))
+        {
+            *g = kelompok.clone();
+        }
+
+        let pilihan = active.selected_pool_id.clone();
+        let keadaan = protocol::TokenState {
+            address: active.meta.address.clone(),
+            meta: Some(active.meta.clone()),
+            quotes: active.quotes.clone(),
+            pools: active.pools.clone(),
+            selected_quote: Some(active.selected_quote.clone()),
+            selected_pool_id: Some(pilihan.clone()),
+            saldo,
+            error: None,
+        };
+        drop(guard);
+        let _ = self
+            .events
+            .send(protocol::ServerMessage::TokenState(Box::new(keadaan)));
+        Some((pilihan, pool_berganti))
     }
 
     /// Susun rencana membuka posisi, jalankan seluruh gate, TIDAK mengirim.
@@ -5525,6 +5629,23 @@ fn sidik_pool(state: &protocol::TokenState) -> String {
         ada_stats,
         bagian.join(",")
     )
+}
+
+/// Benar bila setiap pool sudah mempunyai volume dan jendela yang sah.
+///
+/// TVL dan APR boleh kosong untuk pool yang distribusi tick-nya gagal dibaca
+/// atau memakai fee dinamis. Volume tidak boleh kosong karena tanpa jendelanya
+/// snapshot terlihat lengkap padahal belum pernah diukur.
+fn statistik_pool_siap(pools: &[crate::pools::PoolInfo]) -> bool {
+    !pools.is_empty()
+        && pools.iter().all(|pool| {
+            pool.stats.as_ref().is_some_and(|stats| {
+                stats.volume.is_some()
+                    && stats
+                        .jendela_menit
+                        .is_some_and(|menit| menit.is_finite() && menit > 0.0)
+            })
+        })
 }
 
 #[cfg(test)]

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use super::{urutkan_pool_terukur, PoolInfo, PoolStats};
 use crate::store::Store;
 
-const VERSI: u32 = 3;
+const VERSI: u32 = 11;
 
 /// Dalam batas ini cache tidak perlu dihitung ulang.
 pub const SEGAR_DETIK: i64 = 5 * 60;
@@ -21,9 +21,17 @@ pub const SEGAR_DETIK: i64 = 5 * 60;
 /// Setelah satu jam, perubahan pasar sudah terlalu besar untuk ditampilkan.
 pub const MAKS_TAMPIL_DETIK: i64 = 60 * 60;
 
+/// Snapshot tiga jam boleh langsung ditampilkan, tetapi belum menghentikan
+/// penyegaran 24 jam. Toleransi dua puluh jam menjaga sedikit selisih tinggi
+/// blok tidak membuat hasil penuh terus dianggap sementara.
+const JENDELA_PENUH_MIN_MENIT: f64 = 20.0 * 60.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusCache {
     Kosong,
+    /// Sebagian pool sudah punya angka, tetapi snapshot belum boleh tampil
+    /// karena pool lain pada kelompok yang sama masih kosong.
+    Parsial,
     Segar,
     PerluPenyegaran,
 }
@@ -59,6 +67,13 @@ fn statistik_layak_disimpan(stats: &PoolStats) -> bool {
     statistik_masuk_akal(stats) && stats.volume.is_some() && stats.jendela_menit.is_some()
 }
 
+fn statistik_penuh(stats: &PoolStats) -> bool {
+    statistik_layak_disimpan(stats)
+        && stats
+            .jendela_menit
+            .is_some_and(|menit| menit >= JENDELA_PENUH_MIN_MENIT)
+}
+
 fn baca(store: &Store, token: &str, quote: &str) -> Option<Rekaman> {
     match store.get::<Rekaman>(&kunci(token, quote)) {
         Ok(v) => v,
@@ -76,6 +91,16 @@ fn tercakup(rekaman: &Rekaman, pools: &[PoolInfo]) -> bool {
                 .pools
                 .get(&pool.id.to_lowercase())
                 .is_some_and(statistik_layak_disimpan)
+        })
+}
+
+fn tercakup_penuh(rekaman: &Rekaman, pools: &[PoolInfo]) -> bool {
+    !pools.is_empty()
+        && pools.iter().all(|pool| {
+            rekaman
+                .pools
+                .get(&pool.id.to_lowercase())
+                .is_some_and(statistik_penuh)
         })
 }
 
@@ -110,7 +135,9 @@ pub fn terapkan(
         return StatusCache::Kosong;
     }
     urutkan_pool_terukur(pools);
-    if semua_tercakup && umur <= SEGAR_DETIK {
+    if !semua_tercakup {
+        StatusCache::Parsial
+    } else if tercakup_penuh(&rekaman, pools) && umur <= SEGAR_DETIK {
         StatusCache::Segar
     } else {
         StatusCache::PerluPenyegaran
@@ -135,7 +162,9 @@ pub fn status(
             .any(|pool| rekaman.pools.contains_key(&pool.id.to_lowercase()))
     {
         StatusCache::Kosong
-    } else if tercakup(&rekaman, pools) && umur <= SEGAR_DETIK {
+    } else if !tercakup(&rekaman, pools) {
+        StatusCache::Parsial
+    } else if tercakup_penuh(&rekaman, pools) && umur <= SEGAR_DETIK {
         StatusCache::Segar
     } else if umur <= MAKS_TAMPIL_DETIK {
         StatusCache::PerluPenyegaran
@@ -225,7 +254,7 @@ mod tests {
         let mut berubah = vec![pool("0xA", None), pool("0xB", None)];
         assert_eq!(
             terapkan(&store, "0xToken", "0xQuote", &mut berubah, 1_010),
-            StatusCache::PerluPenyegaran
+            StatusCache::Parsial
         );
         assert!(berubah[0].stats.is_some());
         assert!(berubah[1].stats.is_none());
@@ -264,6 +293,27 @@ mod tests {
             StatusCache::Kosong
         );
         assert!(kedaluwarsa[0].stats.is_none());
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn snapshot_tiga_jam_tampil_tetapi_tetap_meminta_dua_puluh_empat_jam() {
+        let (store, dir) = store_sementara("cepat");
+        let mut cepat = pool("pool", Some(7.0));
+        cepat.stats.as_mut().unwrap().jendela_menit = Some(180.0);
+        simpan(&store, "token", "quote", &[cepat], 1_000);
+
+        let mut tujuan = vec![pool("pool", None)];
+        assert_eq!(
+            terapkan(&store, "token", "quote", &mut tujuan, 1_010),
+            StatusCache::PerluPenyegaran
+        );
+        assert!(tujuan[0].stats.is_some());
+        assert_eq!(
+            status(&store, "token", "quote", &tujuan, 1_010),
+            StatusCache::PerluPenyegaran
+        );
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }

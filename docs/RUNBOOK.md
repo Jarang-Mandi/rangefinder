@@ -176,11 +176,17 @@ http = [
   "https://robinhood-mainnet.g.alchemy.com/v2/API_KEY_ANDA",
   "https://rpc.mainnet.chain.robinhood.com",
 ]
+logs_http = [
+  "https://rpc.mainnet.chain.robinhood.com",
+]
 ```
 
-Yang pertama dipakai, sisanya cadangan. Menyisakan RPC publik di urutan kedua
-disengaja: kalau kuota Alchemy habis atau layanannya sedang bermasalah, engine
-berpindah sendiri alih alih berhenti. Perpindahan itu tercatat di log.
+Daftar `http` dipakai untuk state, saldo, rencana, simulasi, dan transaksi. Yang
+pertama dipakai, sisanya cadangan. `logs_http` dipakai untuk discovery pool dan
+volume karena RPC publik menerima rentang log lebar, sedangkan paket gratis
+Alchemy membatasinya sampai sepuluh blok. Menyisakan RPC publik di urutan kedua
+pada `http` tetap berguna jika kuota Alchemy habis. Tanpa `logs_http`, endpoint
+interaktif yang sedang aktif dipakai juga untuk log.
 
 Jalankan ulang engine setelah mengubah berkas ini.
 

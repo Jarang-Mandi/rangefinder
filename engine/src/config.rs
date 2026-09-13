@@ -69,8 +69,16 @@ impl Default for ServerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RpcConfig {
-    /// Endpoint HTTP berurutan. Yang pertama dipakai, sisanya cadangan.
+    /// Endpoint HTTP interaktif berurutan. Yang pertama dipakai, sisanya
+    /// cadangan untuk harga, saldo, simulasi, dan pengiriman transaksi.
     pub http: Vec<String>,
+    /// Endpoint khusus pemindaian log bersejarah. Kosong berarti memakai
+    /// endpoint interaktif yang sedang aktif.
+    ///
+    /// Pemisahan ini penting karena endpoint cepat untuk `eth_call` belum
+    /// tentu mengizinkan rentang `eth_getLogs` yang lebar.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub logs_http: Vec<String>,
     /// Endpoint WebSocket, opsional. Kosong berarti hanya polling HTTP.
     #[serde(default)]
     pub ws: Vec<String>,
@@ -86,6 +94,7 @@ impl Default for RpcConfig {
     fn default() -> Self {
         Self {
             http: vec!["https://rpc.mainnet.chain.robinhood.com".into()],
+            logs_http: vec![],
             ws: vec![],
             chain_id: 4663,
             max_block_lag_secs: 5,
@@ -314,6 +323,7 @@ mod tests {
 
         assert_eq!(kembali.server.port, cfg.server.port);
         assert_eq!(kembali.rpc.chain_id, cfg.rpc.chain_id);
+        assert!(kembali.rpc.logs_http.is_empty());
         assert_eq!(kembali.limits.max_slippage_bps, cfg.limits.max_slippage_bps);
         assert_eq!(kembali.limits.max_position_usd, Some(5.0));
         assert_eq!(kembali.limits.max_daily_deploy_usd, Some(5.0));

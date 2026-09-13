@@ -88,17 +88,22 @@ menampilkan waktu buka, durasi atau waktu tutup, setoran, nilai sekarang atau
 diterima, fee, net, dan persentase tanpa eyebrow teknis. Net tetap ditampilkan
 dengan tanda perkiraan ketika komponennya tersedia tetapi basis historis belum
 lengkap. Simbol histori lama diisi dari metadata on chain. Statistik pool token
-memakai volume bergulir 24 jam, dibaca dalam potongan yang tetap mencakup
-seluruh periode, lalu pool diurutkan menurut APR terukur. Saldo pasangan dikirim
-segera setelah RPC saldo menjawab tanpa menunggu statistik itu. Pengukuran
-statistik untuk snapshot pasangan yang sama dideduplikasi dan setiap potongan
-log memberi jalan kepada rencana atau transaksi interaktif. Potongan awalnya
-216.000 blok, pembaca log latar diserialkan, statistik pairing lama dibatalkan
-saat pairing berubah, dan discovery lama dibatalkan saat pool atau rencana
-dipilih. Snapshot APR, TVL, dan volume yang paling lama satu jam disimpan di
-redb; lima menit pertama dianggap
-segar dan sisanya ditampilkan sambil disegarkan. Statistik diterapkan per ID
-pool supaya perubahan daftar pool tidak mengosongkan semua angka. Saldo cache
+memakai snapshot awal tiga jam agar seluruh pool, APR, TVL, dan volume dapat
+muncul bersama dalam sasaran tujuh detik. Pengukuran 24 jam menggantikannya di
+latar, lalu pool diurutkan menurut APR terukur. Panel menahan snapshot parsial
+dan hanya membuka daftar saat volume serta jendela seluruh pool siap. RPC
+interaktif dan RPC log dapat dipisah lewat `rpc.http` dan `rpc.logs_http`;
+endpoint cepat melayani state, saldo, rencana, dan transaksi, sedangkan
+endpoint yang menerima rentang lebar melayani discovery serta volume.
+Pengukuran statistik untuk snapshot pasangan yang sama dideduplikasi dan setiap
+potongan log memberi jalan kepada rencana atau transaksi interaktif. Potongan
+awalnya 216.000 blok, pembaca log latar diserialkan, statistik pairing lama
+dibatalkan saat pairing berubah, dan discovery lama dibatalkan saat pool atau
+rencana dipilih. Snapshot APR, TVL, dan volume yang paling lama satu jam
+disimpan di redb; lima menit pertama dianggap segar dan sisanya ditampilkan
+sambil disegarkan. Snapshot tiga jam tetap meminta pengukuran 24 jam. Statistik
+diterapkan per ID pool supaya perubahan daftar pool tidak mengosongkan semua
+angka. Saldo cache
 diselesaikan sebelum discovery penuh dimulai. Saldo native dan ERC20 dibaca bersamaan, saldo
 ETH yang sudah ada dipakai ulang sebagai saldo gas, dan titik kutipan Zap
 dijalankan maksimal enam belas sekaligus sebelum kutipan final diverifikasi
@@ -154,13 +159,12 @@ bug baru.
    yang berbicara dengan engine lama menampilkan kolom kosong tanpa satu pun
    pesan kesalahan, dan itu terlihat persis seperti bug perhitungan.
 
-2. **RPC harus yang mengizinkan `eth_getLogs` rentang lebar.** Alchemy paket
-   gratis membatasi sepuluh blok, sedangkan penemuan pool menuntut jutaan.
-   RPC publik `https://rpc.mainnet.chain.robinhood.com` harus di urutan
-   pertama pada `[rpc] http` di `%LOCALAPPDATA%\Rangefinder\config.toml`.
-   `ChainClient` hanya berpindah endpoint saat pemeriksaan kesehatan gagal,
-   bukan saat satu permintaan gagal, jadi menaruhnya di urutan kedua tidak
-   menolong.
+2. **Pisahkan RPC interaktif dari RPC log.** Alchemy paket gratis membatasi
+   `eth_getLogs` menjadi sepuluh blok, sedangkan penemuan pool menuntut jutaan,
+   tetapi pembacaan state-nya jauh lebih cepat daripada RPC publik. Taruh RPC
+   cepat di urutan pertama `[rpc] http`, lalu taruh RPC publik Robinhood Chain
+   di `logs_http`. Tanpa `logs_http`, endpoint aktif dipakai untuk keduanya dan
+   discovery bisa gagal meski saldo tetap cepat.
 
 3. **Kalau user bilang sebuah angka tidak muncul, buktikan di kabel dulu.**
    Membaca kode tidak cukup, karena kegagalannya hampir selalu di jalur

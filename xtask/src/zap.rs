@@ -39,6 +39,7 @@ pub async fn run(repo_root: &Path, token_arg: &str, nominal_arg: Option<&str>) -
 
     let snapshot = pools::muat_token(
         &provider,
+        &provider,
         &registry,
         None,
         token,

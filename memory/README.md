@@ -55,3 +55,4 @@ setiap agent.
 | `019-prioritas-rpc-dan-zap-paralel.md` | Engine release, prioritas RPC interaktif, deduplikasi statistik, dan kutipan Zap paralel |
 | `020-cache-statistik-dan-pembatalan-lookup.md` | Cache APR/TVL/volume, pembatalan discovery lama, dan probe single input USDG |
 | `021-profil-risiko-modal-di-bawah-50-usd.md` | Batas posisi, eksposur, pool baru, slippage, dan cadangan gas untuk modal kecil |
+| `022-snapshot-pool-tujuh-detik-dan-rpc-berperan.md` | Snapshot pool utuh, statistik awal tiga jam, dan pembagian RPC menurut jenis pekerjaan |

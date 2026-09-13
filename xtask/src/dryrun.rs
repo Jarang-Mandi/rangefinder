@@ -63,6 +63,7 @@ pub async fn run(repo_root: &Path, token_arg: &str, from_arg: Option<&str>) -> R
     // stablecoin. Lihat memory/005.
     let snapshot = pools::muat_token(
         &provider,
+        &provider,
         &registry,
         None,
         token,

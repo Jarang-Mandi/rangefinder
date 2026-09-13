@@ -314,3 +314,38 @@ yang gagal tidak menahan sisi lainnya.
 lanjutan. Token yang belum dapat dikonversi tetap berada di wallet dan panel
 memberi peringatan. Saat tidak ada pool langsung ke ETH, engine tidak menebak
 rute multi hop.
+
+---
+
+## 0011 RPC dibagi menurut jenis pekerjaan dan statistik awal memakai tiga jam
+
+**Tanggal** 13 September 2026. **Status** berlaku.
+
+**Konteks.** Satu endpoint tidak unggul pada semua metode. Pengukuran lokal
+menunjukkan endpoint Alchemy menjawab `eth_call` jauh lebih cepat, tetapi paket
+yang tersedia menolak `eth_getLogs` di atas sepuluh blok. RPC publik Robinhood
+Chain menerima 216.000 blok dalam satu permintaan, tetapi pembacaan state jauh
+lebih lambat. Mengukur volume 24 jam penuh sebelum menampilkan daftar pool
+memerlukan lebih dari tujuh detik saat cache kosong.
+
+**Pilihan.** `rpc.http` melayani state, saldo, rencana, simulasi, dan transaksi.
+`rpc.logs_http` melayani discovery serta volume. Ketika cache statistik belum
+lengkap, engine lebih dulu mengukur 108.000 blok, sekitar tiga
+jam, dan panel menampilkan daftar hanya setelah seluruh pool mempunyai volume
+beserta jendelanya. Pengukuran 24 jam meneruskan pekerjaan di belakang layar
+dan mengganti snapshot awal.
+
+**Alasan.** Membagi endpoint menurut kemampuan mengurangi perebutan antrean dan
+tidak menggandakan permintaan yang sama ke beberapa penyedia. Snapshot tiga jam
+memerlukan satu panggilan log dan tetap menyatakan jendela sebenarnya, sehingga
+lebih cepat tanpa menyebut data pendek sebagai volume 24 jam.
+Tinggi blok dibaca lewat RPC interaktif lalu dikurangi sepuluh blok sebelum
+diberikan ke RPC log. Dengan begitu endpoint publik tidak menerima permintaan
+`eth_blockNumber` tambahan dan perbedaan sinkronisasi singkat antarpenyedia
+tidak membuat pemindaian melewati ujung rantai yang tersedia.
+
+**Konsekuensi.** Instalasi satu RPC tetap bekerja karena `logs_http` bersifat
+opsional. Target tujuh detik berlaku pada jalur normal dengan endpoint sehat.
+Jika RPC log berhenti menjawab, engine tidak mengarang nol dan panel tetap
+menunggu data yang sah. Snapshot tiga jam tidak pernah dianggap cache penuh,
+jadi pengukuran 24 jam tetap dijalankan.
