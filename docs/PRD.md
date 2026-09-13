@@ -507,11 +507,16 @@ Kiriman kedua hanya terjadi kalau kumpulan poolnya benar benar berubah. Panel ya
 
 Token yang belum pernah dibuka tidak punya tahap satu, dan itu memang tidak bisa dihindari: pool V4 hanya bisa ditemukan lewat log, dan log harus dipindai sekali. Panel tetap menahan daftar parsial sampai statistik awal seluruh pool siap.
 
-**Permintaan interaktif memakai RPC tersendiri.** `rpc.http` melayani state,
-saldo, rencana, simulasi, dan transaksi, sedangkan `rpc.logs_http` melayani
-discovery serta volume. Pemisahan ini diperlukan karena endpoint yang menjawab
+**Permintaan dibagi menjadi tiga jalur RPC.** `rpc.http` melayani pemeriksaan
+kesehatan, simulasi final, dan transaksi. `rpc.read_http` melayani metadata,
+state pool, TVL, saldo, serta pembacaan rencana. `rpc.logs_http` melayani
+discovery dan volume. Pemisahan ini diperlukan karena endpoint yang menjawab
 `eth_call` paling cepat dapat membatasi `eth_getLogs` sampai rentangnya tidak
-berguna. Statistik volume 24 jam
+berguna. Jalur baca mencoba endpoint secara berurutan dalam permintaan yang
+sama. Timeout dan respons JSON-RPC error memindahkannya langsung ke cadangan,
+dan endpoint sehat terakhir didahulukan pada pembacaan berikutnya. Transaksi
+tidak memakai failover baca agar satu pengiriman hanya melewati endpoint yang
+sudah dinilai sehat. Statistik volume 24 jam
 berjalan di latar dan memeriksa penanda prioritas sebelum membaca setiap
 potongan log. Saat user meminta rencana posisi atau menjalankan transaksi,
 potongan yang sedang berjalan diselesaikan, lalu pemindaian menunggu sampai
@@ -536,6 +541,25 @@ tersedia. Cache berumur paling banyak lima menit langsung dipakai. Cache berumur
 lima menit sampai satu jam tetap ditampilkan sambil disegarkan di latar. Hasil
 yang lebih lama atau hasil volume yang gagal tidak dipakai. Kegagalan TVL satu
 pool tidak membuang volume valid milik pool lain.
+
+Saldo dan statistik dimulai bersamaan. Keduanya tidak lagi diurutkan karena
+saldo memakai `read_http` sedangkan volume memakai `logs_http`. Snapshot
+statistik mengambil saldo yang sudah selesai, dan kiriman saldo yang datang
+sesudahnya mengambil daftar pool terbaru. Daftar pool tetap tidak tampil
+sebagian: panel menunggu volume dan jendela seluruh pool pada pairing aktif.
+
+Pengamatan pada bot Zenith menunjukkan alamat token dan daftar puluhan pool
+lengkap memiliki cap waktu pada menit yang sama. Bot juga menandai sebagian
+pool sebagai belum terindeks. Ini menjadi bukti perilaku, bukan akses ke
+implementasinya. Kesimpulan arsitekturalnya adalah Zenith membaca indeks yang
+terus diperbarui lalu memvalidasi state on-chain saat pool dipilih. Cache redb
+Rangefinder memberi hasil serupa untuk token yang pernah dibaca, sedangkan
+token baru masih memerlukan satu discovery log sebelum dapat masuk cache.
+
+Probe PONS `0x39dbed3a2bd333467115de45665cc57f813c4571` pada 14 September
+2026 menghasilkan snapshot tiga pool lengkap dalam 4,137 detik pada data dir
+baru dengan `dry_run`. Pada engine terpasang yang juga sedang melayani ekstensi,
+saldo tiba dalam 1,998 detik dan snapshot lengkap tiba dalam 6,838 detik.
 
 Probe build release pada 13 September 2026 untuk token
 `0xba527c23903eff094a987197ccd643f2da76e4ff` menghasilkan snapshot cache dingin

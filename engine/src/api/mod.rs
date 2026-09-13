@@ -529,7 +529,7 @@ impl AppState {
         // Discovery penuh memakai RPC log karena ia perlu rentang sejarah
         // lebar yang ditolak sebagian penyedia berbayar.
         let snapshot_result = match mode {
-            crate::pools::ModePencarian::CacheSaja => match self.chain.provider().await {
+            crate::pools::ModePencarian::CacheSaja => match self.chain.read_provider().await {
                 Ok(provider) => {
                     crate::pools::muat_token(
                         &provider,
@@ -544,7 +544,7 @@ impl AppState {
                 Err(e) => Err(e),
             },
             crate::pools::ModePencarian::Penuh => match self.chain.logs_provider().await {
-                Ok(provider_logs) => match self.chain.provider().await {
+                Ok(provider_logs) => match self.chain.read_provider().await {
                     Ok(provider_state) => {
                         crate::pools::muat_token(
                             &provider_logs,
@@ -787,7 +787,7 @@ impl AppState {
         let s = self.clone();
         tokio::spawn(async move {
             let mut statistik_awal_tx = Some(statistik_awal_tx);
-            let Ok(provider) = s.chain.provider().await else {
+            let Ok(provider) = s.chain.read_provider().await else {
                 return;
             };
             let Ok(provider_logs) = s.chain.logs_provider().await else {
@@ -812,38 +812,52 @@ impl AppState {
                 )
             };
 
-            let saldo = {
-                let _prioritas = s.jeda_latar.prioritaskan();
-                s.baca_saldo(&provider, &meta, &kelompok).await
-            };
-            let _ = saldo_selesai_tx.send(());
+            // Saldo dan statistik memakai kelompok RPC berbeda, jadi keduanya
+            // dapat dimulai bersamaan. Hasil saldo disimpan singkat agar
+            // snapshot statistik yang selesai sesudahnya langsung membawanya.
+            let saldo_bersama = Arc::new(tokio::sync::RwLock::new(None));
+            let s_saldo = s.clone();
+            let meta_saldo = meta.clone();
+            let kelompok_saldo = kelompok.clone();
+            let saldo_bersama_tugas = saldo_bersama.clone();
+            tokio::spawn(async move {
+                let Ok(provider_saldo) = s_saldo.chain.read_provider().await else {
+                    return;
+                };
+                let saldo = s_saldo
+                    .baca_saldo(&provider_saldo, &meta_saldo, &kelompok_saldo)
+                    .await;
+                *saldo_bersama_tugas.write().await = saldo.clone();
+                let _ = saldo_selesai_tx.send(());
 
-            // Saldo adalah angka yang langsung dibutuhkan kotak amount. Kirim
-            // begitu RPC menjawab; pengukuran APR/TVL di bawah tidak boleh
-            // menahannya beberapa detik.
-            {
-                let guard = s.active.read().await;
+                // Saldo adalah angka yang langsung dibutuhkan kotak amount.
+                // Kirim saat RPC baca menjawab tanpa menunggu log statistik.
+                let guard = s_saldo.active.read().await;
                 let Some(active) = guard.as_ref() else { return };
-                if !meta
+                if !meta_saldo
                     .as_ref()
                     .is_some_and(|m| m.address.eq_ignore_ascii_case(&active.meta.address))
-                    || !active.selected_quote.eq_ignore_ascii_case(&kelompok.quote)
+                    || !active
+                        .selected_quote
+                        .eq_ignore_ascii_case(&kelompok_saldo.quote)
                 {
                     return;
                 }
-                let _ = s.events.send(protocol::ServerMessage::TokenState(Box::new(
-                    protocol::TokenState {
-                        address: active.meta.address.clone(),
-                        meta: Some(active.meta.clone()),
-                        quotes: active.quotes.clone(),
-                        pools: active.pools.clone(),
-                        selected_quote: Some(active.selected_quote.clone()),
-                        selected_pool_id: Some(active.selected_pool_id.clone()),
-                        saldo: saldo.clone(),
-                        error: None,
-                    },
-                )));
-            }
+                let _ = s_saldo
+                    .events
+                    .send(protocol::ServerMessage::TokenState(Box::new(
+                        protocol::TokenState {
+                            address: active.meta.address.clone(),
+                            meta: Some(active.meta.clone()),
+                            quotes: active.quotes.clone(),
+                            pools: active.pools.clone(),
+                            selected_quote: Some(active.selected_quote.clone()),
+                            selected_pool_id: Some(active.selected_pool_id.clone()),
+                            saldo,
+                            error: None,
+                        },
+                    )));
+            });
 
             // Statistik diukur untuk kelompok yang sedang dipilih, bukan hanya
             // yang teratas. Tanpa ini, setiap kali user berpindah pasangan,
@@ -925,7 +939,7 @@ impl AppState {
                             meta_stats,
                             &cepat,
                             &pilihan_yang_diharapkan,
-                            saldo.clone(),
+                            saldo_bersama.read().await.clone(),
                         )
                         .await
                     else {
@@ -963,7 +977,12 @@ impl AppState {
                 chrono::Utc::now().timestamp(),
             );
             let Some((_, berganti)) = s
-                .terapkan_dan_siarkan_stats(meta_stats, &penuh, &pilihan_yang_diharapkan, saldo)
+                .terapkan_dan_siarkan_stats(
+                    meta_stats,
+                    &penuh,
+                    &pilihan_yang_diharapkan,
+                    saldo_bersama.read().await.clone(),
+                )
                 .await
             else {
                 return;
@@ -1175,7 +1194,11 @@ impl AppState {
         // Range yang dipakai persis yang sedang tergambar di chart, termasuk
         // pembulatan ke grid tick. Menghitungnya ulang di sini dengan cara lain
         // akan membuat yang dikirim berbeda dari yang dilihat user.
-        let provider = self.chain.provider().await.map_err(|e| e.to_string())?;
+        let provider = self
+            .chain
+            .read_provider()
+            .await
+            .map_err(|e| e.to_string())?;
         let pool = crate::pools::refresh(&provider, &self.registry, &pool)
             .await
             .map_err(|e| e.to_string())?;
@@ -1246,7 +1269,7 @@ impl AppState {
 
         let provider = self
             .chain
-            .provider()
+            .read_provider()
             .await
             .map_err(|e| format!("RPC tidak bisa dipakai: {e}"))?;
         // Alamat kontrak dipilih menurut versi pool, di satu tempat. Mengirim
@@ -4502,7 +4525,7 @@ impl AppState {
             error: Some(error),
         };
 
-        let provider = match self.chain.provider().await {
+        let provider = match self.chain.read_provider().await {
             Ok(p) => p,
             Err(e) => return Some(kosong(format!("RPC tidak bisa dipakai: {e}"))),
         };
@@ -4584,12 +4607,16 @@ impl AppState {
             error,
         };
 
-        let provider = match self.chain.provider().await {
+        let provider_logs = match self.chain.logs_provider().await {
             Ok(p) => p,
             Err(e) => return kosong(Some(format!("RPC tidak bisa dipakai: {e}"))),
         };
+        let provider_state = match self.chain.read_provider().await {
+            Ok(p) => p,
+            Err(e) => return kosong(Some(format!("RPC baca tidak bisa dipakai: {e}"))),
+        };
 
-        let hasil = match crate::pools::scan::pindai(&provider, &self.registry).await {
+        let hasil = match crate::pools::scan::pindai(&provider_logs, &self.registry).await {
             Ok(h) => h,
             Err(e) => return kosong(Some(format!("pemindaian gagal: {e}"))),
         };
@@ -4617,15 +4644,16 @@ impl AppState {
             .filter(|h| crate::risk::persetujuan::disetujui(&self.store, h))
             .collect();
 
-        let daftar = match kandidat::perkaya(&provider, &self.registry, &hasil, &disetujui).await {
-            Ok(d) => d,
-            Err(e) => {
-                let mut v = kosong(Some(format!("penilaian kandidat gagal: {e}")));
-                v.total_swap = hasil.total_swap;
-                v.jendela_pindai_menit = jendela_pindai_menit;
-                return v;
-            }
-        };
+        let daftar =
+            match kandidat::perkaya(&provider_state, &self.registry, &hasil, &disetujui).await {
+                Ok(d) => d,
+                Err(e) => {
+                    let mut v = kosong(Some(format!("penilaian kandidat gagal: {e}")));
+                    v.total_swap = hasil.total_swap;
+                    v.jendela_pindai_menit = jendela_pindai_menit;
+                    return v;
+                }
+            };
 
         // Penilaian hook disusun untuk hook yang benar benar muncul di hasil,
         // bukan untuk semuanya. Satu pemindaian `Initialize` melayani seluruh
@@ -4665,7 +4693,7 @@ impl AppState {
             return (Vec::new(), true);
         }
 
-        let Ok(provider) = self.chain.provider().await else {
+        let Ok(provider) = self.chain.logs_provider().await else {
             return (Vec::new(), false);
         };
 
@@ -4713,7 +4741,7 @@ impl AppState {
             return self.alert_kritis("hook_failed", "alamat hook tidak valid".into());
         }
         let ticket = self.intent.begin_hook(&hook);
-        let provider = match self.chain.provider().await {
+        let provider = match self.chain.logs_provider().await {
             Ok(p) => p,
             Err(e) => {
                 return self.alert_kritis("hook_failed", format!("RPC tidak bisa dipakai: {e}"))

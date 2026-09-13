@@ -349,3 +349,43 @@ opsional. Target tujuh detik berlaku pada jalur normal dengan endpoint sehat.
 Jika RPC log berhenti menjawab, engine tidak mengarang nol dan panel tetap
 menunggu data yang sah. Snapshot tiga jam tidak pernah dianggap cache penuh,
 jadi pengukuran 24 jam tetap dijalankan.
+
+---
+
+## 0012 Pembacaan RPC memakai failover per permintaan
+
+**Tanggal** 14 September 2026. **Status** berlaku.
+
+**Konteks.** Endpoint gratis Alchemy kadang gagal dan rotasi lima detik pada
+pemeriksaan kesehatan tidak membantu permintaan yang sudah terlanjur gagal.
+Uji langsung menunjukkan PublicNode dan OrdoFi menjawab `eth_call` sekitar
+0,15 sampai 0,32 detik. Endpoint resmi memerlukan sekitar 1,4 detik. Namun
+PublicNode menolak log lebar dengan HTTP 403, OrdoFi menjawab jaringan sibuk,
+BlockReq publik hanya melayani 32.768 blok terbaru, dan hanya endpoint resmi
+yang menyelesaikan rentang 108.000 blok pada uji ini.
+
+**Pilihan.** `rpc.http` khusus kesehatan dan jalur transaksi. `rpc.read_http`
+memakai PublicNode, OrdoFi, lalu endpoint resmi. `rpc.logs_http` tetap berisi
+endpoint yang lolos uji log lebar. Setiap pembacaan mencoba endpoint secara
+berurutan, memperlakukan respons JSON-RPC error sebagai kegagalan, membatasi
+waktu tunggu per endpoint, dan mengingat endpoint terakhir yang berhasil.
+Saldo dimulai bersama pengukuran statistik karena keduanya memakai jalur RPC
+yang berbeda.
+
+**Alasan.** Mengirim semua permintaan ke semua penyedia sekaligus memboroskan
+kuota. Failover berurutan membayar endpoint kedua hanya ketika yang pertama
+gagal. Pemisahan transaksi mencegah satu operasi kirim direplikasi oleh
+transport balapan dan mempertahankan nonce serta simulasi pada jalur sehat yang
+sama. Pemisahan log menjaga provider state cepat dari permintaan yang memang
+tidak didukungnya.
+
+**Konsekuensi.** Token yang sudah terindeks lokal dapat memuat state dan saldo
+tanpa bergantung pada Alchemy. Token baru tetap perlu satu pemindaian log.
+Kecepatan Zenith untuk token baru memerlukan indexer yang hidup terus, bukan
+sekadar menambah daftar RPC. Jika endpoint publik mengubah kebijakannya, uji
+`eth_call` dan rentang log harus diulang sebelum urutannya diubah.
+
+Probe PONS `0x39dbed3a2bd333467115de45665cc57f813c4571` pada data dir
+baru dengan `dry_run` menghasilkan tiga pool beserta statistik awal lengkap
+dalam 4,137 detik. Probe engine terpasang yang berbagi proses dengan ekstensi
+aktif menyelesaikannya dalam 6,838 detik dan mengirim saldo pada 1,998 detik.

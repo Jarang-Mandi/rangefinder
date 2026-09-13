@@ -69,9 +69,16 @@ impl Default for ServerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RpcConfig {
-    /// Endpoint HTTP interaktif berurutan. Yang pertama dipakai, sisanya
-    /// cadangan untuk harga, saldo, simulasi, dan pengiriman transaksi.
+    /// Endpoint utama untuk pemeriksaan kesehatan dan pengiriman transaksi.
+    /// Yang pertama dipakai, sisanya cadangan.
     pub http: Vec<String>,
+    /// Endpoint baca cepat. Setiap permintaan mulai dari endpoint yang terakhir
+    /// berhasil lalu langsung mencoba endpoint berikutnya bila gagal.
+    ///
+    /// Kosong berarti memakai `http`. Pemisahan ini menjaga RPC transaksi dari
+    /// beban metadata, saldo, harga, dan state pool.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_http: Vec<String>,
     /// Endpoint khusus pemindaian log bersejarah. Kosong berarti memakai
     /// endpoint interaktif yang sedang aktif.
     ///
@@ -94,6 +101,11 @@ impl Default for RpcConfig {
     fn default() -> Self {
         Self {
             http: vec!["https://rpc.mainnet.chain.robinhood.com".into()],
+            read_http: vec![
+                "https://robinhood-rpc.publicnode.com".into(),
+                "https://rpc.ordofi.network".into(),
+                "https://rpc.mainnet.chain.robinhood.com".into(),
+            ],
             logs_http: vec![],
             ws: vec![],
             chain_id: 4663,
@@ -323,6 +335,7 @@ mod tests {
 
         assert_eq!(kembali.server.port, cfg.server.port);
         assert_eq!(kembali.rpc.chain_id, cfg.rpc.chain_id);
+        assert_eq!(kembali.rpc.read_http.len(), 3);
         assert!(kembali.rpc.logs_http.is_empty());
         assert_eq!(kembali.limits.max_slippage_bps, cfg.limits.max_slippage_bps);
         assert_eq!(kembali.limits.max_position_usd, Some(5.0));

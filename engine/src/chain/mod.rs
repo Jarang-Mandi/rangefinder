@@ -15,14 +15,21 @@ pub mod logs;
 pub mod multicall;
 pub mod registry;
 
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+use std::task::{Context as TaskContext, Poll};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use alloy::primitives::keccak256;
 use alloy::providers::{Provider, ProviderBuilder};
+use alloy::rpc::json_rpc::{RequestPacket, ResponsePacket};
+use alloy::transports::{BoxTransport, TransportError, TransportErrorKind, TransportFut};
 use anyhow::{Context, Result};
 use serde::Serialize;
 use tokio::sync::RwLock;
+use tower::Service;
 
 use crate::config::RpcConfig;
 use registry::Registry;
@@ -91,7 +98,86 @@ pub struct ChainClient {
     cfg: RpcConfig,
     /// Endpoint aktif saat ini. Failover mengubah indeks ini.
     endpoint: RwLock<usize>,
+    /// Pilihan terakhir yang berhasil untuk dua jalur baca yang berbeda.
+    read_endpoint: Arc<AtomicUsize>,
+    logs_endpoint: Arc<AtomicUsize>,
     health: RwLock<ChainHealth>,
+}
+
+/// Transport baca yang mencoba endpoint satu per satu.
+///
+/// Endpoint sehat terakhir menjadi pilihan pertama pada permintaan berikutnya.
+/// Respons JSON-RPC error dianggap kegagalan endpoint, bukan jawaban berhasil,
+/// supaya batas laju satu provider benar benar berpindah ke provider lain.
+#[derive(Clone, Debug)]
+struct SequentialFallback {
+    transports: Arc<Vec<BoxTransport>>,
+    labels: Arc<Vec<String>>,
+    preferred: Arc<AtomicUsize>,
+}
+
+impl SequentialFallback {
+    fn new(
+        transports: Vec<BoxTransport>,
+        labels: Vec<String>,
+        preferred: Arc<AtomicUsize>,
+    ) -> Self {
+        Self {
+            transports: Arc::new(transports),
+            labels: Arc::new(labels),
+            preferred,
+        }
+    }
+}
+
+impl Service<RequestPacket> for SequentialFallback {
+    type Response = ResponsePacket;
+    type Error = TransportError;
+    type Future = TransportFut<'static>;
+
+    fn poll_ready(&mut self, _cx: &mut TaskContext<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: RequestPacket) -> Self::Future {
+        let transports = self.transports.clone();
+        let labels = self.labels.clone();
+        let preferred = self.preferred.clone();
+        Box::pin(async move {
+            if transports.is_empty() {
+                return Err(TransportErrorKind::custom_str(
+                    "tidak ada endpoint RPC untuk failover",
+                ));
+            }
+
+            let awal = preferred.load(Ordering::Relaxed) % transports.len();
+            let mut terakhir = None;
+            for offset in 0..transports.len() {
+                let indeks = (awal + offset) % transports.len();
+                let mut transport = transports[indeks].clone();
+                match transport.call(request.clone()).await {
+                    Ok(response) => {
+                        if let Some(error) = response.as_error() {
+                            terakhir = Some(TransportError::ErrorResp(error.clone()));
+                            continue;
+                        }
+                        if indeks != awal {
+                            tracing::warn!(
+                                endpoint = %labels[indeks],
+                                "permintaan baca beralih ke RPC cadangan"
+                            );
+                        }
+                        preferred.store(indeks, Ordering::Relaxed);
+                        return Ok(response);
+                    }
+                    Err(error) => terakhir = Some(error),
+                }
+            }
+
+            Err(terakhir
+                .unwrap_or_else(|| TransportErrorKind::custom_str("seluruh endpoint RPC gagal")))
+        })
+    }
 }
 
 impl ChainClient {
@@ -101,6 +187,8 @@ impl ChainClient {
         Arc::new(Self {
             cfg,
             endpoint: RwLock::new(0),
+            read_endpoint: Arc::new(AtomicUsize::new(0)),
+            logs_endpoint: Arc::new(AtomicUsize::new(0)),
             health: RwLock::new(ChainHealth::unknown(&first, max_lag)),
         })
     }
@@ -142,18 +230,77 @@ impl ChainClient {
         Self::provider_for(&endpoint)
     }
 
+    /// Penyedia untuk semua pembacaan state yang tidak mengirim transaksi.
+    ///
+    /// Berbeda dari `provider`, penyedia ini berpindah endpoint di dalam satu
+    /// permintaan. RPC publik cepat dapat melayani state, sedangkan endpoint
+    /// utama tetap punya kuota dan nonce yang konsisten untuk transaksi.
+    pub async fn read_provider(&self) -> Result<impl Provider> {
+        let endpoints = if self.cfg.read_http.is_empty() {
+            vec![self.current_endpoint().await]
+        } else {
+            self.cfg.read_http.clone()
+        };
+        Self::provider_for_many(
+            &endpoints,
+            std::time::Duration::from_millis(2_500),
+            self.read_endpoint.clone(),
+        )
+    }
+
     /// Penyedia RPC untuk pemindaian log bersejarah.
     ///
     /// Jangan memakai endpoint ini untuk saldo atau rencana posisi. Endpoint
     /// log sengaja boleh lebih lambat pada `eth_call` selama menerima rentang
     /// `eth_getLogs` lebar yang dibutuhkan discovery dan volume.
     pub async fn logs_provider(&self) -> Result<impl Provider> {
-        let endpoint = if let Some(endpoint) = self.cfg.logs_http.first() {
-            endpoint.clone()
+        let endpoints = if self.cfg.logs_http.is_empty() {
+            vec![self.current_endpoint().await]
         } else {
-            self.current_endpoint().await
+            self.cfg.logs_http.clone()
         };
-        Self::provider_for(&endpoint)
+        Self::provider_for_many(
+            &endpoints,
+            std::time::Duration::from_secs(20),
+            self.logs_endpoint.clone(),
+        )
+    }
+
+    /// Bangun penyedia baca berurutan dengan batas waktu per endpoint.
+    fn provider_for_many(
+        urls: &[String],
+        timeout: std::time::Duration,
+        preferred: Arc<AtomicUsize>,
+    ) -> Result<impl Provider> {
+        use alloy::rpc::client::ClientBuilder;
+        use alloy::transports::http::{Client, Http};
+
+        if urls.is_empty() {
+            anyhow::bail!("daftar endpoint RPC kosong");
+        }
+
+        let client_http = Client::builder()
+            .timeout(timeout)
+            .build()
+            .context("gagal menyiapkan klien HTTP RPC")?;
+        let mut transports = Vec::with_capacity(urls.len());
+        let mut labels = Vec::with_capacity(urls.len());
+        for url in urls {
+            let parsed = url
+                .parse()
+                .with_context(|| format!("URL RPC `{}` tidak valid", endpoint::aman(url)))?;
+            transports.push(BoxTransport::new(Http::with_client(
+                client_http.clone(),
+                parsed,
+            )));
+            labels.push(endpoint::aman(url));
+        }
+
+        let client = ClientBuilder::default().transport(
+            SequentialFallback::new(transports, labels, preferred),
+            false,
+        );
+        Ok(ProviderBuilder::new().connect_client(client))
     }
 
     /// Bangun penyedia dengan percobaan ulang otomatis.
@@ -171,7 +318,7 @@ impl ChainClient {
 
         let parsed = url
             .parse()
-            .with_context(|| format!("URL RPC `{url}` tidak valid"))?;
+            .with_context(|| format!("URL RPC `{}` tidak valid", endpoint::aman(url)))?;
 
         // Lima percobaan, jeda awal 200 ms, dan anggaran laju yang longgar.
         // Angka ini dipilih supaya lonjakan pendek seperti membaca beberapa
@@ -429,5 +576,38 @@ mod tests {
             h.endpoint.contains("alchemy.com"),
             "host tetap harus terlihat supaya status kesehatan berguna"
         );
+    }
+
+    #[tokio::test]
+    async fn error_json_rpc_langsung_beralih_dan_endpoint_sehat_menjadi_pilihan() {
+        use alloy::rpc::client::ClientBuilder;
+        use alloy::transports::mock::{Asserter, MockTransport};
+
+        let gagal = Asserter::new();
+        gagal.push_failure_msg("dibatasi provider pertama");
+        let sehat = Asserter::new();
+        sehat.push_success(&4663u64);
+
+        let fallback = SequentialFallback::new(
+            vec![
+                BoxTransport::new(MockTransport::new(gagal.clone())),
+                BoxTransport::new(MockTransport::new(sehat.clone())),
+            ],
+            vec!["rpc-satu".into(), "rpc-dua".into()],
+            Arc::new(AtomicUsize::new(0)),
+        );
+        let preferred = fallback.preferred.clone();
+        let client = ClientBuilder::default().transport(fallback, false);
+        let provider = ProviderBuilder::new().connect_client(client);
+
+        assert_eq!(provider.get_chain_id().await.unwrap(), 4663);
+        assert_eq!(preferred.load(Ordering::Relaxed), 1);
+
+        // Provider pertama sekarang bisa menjawab, tetapi provider kedua yang
+        // baru saja berhasil tetap dicoba lebih dulu dan menghemat satu gagal.
+        gagal.push_success(&1u64);
+        sehat.push_success(&4663u64);
+        assert_eq!(provider.get_chain_id().await.unwrap(), 4663);
+        assert_eq!(gagal.read_q().len(), 1);
     }
 }
