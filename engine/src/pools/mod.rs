@@ -18,6 +18,7 @@ pub mod cache;
 pub mod distribusi;
 pub mod kandidat;
 pub mod scan;
+pub mod stats_cache;
 pub mod volume;
 
 use alloy::primitives::{Address, FixedBytes, U256};
@@ -25,7 +26,7 @@ use alloy::providers::Provider;
 use alloy::rpc::types::Filter;
 use alloy::sol_types::SolEvent;
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::chain::registry::Registry;
 
@@ -147,7 +148,7 @@ pub struct PoolInfo {
 /// seperti di `kandidat`: satuan terkecil menghasilkan angka yang terbaca
 /// seperti dolar padahal bukan, dan kurs dolar yang ditebak memasukkan
 /// kesalahan ke angka yang seharusnya murni hasil penjumlahan.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolStats {
     /// Volume pada jendela yang diukur, dalam kutipan.
     ///
@@ -881,7 +882,7 @@ pub async fn ukur_stats<P: Provider>(
     registry: &Registry,
     meta: &TokenMeta,
     kelompok: &mut QuoteGroup,
-    jeda_latar: Option<&crate::chain::logs::JedaLatar>,
+    tugas_latar: Option<&crate::chain::logs::TugasLatar>,
 ) {
     use crate::pools::kandidat;
 
@@ -903,20 +904,24 @@ pub async fn ukur_stats<P: Provider>(
 
     if !v4.is_empty() {
         let ids: Vec<String> = v4.iter().map(|p| p.id.clone()).collect();
-        match volume::ukur_volume(provider, registry, &ids, jeda_latar).await {
+        match volume::ukur_volume(provider, registry, &ids, tugas_latar).await {
             Ok(v) => {
                 let j = v.jendela_detik(registry.chain.block_time_ms);
                 durasi.extend(v.per_pool.keys().map(|id| (id.clone(), j)));
                 per_pool.extend(v.per_pool);
                 per_pool1.extend(v.per_pool1);
             }
-            Err(e) => tracing::warn!(error = %e, "volume V4 gagal diukur"),
+            Err(e) if crate::chain::logs::latar_dibatalkan(&e) => {
+                tracing::debug!("pengukuran statistik V4 lama dibatalkan");
+                return;
+            }
+            Err(e) => tracing::warn!(error = %format!("{e:#}"), "volume V4 gagal diukur"),
         }
     }
 
     if !v3.is_empty() {
         let alamat: Vec<String> = v3.iter().map(|p| p.id.clone()).collect();
-        match volume::ukur_volume_v3(provider, registry, &alamat, jeda_latar).await {
+        match volume::ukur_volume_v3(provider, registry, &alamat, tugas_latar).await {
             Ok(v) => {
                 // Setiap volume mempertahankan jendela aslinya. Memendekkan
                 // penyebut tanpa memangkas event akan membesarkan APR.
@@ -925,8 +930,15 @@ pub async fn ukur_stats<P: Provider>(
                 per_pool.extend(v.per_pool);
                 per_pool1.extend(v.per_pool1);
             }
-            Err(e) => tracing::warn!(error = %e, "volume V3 gagal diukur"),
+            Err(e) if crate::chain::logs::latar_dibatalkan(&e) => {
+                tracing::debug!("pengukuran statistik V3 lama dibatalkan");
+                return;
+            }
+            Err(e) => tracing::warn!(error = %format!("{e:#}"), "volume V3 gagal diukur"),
         }
+    }
+    if tugas_latar.is_some_and(|tugas| !tugas.aktif()) {
+        return;
     }
     let skala_meme = 10f64.powi(meta.decimals as i32);
     let skala_quote = 10f64.powi(kelompok.quote_decimals as i32);

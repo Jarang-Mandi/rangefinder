@@ -196,9 +196,10 @@ pub async fn plan_open_v4<P: Provider>(
 
     // ─── G4, simulasi ─────────────────────────────────────────────
     //
-    // `modifyLiquidities` tidak mengembalikan apa apa, jadi yang dibuktikan di
-    // sini adalah kontrak menerima transaksinya. Angka hasilnya diperiksa di
-    // G5 dari hitungan kita sendiri, dan dibuktikan lagi di G7 setelah kirim.
+    // `modifyLiquidities` tidak mengembalikan apa apa. `eth_estimateGas`
+    // menjalankan transaksi yang sama dan gagal jika kontrak revert, jadi satu
+    // jawaban membuktikan G4 sekaligus memberi estimasi gas. Menjalankan
+    // `eth_call` lebih dulu hanya mengulang simulasi yang identik.
     let value = v4_req.value();
     let tx = TransactionRequest::default()
         .from(req.recipient)
@@ -206,12 +207,15 @@ pub async fn plan_open_v4<P: Provider>(
         .value(value)
         .input(data.clone().into());
 
-    match provider.call(tx).await {
-        Ok(_) => gates.push(GateResult::lolos_publik(
-            "G4",
-            "simulasi",
-            format!("kontrak menerima, likuiditas {liquidity} akan tercipta"),
-        )),
+    match provider.estimate_gas(tx).await {
+        Ok(gas) => {
+            plan.gas_estimate = gas;
+            gates.push(GateResult::lolos_publik(
+                "G4",
+                "simulasi",
+                format!("kontrak menerima, likuiditas {liquidity} akan tercipta"),
+            ));
+        }
         Err(e) => {
             let teks = e.to_string();
             let pesan = if teks.contains("revert") || teks.contains("execution reverted") {
@@ -271,17 +275,6 @@ pub async fn plan_open_v4<P: Provider>(
         plan.warnings = warnings;
         return plan;
     }
-
-    plan.gas_estimate = provider
-        .estimate_gas(
-            TransactionRequest::default()
-                .from(req.recipient)
-                .to(position_manager)
-                .value(value)
-                .input(data.clone().into()),
-        )
-        .await
-        .unwrap_or(0);
 
     plan.gates = gates;
     plan.warnings = warnings;

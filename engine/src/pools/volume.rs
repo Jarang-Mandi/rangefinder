@@ -49,7 +49,7 @@ pub const JENDELA_VOLUME_BLOK: u64 = 864_000;
 ///
 /// Seluruh 24 jam tetap dibaca. Potongan ini hanya menjaga satu jawaban di
 /// bawah batas jumlah log milik RPC publik.
-pub const POTONGAN_VOLUME_BLOK: u64 = 36_000;
+pub const POTONGAN_VOLUME_BLOK: u64 = 216_000;
 
 /// Jendela terpendek yang masih diterima untuk pengukuran volume.
 ///
@@ -108,7 +108,7 @@ pub async fn ukur_volume_v3<P: Provider>(
     provider: &P,
     registry: &Registry,
     pool_alamat: &[String],
-    jeda_latar: Option<&crate::chain::logs::JedaLatar>,
+    tugas_latar: Option<&crate::chain::logs::TugasLatar>,
 ) -> Result<VolumeTerukur> {
     let mut per_pool: HashMap<String, u128> = HashMap::new();
     let mut per_pool1: HashMap<String, u128> = HashMap::new();
@@ -145,7 +145,7 @@ pub async fn ukur_volume_v3<P: Provider>(
         JENDELA_VOLUME_BLOK,
         POTONGAN_VOLUME_BLOK,
         JENDELA_VOLUME_MINIMUM,
-        jeda_latar,
+        tugas_latar,
         |dari, sampai| {
             Filter::new()
                 .address(alamat.clone())
@@ -190,7 +190,7 @@ pub async fn ukur_volume<P: Provider>(
     provider: &P,
     registry: &Registry,
     pool_ids: &[String],
-    jeda_latar: Option<&crate::chain::logs::JedaLatar>,
+    tugas_latar: Option<&crate::chain::logs::TugasLatar>,
 ) -> Result<VolumeTerukur> {
     let mut per_pool: HashMap<String, u128> = HashMap::new();
     let mut per_pool1: HashMap<String, u128> = HashMap::new();
@@ -229,7 +229,7 @@ pub async fn ukur_volume<P: Provider>(
         JENDELA_VOLUME_BLOK,
         POTONGAN_VOLUME_BLOK,
         JENDELA_VOLUME_MINIMUM,
-        jeda_latar,
+        tugas_latar,
         |dari, sampai| {
             Filter::new()
                 .address(pool_manager)

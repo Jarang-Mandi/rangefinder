@@ -591,7 +591,7 @@ pub async fn perkaya<P: Provider>(
             // yang paling sulit ditemukan belakangan.
             tracing::warn!(
                 error = %e,
-                "pengukuran volume satu jam gagal, proyeksi memakai jendela pemindaian"
+                "pengukuran volume 24 jam gagal, proyeksi memakai jendela pemindaian"
             );
             None
         }

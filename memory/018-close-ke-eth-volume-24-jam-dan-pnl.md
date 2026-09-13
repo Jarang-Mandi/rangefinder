@@ -23,9 +23,10 @@ blok, kira kira 60 menit, lalu mengannualisasikannya. Lonjakan singkat karena
 itu dapat membesarkan APR dan angka volumenya tidak dapat dibandingkan dengan
 halaman Uniswap.
 
-Jendela sekarang 864.000 blok, kira kira 24 jam pada cadence 100 ms. RPC tetap
-ditanya per potongan 36.000 blok, tetapi helper harus meneruskan pembacaan sampai
-batas bawah periode asli. Memperkecil potongan karena terlalu banyak log tidak
+Jendela sekarang 864.000 blok, kira kira 24 jam pada cadence 100 ms. Ukuran awal
+potongan dinaikkan menjadi 216.000 blok setelah pengukuran langsung; helper
+memperkecil potongan saat RPC timeout atau hasilnya terlalu banyak dan tetap
+meneruskan pembacaan sampai batas bawah periode asli. Memperkecil potongan tidak
 boleh memperkecil periode statistik. Sesudah pengukuran, pool diurutkan menurut
 APR marginal dari volume, fee, dan TVL, bukan `fee x liquidity` kasar atau
 modal acuan 1.000 unit yang tidak sebanding antara ETH dan stablecoin. Planner

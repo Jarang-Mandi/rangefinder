@@ -70,9 +70,7 @@ pub enum ZapError {
     TickTerbalik { lower: i32, upper: i32 },
     #[error("tick di luar jangkauan Uniswap: {0}")]
     TickDiLuarJangkauan(String),
-    #[error(
-        "harga sekarang berada di luar range, zap tidak diperlukan karena posisi ini satu sisi"
-    )]
+    #[error("posisi satu sisi sudah memegang aset yang dibutuhkan")]
     RangeSatuSisi,
     #[error("kutipan swap gagal: {0}")]
     KutipanGagal(String),
@@ -129,10 +127,39 @@ where
     let sqrt_b =
         tick_math::get_sqrt_ratio_at_tick(tick_upper).map_err(ZapError::TickDiLuarJangkauan)?;
 
-    // Di luar range, posisinya memang satu sisi dan zap tidak diperlukan. Yang
-    // dibutuhkan justru token yang sudah dipegang, atau tidak sama sekali.
-    if sqrt_price_x96 <= sqrt_a || sqrt_price_x96 >= sqrt_b {
-        return Err(ZapError::RangeSatuSisi);
+    // Di luar range, posisi hanya menerima satu aset. Jika user sudah memegang
+    // aset itu tidak ada yang perlu ditukar. Jika aset sumber berada di sisi
+    // sebaliknya, seluruh modal harus ditukar agar mint tidak berakhir dengan
+    // likuiditas nol.
+    if sqrt_price_x96 <= sqrt_a {
+        if sisi == SisiSumber::Token0 {
+            return Err(ZapError::RangeSatuSisi);
+        }
+        let diterima = kutipan(modal).map_err(ZapError::KutipanGagal)?;
+        return Ok(RencanaZap {
+            tukar: modal,
+            setor0: diterima,
+            setor1: U256::ZERO,
+            menganggur0: U256::ZERO,
+            menganggur1: U256::ZERO,
+            liquidity: liquidity_math::liquidity_for_amount0(sqrt_a, sqrt_b, diterima).unwrap_or(0),
+            putaran: 1,
+        });
+    }
+    if sqrt_price_x96 >= sqrt_b {
+        if sisi == SisiSumber::Token1 {
+            return Err(ZapError::RangeSatuSisi);
+        }
+        let diterima = kutipan(modal).map_err(ZapError::KutipanGagal)?;
+        return Ok(RencanaZap {
+            tukar: modal,
+            setor0: U256::ZERO,
+            setor1: diterima,
+            menganggur0: U256::ZERO,
+            menganggur1: U256::ZERO,
+            liquidity: liquidity_math::liquidity_for_amount1(sqrt_a, sqrt_b, diterima).unwrap_or(0),
+            putaran: 1,
+        });
     }
 
     // Fungsi selisih: negatif berarti ditukar terlalu sedikit, positif berarti
@@ -472,6 +499,24 @@ mod tests {
     }
 
     #[test]
+    fn harga_di_bawah_range_menukar_seluruh_token1_ke_token0() {
+        let modal = U256::from(1000u64);
+        let hasil = selesaikan(
+            sqrt_di_tick(-1000),
+            0,
+            600,
+            modal,
+            SisiSumber::Token1,
+            kutipan_datar(2, 1),
+        )
+        .unwrap();
+        assert_eq!(hasil.tukar, modal);
+        assert_eq!(hasil.setor0, U256::from(2000u64));
+        assert_eq!(hasil.setor1, U256::ZERO);
+        assert!(hasil.liquidity > 0);
+    }
+
+    #[test]
     fn harga_di_atas_range_ditolak_sebagai_satu_sisi() {
         let sqrt_p = sqrt_di_tick(1000);
         let hasil = selesaikan(
@@ -483,6 +528,24 @@ mod tests {
             kutipan_datar(1, 1),
         );
         assert_eq!(hasil.unwrap_err(), ZapError::RangeSatuSisi);
+    }
+
+    #[test]
+    fn harga_di_atas_range_menukar_seluruh_token0_ke_token1() {
+        let modal = U256::from(1000u64);
+        let hasil = selesaikan(
+            sqrt_di_tick(1000),
+            -600,
+            0,
+            modal,
+            SisiSumber::Token0,
+            kutipan_datar(1, 2),
+        )
+        .unwrap();
+        assert_eq!(hasil.tukar, modal);
+        assert_eq!(hasil.setor0, U256::ZERO);
+        assert_eq!(hasil.setor1, U256::from(500u64));
+        assert!(hasil.liquidity > 0);
     }
 
     #[test]

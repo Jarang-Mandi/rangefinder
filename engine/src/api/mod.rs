@@ -79,6 +79,10 @@ pub struct AppState {
     /// kali sebelum rencana sempat disusun ulang.
     pub flow_lock: Arc<Mutex<()>>,
     pub positions_lock: Arc<Mutex<()>>,
+    /// Tugas discovery token yang sedang berjalan. Subscribe baru membatalkan
+    /// tugas lama agar pemindaian yang hasilnya sudah tidak akan dipakai tidak
+    /// terus membebani RPC dan menahan saldo token terbaru.
+    pub lookup_task: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Penanda permintaan interaktif agar pembacaan statistik per potongan
     /// memberi jalan kepada rencana dan transaksi yang sedang ditunggu user.
     pub jeda_latar: Arc<crate::chain::logs::JedaLatar>,
@@ -304,6 +308,12 @@ fn nilai_usd_aksi(
 }
 
 impl AppState {
+    fn batalkan_lookup(&self) {
+        if let Some(lama) = self.lookup_task.lock().expect("mutex tugas lookup").take() {
+            lama.abort();
+        }
+    }
+
     pub async fn status(&self) -> EngineStatus {
         let chain = self.chain.health().await;
         let wallet = self.wallet.lock().await.status();
@@ -408,9 +418,15 @@ impl AppState {
     /// Harga dan likuiditas TIDAK pernah datang dari cache. Yang disimpan hanya
     /// kunci pool, yang memang tidak pernah berubah. Lihat `pools::cache`.
     pub fn spawn_token_lookup(&self, address: String) {
+        // Penggantian task dibuat atomik agar dua koneksi panel yang subscribe
+        // hampir bersamaan tidak sama sama meninggalkan discovery hidup.
+        let mut slot_lookup = self.lookup_task.lock().expect("mutex tugas lookup");
+        if let Some(lama) = slot_lookup.take() {
+            lama.abort();
+        }
         let ticket = self.intent.begin_lookup();
         let state = self.clone();
-        tokio::spawn(async move {
+        let tugas = tokio::spawn(async move {
             {
                 let mut active = state.active.write().await;
                 if !state.intent.lookup_current(ticket) {
@@ -438,7 +454,11 @@ impl AppState {
                 let _ = state
                     .events
                     .send(protocol::ServerMessage::TokenState(Box::new(cepat)));
-                state.kirim_saldo_menyusul().await;
+                // Discovery penuh memakai pemindaian log berat. Tunggu baca
+                // saldo yang pendek selesai supaya input amount tidak berebut
+                // RPC dengannya.
+                let saldo_selesai = state.kirim_saldo_menyusul().await;
+                let _ = saldo_selesai.await;
             }
 
             let penuh = state
@@ -455,9 +475,10 @@ impl AppState {
                 let _ = state
                     .events
                     .send(protocol::ServerMessage::TokenState(Box::new(penuh)));
-                state.kirim_saldo_menyusul().await;
+                drop(state.kirim_saldo_menyusul().await);
             }
         });
+        *slot_lookup = Some(tugas);
     }
 
     async fn build_token_state(
@@ -522,9 +543,23 @@ impl AppState {
             ));
             return out;
         };
-        out.meta = Some(meta);
+        out.meta = Some(meta.clone());
 
-        let groups = snapshot.quotes;
+        let mut groups = snapshot.quotes;
+
+        // APR, TVL, dan volume berubah lebih lambat daripada harga spot.
+        // Snapshot terakhir yang masih layak langsung ikut kiriman pertama,
+        // sementara cache yang sudah lama tetap disegarkan oleh tugas latar.
+        let sekarang_unix = chrono::Utc::now().timestamp();
+        for kelompok in &mut groups {
+            crate::pools::stats_cache::terapkan(
+                &self.store,
+                &meta.address,
+                &kelompok.quote,
+                &mut kelompok.pools,
+                sekarang_unix,
+            );
+        }
 
         if groups.is_empty() {
             out.error = Some(
@@ -635,6 +670,7 @@ impl AppState {
             // pool lama tidak lagi berlaku apa adanya. Dibiarkan supaya niat
             // user tetap terjaga, dan snap yang menyesuaikannya.
         }
+        self.batalkan_lookup();
         self.broadcast_range_view().await;
     }
 
@@ -685,11 +721,16 @@ impl AppState {
             }
         };
 
+        // Begitu user memilih pairing, daftar dari cache sudah cukup untuk
+        // interaksi. Discovery inkremental yang masih berjalan tidak boleh
+        // berebut RPC dengan saldo, range, dan rencana pairing pilihan itu.
+        self.batalkan_lookup();
+
         let _ = self
             .events
             .send(protocol::ServerMessage::TokenState(Box::new(keadaan)));
         self.broadcast_range_view().await;
-        self.kirim_saldo_menyusul().await;
+        drop(self.kirim_saldo_menyusul().await);
     }
 
     /// Ukur statistik dan saldo pasangan yang sedang aktif, lalu kirim ulang.
@@ -702,7 +743,12 @@ impl AppState {
     ///
     /// Kegagalannya tidak mengubah apa pun: panel tetap menampilkan keadaan
     /// yang sudah diterima, hanya tanpa angka.
-    async fn kirim_saldo_menyusul(&self) {
+    async fn kirim_saldo_menyusul(&self) -> tokio::sync::oneshot::Receiver<()> {
+        // Setiap pemuatan ulang atau pergantian pasangan membatalkan statistik
+        // lama. Tanpa tiket ini, pemindaian pairing awal tetap menghabiskan 24
+        // jam log dan menahan pairing yang baru dipilih di belakangnya.
+        let tugas_stats = self.jeda_latar.tugas_baru();
+        let (saldo_selesai_tx, saldo_selesai_rx) = tokio::sync::oneshot::channel();
         let s = self.clone();
         tokio::spawn(async move {
             let Ok(provider) = s.chain.provider().await else {
@@ -731,6 +777,7 @@ impl AppState {
                 let _prioritas = s.jeda_latar.prioritaskan();
                 s.baca_saldo(&provider, &meta, &kelompok).await
             };
+            let _ = saldo_selesai_tx.send(());
 
             // Saldo adalah angka yang langsung dibutuhkan kotak amount. Kirim
             // begitu RPC menjawab; pengukuran APR/TVL di bawah tidak boleh
@@ -764,7 +811,16 @@ impl AppState {
             // yang teratas. Tanpa ini, setiap kali user berpindah pasangan,
             // kolom APR, TVL, dan volume kosong tanpa penjelasan.
             let mut kelompok = kelompok;
-            let perlu_stats = kelompok.pools.iter().all(|p| p.stats.is_none());
+            let perlu_stats = crate::pools::stats_cache::status(
+                &s.store,
+                meta.as_ref()
+                    .map(|m| m.address.as_str())
+                    .unwrap_or_default(),
+                &kelompok.quote,
+                &kelompok.pools,
+                chrono::Utc::now().timestamp(),
+            )
+            .perlu_penyegaran();
             if !perlu_stats {
                 return;
             }
@@ -792,9 +848,19 @@ impl AppState {
                 &s.registry,
                 meta_stats,
                 &mut kelompok,
-                Some(&s.jeda_latar),
+                Some(&tugas_stats),
             )
             .await;
+            if !tugas_stats.aktif() {
+                return;
+            }
+            crate::pools::stats_cache::simpan(
+                &s.store,
+                &meta_stats.address,
+                &kelompok.quote,
+                &kelompok.pools,
+                chrono::Utc::now().timestamp(),
+            );
 
             {
                 // Hasil pengukuran disimpan ke keadaan aktif supaya tidak
@@ -875,6 +941,7 @@ impl AppState {
                 s.broadcast_range_view().await;
             }
         });
+        saldo_selesai_rx
     }
 
     /// Susun rencana membuka posisi, jalankan seluruh gate, TIDAK mengirim.
@@ -883,6 +950,7 @@ impl AppState {
     /// range yang sedang digambar, dan saldo wallet. Panel hanya menyebut
     /// nominalnya, karena itu satu satunya hal yang memang keputusan user.
     pub async fn on_quote_range(&self, task: execute::QuoteTask) {
+        self.batalkan_lookup();
         let _prioritas = self.jeda_latar.prioritaskan();
         let revision = task.revision;
         match self.susun_rencana(task).await {
@@ -1083,8 +1151,24 @@ impl AppState {
             .map_err(|e| e.to_string())?;
         let multicall = alamat.multicall;
 
-        let (saldo0, saldo1) =
-            execute::saldo_dua_token(&provider, multicall, pemilik, token0, token1).await?;
+        // Saldo gas tidak bergantung pada saldo token pasangan. Untuk pool
+        // tanpa ETH asli, baca keduanya bersamaan agar rencana tidak membayar
+        // satu perjalanan RPC tambahan.
+        let (saldo_pasangan, saldo_gas) = tokio::join!(
+            execute::saldo_dua_token(&provider, multicall, pemilik, token0, token1),
+            async {
+                if token0.is_zero() || token1.is_zero() {
+                    Ok(None)
+                } else {
+                    provider
+                        .get_balance(pemilik)
+                        .await
+                        .map(Some)
+                        .map_err(|e| format!("gagal membaca saldo ETH: {e}"))
+                }
+            }
+        );
+        let (saldo0, saldo1) = saldo_pasangan?;
 
         let meme0 = pool.token0.eq_ignore_ascii_case(&meta.address);
         let source0 = (task.deposit.side == deposit::Side::Meme) == meme0;
@@ -1169,10 +1253,7 @@ impl AppState {
         } else if token1.is_zero() {
             saldo1
         } else {
-            provider
-                .get_balance(pemilik)
-                .await
-                .map_err(|e| format!("gagal membaca saldo ETH: {e}"))?
+            saldo_gas?.ok_or("saldo ETH tidak tersedia")?
         };
         let eth_balance_f64 = eth_balance.to_string().parse::<f64>().unwrap_or(0.0) / 1e18;
 
@@ -1204,29 +1285,43 @@ impl AppState {
             DEADLINE_DETIK,
         );
 
-        let mut plan = crate::exec::plan::plan_open_auto(
-            &provider,
-            &alamat,
-            &req,
-            &self.cfg.limits,
-            &self.cfg.execution,
+        // Jumlah yang dipakai Zap berasal dari hitungan murni yang juga dipakai
+        // pipeline. Karena tidak menunggu RPC, simulasi mint, pencarian Zap,
+        // dan harga gas dapat berjalan bersamaan tanpa mengubah hasilnya.
+        let (_, amount0_awal, amount1_awal) = crate::exec::pipeline::hitung_jumlah(
+            &pool, tick_lower, tick_upper, available0, available1,
         )
-        .await;
-
+        .unwrap_or_default();
+        let (mut plan, zap, harga_gas) = tokio::join!(
+            crate::exec::plan::plan_open_auto(
+                &provider,
+                &alamat,
+                &req,
+                &self.cfg.limits,
+                &self.cfg.execution,
+            ),
+            async {
+                if task.deposit.zap && task.budget_override.is_none() {
+                    self.hitung_zap(
+                        &provider,
+                        &alamat,
+                        &pool,
+                        tick_lower,
+                        tick_upper,
+                        available0,
+                        available1,
+                        amount0_awal,
+                        amount1_awal,
+                    )
+                    .await
+                } else {
+                    None
+                }
+            },
+            provider.get_gas_price()
+        );
         let amount0: alloy::primitives::U256 = plan.amount0.parse().unwrap_or_default();
         let amount1: alloy::primitives::U256 = plan.amount1.parse().unwrap_or_default();
-
-        // Zap dihitung setelah rencana, karena ia butuh tahu berapa yang benar
-        // benar terpakai. Kalau modal sudah cocok rasio, hasilnya None.
-        let zap = if task.deposit.zap && task.budget_override.is_none() {
-            self.hitung_zap(
-                &provider, &alamat, &pool, tick_lower, tick_upper, available0, available1, amount0,
-                amount1,
-            )
-            .await
-        } else {
-            None
-        };
 
         // Untuk posisi baru, izin mengikuti ANGGARAN yang sudah dibatasi input
         // user, bukan jumlah mint pada satu snapshot harga. Sebelum Zap, saldo
@@ -1428,7 +1523,7 @@ impl AppState {
         // Harga gas dibaca sekarang, bukan diandaikan. Ia berubah dari blok ke
         // blok, dan biaya yang dihitung dari angka tetap akan meleset persis
         // saat rantai sedang sibuk, yaitu saat angkanya paling penting.
-        let (gas_biaya, gas_gwei) = match provider.get_gas_price().await {
+        let (gas_biaya, gas_gwei) = match harga_gas {
             Ok(wei) => {
                 let harga = wei as f64;
                 (
@@ -1778,15 +1873,18 @@ impl AppState {
 
         // Kutipan final untuk jumlah yang benar benar akan ditukar. Angka inilah
         // yang dipakai sebagai dasar batas slippage, bukan hasil interpolasi.
-        let diterima = crate::exec::v4::quote::kutip_exact_in(
-            provider,
-            quoter,
-            &key,
-            zero_for_one,
-            rencana.tukar,
-        )
-        .await
-        .ok()?;
+        let diterima = match cache.get(&rencana.tukar.to_string()) {
+            Some(hasil_langsung) => *hasil_langsung,
+            None => crate::exec::v4::quote::kutip_exact_in(
+                provider,
+                quoter,
+                &key,
+                zero_for_one,
+                rencana.tukar,
+            )
+            .await
+            .ok()?,
+        };
         if diterima.is_zero() {
             return None;
         }

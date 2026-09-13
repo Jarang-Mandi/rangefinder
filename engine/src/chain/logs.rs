@@ -28,7 +28,7 @@
 //!   sangat berbeda dari tidak bisa membaca.
 
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicU64, AtomicUsize, Ordering},
     Arc,
 };
 use std::time::Duration;
@@ -49,6 +49,13 @@ pub const JEDA_DIBATASI_MS: u64 = 800;
 /// berturut turut tanpa jeda justru memicu batas laju.
 pub const JEDA_PERSEMPIT_MS: u64 = 400;
 
+/// Jeda pendek setelah satu potongan berhasil.
+///
+/// Empat jawaban besar yang diminta tanpa sela pernah membuat potongan
+/// berikutnya terkena 429. Sela ini lebih murah daripada lima percobaan ulang
+/// di lapisan transport.
+pub const JEDA_ANTAR_POTONGAN_MS: u64 = 300;
+
 /// Membuat pekerjaan log latar memberi jalan kepada permintaan interaktif.
 ///
 /// Satu `PrioritasInteraktif` hidup selama penyusunan rencana atau pengiriman
@@ -59,6 +66,8 @@ pub const JEDA_PERSEMPIT_MS: u64 = 400;
 #[derive(Debug, Clone, Default)]
 pub struct JedaLatar {
     interaktif: Arc<AtomicUsize>,
+    pembaca_log: Arc<tokio::sync::Mutex<()>>,
+    generasi: Arc<AtomicU64>,
 }
 
 impl JedaLatar {
@@ -69,11 +78,56 @@ impl JedaLatar {
         }
     }
 
-    async fn tunggu(&self) {
-        while self.interaktif.load(Ordering::SeqCst) > 0 {
-            tokio::time::sleep(Duration::from_millis(50)).await;
+    async fn giliran_log(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.pembaca_log.lock().await
+    }
+
+    /// Batalkan pekerjaan statistik lama dan buat tiket untuk pilihan terbaru.
+    pub fn tugas_baru(&self) -> TugasLatar {
+        let generasi = self.generasi.fetch_add(1, Ordering::SeqCst) + 1;
+        TugasLatar {
+            jeda: self.clone(),
+            generasi,
         }
     }
+}
+
+/// Identitas satu pengukuran statistik pasangan.
+///
+/// Pemilihan pasangan baru membuat tiket sebelumnya tidak aktif. Pemeriksaan
+/// dilakukan sebelum setiap potongan log supaya pekerjaan lama tidak menahan
+/// pasangan yang baru dipilih.
+#[derive(Debug, Clone)]
+pub struct TugasLatar {
+    jeda: JedaLatar,
+    generasi: u64,
+}
+
+impl TugasLatar {
+    pub fn aktif(&self) -> bool {
+        self.jeda.generasi.load(Ordering::SeqCst) == self.generasi
+    }
+
+    async fn tunggu(&self) -> bool {
+        while self.jeda.interaktif.load(Ordering::SeqCst) > 0 {
+            if !self.aktif() {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        self.aktif()
+    }
+
+    async fn giliran_log(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.jeda.giliran_log().await
+    }
+}
+
+const LATAR_DIBATALKAN: &str = "pekerjaan log latar sudah tidak dipilih";
+
+/// Benar kalau error hanya menyatakan bahwa user sudah memilih pasangan lain.
+pub fn latar_dibatalkan(error: &anyhow::Error) -> bool {
+    format!("{error:#}").contains(LATAR_DIBATALKAN)
 }
 
 pub struct PrioritasInteraktif {
@@ -96,6 +150,7 @@ pub fn terlalu_banyak(e: &impl std::fmt::Display) -> bool {
     teks.contains("exceeds limit")
         || teks.contains("too many results")
         || teks.contains("query returned more than")
+        || teks.contains("log query timed out")
 }
 
 /// Berapa blok paling sedikit yang masih masuk akal untuk dipindai.
@@ -220,13 +275,25 @@ pub async fn baca_mundur_lengkap<P, F>(
     jendela_total: u64,
     potongan_awal: u64,
     potongan_minimum: u64,
-    jeda_latar: Option<&JedaLatar>,
+    tugas_latar: Option<&TugasLatar>,
     bangun: F,
 ) -> Result<LogTerjendela>
 where
     P: Provider,
     F: Fn(u64, u64) -> Filter,
 {
+    // Endpoint publik rantai ini konsisten lebih cepat ketika hanya satu
+    // pemindaian log berat yang berjalan. Pasangan lain menunggu hasil yang
+    // sedang dibaca alih alih saling memicu retry 429.
+    let _giliran_log = if let Some(tugas) = tugas_latar {
+        let giliran = tugas.giliran_log().await;
+        if !tugas.aktif() {
+            anyhow::bail!(LATAR_DIBATALKAN);
+        }
+        Some(giliran)
+    } else {
+        None
+    };
     let target = sampai.saturating_sub(jendela_total).max(lantai);
     let mut ujung = sampai;
     let mut ukuran = potongan_awal.max(1).min(jendela_total.max(1));
@@ -237,8 +304,10 @@ where
     'bagian: loop {
         let mut sabar = SABAR_MAKSIMUM;
         loop {
-            if let Some(jeda) = jeda_latar {
-                jeda.tunggu().await;
+            if let Some(tugas) = tugas_latar {
+                if !tugas.tunggu().await {
+                    anyhow::bail!(LATAR_DIBATALKAN);
+                }
             }
             let awal = ujung.saturating_sub(ukuran.saturating_sub(1)).max(target);
             match provider.get_logs(&bangun(awal, ujung)).await {
@@ -248,6 +317,9 @@ where
                         break 'bagian;
                     }
                     ujung = awal - 1;
+                    if tugas_latar.is_some() {
+                        tokio::time::sleep(Duration::from_millis(JEDA_ANTAR_POTONGAN_MS)).await;
+                    }
                     continue 'bagian;
                 }
                 Err(e) if lebar_dibatasi(&e) => {
@@ -348,6 +420,13 @@ mod tests {
         let jumlah = Palsu("logs matched by query exceeds limit of 10000");
         assert!(terlalu_banyak(&jumlah));
         assert!(!lebar_dibatasi(&jumlah));
+
+        // RPC publik memakai pesan ini ketika rentang berisi terlalu banyak
+        // pekerjaan untuk selesai tepat waktu. Memperkecil potongan berhasil
+        // pada filter dan blok yang sama.
+        let waktu = Palsu("log query timed out");
+        assert!(terlalu_banyak(&waktu));
+        assert!(!lebar_dibatasi(&waktu));
     }
 
     #[test]
@@ -409,8 +488,8 @@ mod tests {
     async fn pembaca_latar_menunggu_sampai_permintaan_interaktif_selesai() {
         let jeda = JedaLatar::default();
         let prioritas = jeda.prioritaskan();
-        let salinan = jeda.clone();
-        let penunggu = tokio::spawn(async move { salinan.tunggu().await });
+        let tugas = jeda.tugas_baru();
+        let penunggu = tokio::spawn(async move { tugas.tunggu().await });
 
         tokio::task::yield_now().await;
         assert!(!penunggu.is_finished());
@@ -420,5 +499,37 @@ mod tests {
             .await
             .expect("pembaca latar harus dilepas")
             .expect("tugas penunggu tidak boleh gagal");
+    }
+
+    #[tokio::test]
+    async fn hanya_satu_pembaca_log_latar_berjalan() {
+        let jeda = JedaLatar::default();
+        let pertama = jeda.giliran_log().await;
+        let salinan = jeda.clone();
+        let penunggu = tokio::spawn(async move {
+            let _kedua = salinan.giliran_log().await;
+        });
+
+        tokio::task::yield_now().await;
+        assert!(!penunggu.is_finished());
+
+        drop(pertama);
+        tokio::time::timeout(Duration::from_millis(200), penunggu)
+            .await
+            .expect("pembaca kedua harus mendapat giliran")
+            .expect("tugas pembaca kedua tidak boleh gagal");
+    }
+
+    #[tokio::test]
+    async fn tiket_baru_membatalkan_pekerjaan_latar_lama() {
+        let jeda = JedaLatar::default();
+        let lama = jeda.tugas_baru();
+        assert!(lama.aktif());
+
+        let baru = jeda.tugas_baru();
+        assert!(!lama.aktif());
+        assert!(baru.aktif());
+        assert!(!lama.tunggu().await);
+        assert!(baru.tunggu().await);
     }
 }

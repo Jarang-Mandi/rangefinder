@@ -92,11 +92,20 @@ memakai volume bergulir 24 jam, dibaca dalam potongan yang tetap mencakup
 seluruh periode, lalu pool diurutkan menurut APR terukur. Saldo pasangan dikirim
 segera setelah RPC saldo menjawab tanpa menunggu statistik itu. Pengukuran
 statistik untuk snapshot pasangan yang sama dideduplikasi dan setiap potongan
-log memberi jalan kepada rencana atau transaksi interaktif. Saldo native dan
-ERC20 dibaca bersamaan, saldo ETH yang sudah ada dipakai ulang sebagai saldo
-gas, dan titik kutipan Zap dijalankan maksimal enam belas sekaligus sebelum
-kutipan final diverifikasi langsung. Izin PositionManager yang baru relevan
-sesudah Zap tidak dibaca pada rencana sebelum swap.
+log memberi jalan kepada rencana atau transaksi interaktif. Potongan awalnya
+216.000 blok, pembaca log latar diserialkan, statistik pairing lama dibatalkan
+saat pairing berubah, dan discovery lama dibatalkan saat pool atau rencana
+dipilih. Snapshot APR, TVL, dan volume yang paling lama satu jam disimpan di
+redb; lima menit pertama dianggap
+segar dan sisanya ditampilkan sambil disegarkan. Statistik diterapkan per ID
+pool supaya perubahan daftar pool tidak mengosongkan semua angka. Saldo cache
+diselesaikan sebelum discovery penuh dimulai. Saldo native dan ERC20 dibaca bersamaan, saldo
+ETH yang sudah ada dipakai ulang sebagai saldo gas, dan titik kutipan Zap
+dijalankan maksimal enam belas sekaligus sebelum kutipan final diverifikasi
+langsung. Simulasi mint, harga gas, dan Zap dimulai bersamaan. Range satu sisi
+menukar seluruh aset sumber jika sumber berada di sisi yang tidak diterima oleh
+range. Izin PositionManager yang baru relevan sesudah Zap tidak dibaca pada
+rencana sebelum swap.
 
 Setelah fase 6 ditutup, seluruh pekerjaan berikutnya adalah perbaikan yang
 datang dari user memakai panelnya sendiri. Itu tercatat di PRD 6.15, dan
@@ -299,7 +308,7 @@ tersandung:
 | Token lawan tidak pernah ditebak | `pools/mod.rs::discover_for_token` | FIG punya 33 pool USDG, 5 pool ETH asli, dan nol pool WETH. Pencarian yang mengandaikan WETH melaporkan token ramai itu tidak punya pool |
 | Desimal kutipan ikut kelompoknya | `pools::QuoteGroup` dan `api/mod.rs` | USDG berdesimal 6. Menganggapnya 18 menggeser seluruh harga 10^12 |
 | Pool fee nol atau di atas 10 persen dibuang | `pools/mod.rs::implausible_fee` | Skor likuiditas dikali fee memenangkan pool fee 80 persen yang tidak pernah ditukar siapa pun, dan pool fee 0 persen memegang likuiditas terbesar sambil membayar LP nol |
-| Cache hanya menyimpan kunci pool | `pools/cache.rs` | PoolKey tidak pernah berubah, harga dan likuiditas berubah tiap blok. Menyimpan harga berarti suatu saat mengirim transaksi berdasarkan angka basi |
+| Cache discovery hanya menyimpan kunci pool | `pools/cache.rs` | PoolKey tidak pernah berubah, harga dan likuiditas berubah tiap blok. Menyimpan harga berarti suatu saat mengirim transaksi berdasarkan angka basi; cache statistik terpisah tidak pernah dipakai sebagai harga eksekusi |
 | `scanned_to` hanya maju kalau pemindaian benar benar selesai | `pools::pindai_dan_gabung` | Memajukannya setelah kegagalan berarti blok yang terlewat tidak pernah dipindai lagi, dan poolnya hilang selamanya |
 | Desimal kutipan tidak pernah ditebak | `pools::kenali_quote` | Lawan yang tidak dikenal dibaca on chain, dan kalau gagal kelompoknya dibuang. Menebak 18 pada USDG menggeser harga sepuluh triliun kali |
 | Satu permintaan berat pada satu waktu | `pools::pindai_dan_gabung` | Dua getLogs berbarengan membuat yang kedua kena 429 lalu backoff, dan totalnya lima kali lebih lambat daripada berurutan |
@@ -318,6 +327,7 @@ tersandung:
 | ETH asli tidak punya izin, ia ikut sebagai msg.value | `exec/v4/permit.rs` dan `calldata.rs::value` | Currency nol berarti ETH asli. Mengirim ETH ke pool yang tidak memakainya membuatnya tersangkut di kontrak |
 | URL RPC disamarkan sebelum keluar dari engine | `chain/endpoint.rs` | URL penyedia berbayar memuat API key di jalurnya, dan URL itu masuk ke log serta ke panel. Penyamarannya di tempat pembuatan, bukan di tempat penampilan, karena tempat penampilan bisa bertambah |
 | Angka dua token berbeda tidak pernah dibandingkan langsung | `exec/zap.rs` | Sisa 77.380 USDG berdesimal 6 lebih bernilai daripada 12.325.754 FIG berdesimal 18, tapi perbandingan mentah menyatakan sebaliknya. Bandingkan likuiditas per sisi, yang tanpa satuan |
+| Range satu sisi tetap memeriksa sisi aset sumber | `exec/zap.rs` | Harga di bawah range hanya menerima token0 dan harga di atas range hanya menerima token1. Sumber yang berada di sisi sebaliknya harus ditukar seluruhnya; melewati Zap membuat likuiditas nol |
 | Kutipan quoter yang nol adalah kegagalan | `exec/v4/quote.rs` | Pool tanpa likuiditas di arah itu menjawab nol tanpa revert, dan menerimanya sebagai jawaban sah membuat pembagian modal sepenuhnya salah |
 | Struct UniversalRouter punya `minHopPriceX36` sebelum `hookData` | `exec/router_rbh.rs` | Terbukti dari offset `hookData` bernilai 0x140, sepuluh kata, sedangkan struct standar sembilan kata. Memakai struct standar membuat kontrak membaca sampah |
 | UniversalRouter butuh izin Permit2 sendiri | `exec/plan.rs::izin_permit2_untuk` | Izin ke PositionManager tidak berlaku untuknya, dan melewatkannya membuat swap revert setelah gas terbakar |

@@ -53,3 +53,4 @@ setiap agent.
 | `017-reload-preview-dan-status-transaksi.md` | Pemulihan garis setelah reload, preview setoran ringan, batching approval, dan status transaksi yang jelas |
 | `018-close-ke-eth-volume-24-jam-dan-pnl.md` | Konversi hasil close, perbandingan volume Uniswap, saldo bertahap, dan PnL perkiraan |
 | `019-prioritas-rpc-dan-zap-paralel.md` | Engine release, prioritas RPC interaktif, deduplikasi statistik, dan kutipan Zap paralel |
+| `020-cache-statistik-dan-pembatalan-lookup.md` | Cache APR/TVL/volume, pembatalan discovery lama, dan probe single input USDG |

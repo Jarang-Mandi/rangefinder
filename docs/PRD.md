@@ -471,7 +471,7 @@ Perintah `cargo xtask pairs <alamat>` menampilkan seluruh rincian ini, termasuk 
 
 ### 4.3c Kenapa pool muncul seketika
 
-Zenith LP menampilkan puluhan pool sebuah token tanpa jeda, sedangkan versi pertama Rangefinder butuh 38 detik untuk token yang sama. Selisihnya bukan pada kecerdasan melainkan pada jumlah perjalanan bolak balik ke RPC. Empat perubahan menutup jarak itu, dan semuanya diukur, bukan ditebak.
+Zenith LP menampilkan puluhan pool sebuah token tanpa jeda, sedangkan versi pertama Rangefinder butuh 38 detik untuk token yang sama. Selisihnya bukan pada kecerdasan melainkan pada jumlah perjalanan bolak balik ke RPC. Perubahan berikut menutup jarak itu, dan semuanya diukur, bukan ditebak.
 
 **Satu, gabungkan panggilan lewat Multicall3.** Membaca `getSlot0` dan `getLiquidity` untuk 39 pool berarti 78 permintaan berurutan. Pada RPC publik dengan latensi sekitar 350 ms itu 25 detik. Multicall3 mengeksekusi seluruhnya dalam satu `eth_call`, dan hasilnya 380 ms. Metadata token, pencarian pool V3, dan pembacaan pool V4 sekarang berada dalam satu batch yang sama.
 
@@ -513,7 +513,22 @@ potongan log. Saat user meminta rencana posisi atau menjalankan transaksi,
 potongan yang sedang berjalan diselesaikan, lalu pemindaian menunggu sampai
 permintaan interaktif selesai. Tahap cache dan discovery penuh juga tidak boleh
 memulai dua pengukuran statistik untuk token, pasangan, dan himpunan pool yang
-sama.
+sama. Pekerjaan statistik pairing lama dihentikan ketika user memilih pairing
+lain. Saat pool dipilih atau rencana diminta, discovery lama dihentikan dan
+statistik pairing aktif memberi giliran sampai pekerjaan interaktif selesai.
+Seluruh pembaca log latar memakai satu antrean karena
+endpoint publik terbukti membalas 429 ketika dua pemindaian berat berjalan
+bersamaan. Subscribe baru juga membatalkan task discovery token lama, bukan
+hanya membuang hasil akhirnya.
+
+**APR, TVL, dan volume memakai cache singkat.** Snapshot statistik 24 jam
+disimpan di redb menurut token dan pairing, lalu diterapkan per ID pool. Pool
+yang masih ada langsung menerima statistiknya meskipun satu pool baru muncul
+atau pool lama hilang. Pool baru memicu penyegaran. Cache berumur paling banyak
+lima menit langsung dipakai. Cache berumur lima menit sampai satu jam tetap
+ditampilkan sambil disegarkan di latar. Hasil yang lebih lama atau hasil volume
+yang gagal tidak dipakai. Kegagalan TVL satu pool tidak membuang volume valid
+milik pool lain.
 
 **Yang tidak pernah di-cache adalah harga dan likuiditas.** Keduanya selalu dibaca ulang dari rantai. Pada alat yang mengirim transaksi, angka basi yang terlihat sah jauh lebih berbahaya daripada menunggu sebentar.
 
@@ -526,6 +541,13 @@ sama.
 | setelah rentang log diperlebar | 15,1 detik |
 | setelah pemindaian diserialkan | sekitar 3 detik |
 | dengan kunci pool tersimpan | 400 sampai 700 ms |
+
+Probe release pada PAIREX/USDG `0xb8cf4ad...` dengan range yang diminta user
+$0,001203 sampai $0,003615 memberi statistik cache, range, dan pilihan pairing
+dalam 5,54 sampai 5,92 detik, saldo USDG dalam 7,23 sampai 7,75 detik, lalu
+`open_plan` sumber 1 USDG dalam 12,66 sampai 13,56 detik dari awal. Bagian
+perencanaan setelah nominal dikirim memerlukan 5,43 sampai 5,80 detik. Probe
+berhenti pada rencana dan tidak mengirim approval, Zap, atau transaksi mint.
 
 ### 4.3d Berpindah pasangan tanpa memindai ulang
 
@@ -1012,7 +1034,7 @@ berkas di `engine/fixtures/golden/`, sehingga deterministik. Kalau
 perbandingannya gagal, yang salah adalah builder, bukan fixture. Memperbarui
 fixture supaya uji lewat berarti menyembunyikan kesalahan yang akan muncul lagi
 saat dana bergerak.
-| G4 | Simulasi | `eth_call` terhadap state pending sebelum kirim. Revert berarti batal, dan pesan revert didekode ke bahasa manusia. |
+| G4 | Simulasi | Jalankan transaksi terhadap state pending sebelum kirim. V3 memakai `eth_call`; V4 memakai `eth_estimateGas` karena `modifyLiquidities` tidak membawa hasil, sehingga satu eksekusi membuktikan tidak ada revert sekaligus memberi estimasi gas. Pesan revert didekode ke bahasa manusia. |
 | G5 | Asersi invarian | Hasil simulasi diperiksa: tokenId tercipta, delta likuiditas sesuai, jumlah token dalam batas slippage, tidak ada token tersisa di kontrak, tick akhir sama dengan yang diminta. |
 | G6 | Pembatas nilai | Mode dry run untuk semua fitur baru. Batas nominal per transaksi dan per hari. Posisi pertama pada pool baru dibatasi ke ukuran kecil yang bisa diatur. |
 | G7 | Verifikasi pasca kirim | Setelah receipt, engine membaca ulang posisi on chain dan membandingkan dengan yang diharapkan. Selisih memicu alarm dan menghentikan otomasi. |
@@ -1059,11 +1081,19 @@ Selisihnya bukan hal kecil. Pada pool FIG/USDG dengan modal yang sama, versi yan
 
 Titik pencarian Zap yang tidak saling bergantung dikutip maksimal enam belas
 sekaligus. Semua jawaban tetap berasal dari V4Quoter, dan jumlah final yang
-akan ditukar dikutip sekali lagi secara langsung. Titik yang gagal sekali
+akan ditukar memakai kutipan langsung yang sudah ada atau dikutip sekali lagi
+jika titiknya belum pernah diminta. Titik yang gagal sekali
 dicoba ulang berurutan. Paralelisme ini hanya mengubah waktu tunggu, bukan
 sumber harga atau batas slippage. Izin PositionManager belum dibaca sebelum
 Zap karena saldo akhirnya belum ada; izin itu dihitung sesudah swap ketika
 rencana disusun ulang.
+
+**Range satu sisi tetap memperhatikan aset sumber.** Di bawah range, posisi
+hanya menerima token0; di atas range, posisi hanya menerima token1. Jika user
+memegang sisi yang benar, Zap tidak diperlukan. Jika user memilih aset di sisi
+sebaliknya, seluruh jumlah sumber dikutip dan ditukar ke aset yang diterima
+range. Tanpa cabang ini, perencana berhenti pada likuiditas nol sebelum Zap
+sempat memperbaiki komposisinya.
 
 Kutipan yang menjawab nol diperlakukan sebagai kegagalan, bukan sebagai jawaban. Nol yang diterima sebagai jawaban sah akan menghasilkan pembagian modal yang sepenuhnya salah.
 
@@ -1185,9 +1215,11 @@ setiap swap di rantai untuk menemukan pool mana yang ramai, jadi jendelanya
 beberapa menit. Jendela sependek itu tidak boleh dipakai memproyeksikan hasil
 setahun: pengalinya ratusan ribu, dan satu ledakan volume dua menit pernah
 menghasilkan proyeksi 7.645.797 persen. Setelah poolnya diketahui, lognya bisa
-disaring menurut poolId, sehingga jendela bergulir 24 jam dapat dibaca dalam
-potongan satu jam. Semua potongan diteruskan sampai batas bawah periode semula,
-jadi batas jumlah log RPC tidak diam diam mengubah 24 jam menjadi satu jam.
+disaring menurut poolId, sehingga jendela bergulir 24 jam dibaca mulai dari
+potongan 216.000 blok, kira kira enam jam. Pesan `log query timed out` atau batas
+jumlah hasil memperkecil potongan secara adaptif, sedangkan 429 menunggu tanpa
+memperbanyak permintaan. Semua potongan diteruskan sampai batas bawah periode
+semula, jadi batas RPC tidak diam diam mengubah 24 jam menjadi jendela pendek.
 Jendela yang benar benar terpakai selalu ikut hasilnya, karena volume tanpa
 jendela tidak bisa dibandingkan.
 
@@ -1401,7 +1433,9 @@ panel akan berbohong setelah pembulatan.
 **Perkiraan biaya gas ditampilkan dalam token gas, bukan jumlah unit.** Jumlah
 unit tidak bisa dinilai tanpa harga gas, dan harga gas berubah dari blok ke
 blok, jadi ia dibaca saat rencana disusun dan ikut dikirim supaya angkanya bisa
-diperiksa ulang.
+diperiksa ulang. Simulasi mint, pencarian jumlah Zap, dan pembacaan harga gas
+berjalan bersamaan karena ketiganya tidak saling bergantung. Jumlah yang dipakai
+Zap berasal dari hitungan likuiditas murni yang sama dengan pipeline mint.
 
 **Wallet dibuat dari satu isian.** User menempelkan passphrase atau kunci privat
 ke kotak yang sama, dan panel mengenalinya dari bentuknya. Kotak kedua hanya
@@ -1487,6 +1521,9 @@ tokennya dulu. Saat user berpindah pasangan, engine mengirim saldo segera
 setelah pembacaan RPC selesai dan baru mengukur statistik pool sesudahnya.
 Saldo native dan batch ERC20 dibaca bersamaan. Pada pasangan ETH asli, saldo
 yang sama dipakai juga sebagai saldo gas supaya tidak ada pembacaan RPC kedua.
+Discovery penuh menunggu pembacaan saldo cache selesai, lalu dibatalkan jika
+user sudah memilih pairing, pool, atau meminta rencana. Dengan begitu saldo dan
+tombol utama tidak berebut RPC dengan hasil discovery yang sudah tidak relevan.
 Panel mengulang subscribe saat koneksi pairing siap agar permintaan awal tidak hilang.
 
 **Riwayat notifikasi dihapus dari panel**, menyimpang dari 3.7. Toast di halaman
@@ -1610,7 +1647,7 @@ Engine ke panel:
 | `scan_results` | `{ rows[], hooks[], adopsi_lengkap, jendelaPindaiMenit, jendelaVolumeMenit, volumeJendelaPendek, modalAcuan, totalSwap, dipindaiPada, error }`. Setiap baris membawa simbol, pasangan, market cap, volume, kedalaman, hasil jendela, APR, efisiensi, umur, risiko, label, dan alasan. `hooks[]` membawa code_hash, jumlah pool, umur, TVL USD, LP unik aktif, lima status kriteria, serta lolos_otomatis. `adopsi_lengkap` benar setelah sejarah Initialize dan ModifyLiquidity selesai | 6 |
 | `signals` | `{ address, barTerpakai, harga, sideways, basis, saran, konsentrasiDibandingLebar, dihitungPada }`. `sideways` dan `basis` kosong berarti datanya belum cukup, BUKAN berarti kondisinya tidak menarik | 6 |
 | `action_plan` | `{ plan_id, position_id, request_id, token_id, action, nama, gates[], gas_estimate, dry_run, menutup, siap, expires_at, fee0, fee1, allowances[], amounts, tick_lower_baru, tick_upper_baru }`. Tambah dan rebalance memakai R1; tambah modal baru juga memakai R2. Panel memakai hasilnya untuk mengaktifkan satu tombol, sedangkan gate, simulasi, dan approval tetap berada di alur engine | 5 |
-| `token_state` | `{ address, meta, quotes[], pools[], selectedQuote, selectedPoolId, saldo, error }`. `saldo` memuat saldo wallet untuk kedua sisi pasangan terpilih beserta saldo token gas, dan bernilai kosong kalau wallet belum dibuka, yang berbeda dari saldo nol. Setiap pool membawa `stats` berisi volume 24 jam, TVL, dan proyeksi APR kalau sudah terukur. Setiap `quote` membawa `{ quote, quoteSymbol, quoteDecimals, canonical, pools[] }`. Keadaan pool dikirim lebih dulu, saldo menyusul segera setelah RPC saldo menjawab, lalu statistik menyusul tanpa menahan input setoran. Lihat 4.3c | 2 |
+| `token_state` | `{ address, meta, quotes[], pools[], selectedQuote, selectedPoolId, saldo, error }`. `saldo` memuat saldo wallet untuk kedua sisi pasangan terpilih beserta saldo token gas, dan bernilai kosong kalau wallet belum dibuka, yang berbeda dari saldo nol. Setiap pool membawa `stats` berisi volume 24 jam, TVL, dan proyeksi APR kalau sudah terukur. Setiap `quote` membawa `{ quote, quoteSymbol, quoteDecimals, canonical, pools[] }`. Keadaan pool dan statistik cache dikirim lebih dulu, saldo menyusul segera setelah RPC saldo menjawab, lalu penyegaran statistik berjalan di latar tanpa menahan input setoran. Lihat 4.3c | 2 |
 | `range_view` | `{ poolId, tickSpacing, ethUsd, current, lower, upper, widthPct, inRange, warnings[] }`. Tiap batas memuat `tick`, `priceWeth`, `priceUsd`, `mcapUsd`, dan `driftBps`, yaitu selisih akibat pembulatan ke grid tick | 2 |
 | `price_tick` | `{ address, priceUsd, priceWeth, mcapUsd }` | 2 |
 | `range_quote` | `{ quoteId, feeApr, expectedHoursInRange, ilBreakevenHours, crowdedLiquidityUsd, ourSharePct, amount0, amount1, swapNeeded, priceImpact, gasEstimate, warnings[] }` | 3 |
