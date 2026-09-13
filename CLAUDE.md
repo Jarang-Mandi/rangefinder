@@ -90,7 +90,13 @@ dengan tanda perkiraan ketika komponennya tersedia tetapi basis historis belum
 lengkap. Simbol histori lama diisi dari metadata on chain. Statistik pool token
 memakai volume bergulir 24 jam, dibaca dalam potongan yang tetap mencakup
 seluruh periode, lalu pool diurutkan menurut APR terukur. Saldo pasangan dikirim
-segera setelah RPC saldo menjawab tanpa menunggu statistik itu.
+segera setelah RPC saldo menjawab tanpa menunggu statistik itu. Pengukuran
+statistik untuk snapshot pasangan yang sama dideduplikasi dan setiap potongan
+log memberi jalan kepada rencana atau transaksi interaktif. Saldo native dan
+ERC20 dibaca bersamaan, saldo ETH yang sudah ada dipakai ulang sebagai saldo
+gas, dan titik kutipan Zap dijalankan maksimal enam belas sekaligus sebelum
+kutipan final diverifikasi langsung. Izin PositionManager yang baru relevan
+sesudah Zap tidak dibaca pada rencana sebelum swap.
 
 Setelah fase 6 ditutup, seluruh pekerjaan berikutnya adalah perbaikan yang
 datang dari user memakai panelnya sendiri. Itu tercatat di PRD 6.15, dan

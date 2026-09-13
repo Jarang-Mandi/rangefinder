@@ -277,11 +277,6 @@ pub async fn saldo_dua_dengan_multicall<P: Provider>(
     a: Address,
     b: Address,
 ) -> (Option<U256>, Option<U256>) {
-    let native = if a.is_zero() || b.is_zero() {
-        provider.get_balance(pemilik).await.ok()
-    } else {
-        None
-    };
     let token: Vec<Address> = [a, b].into_iter().filter(|a| !a.is_zero()).collect();
     let calls = token
         .iter()
@@ -289,9 +284,18 @@ pub async fn saldo_dua_dengan_multicall<P: Provider>(
             crate::chain::multicall::encode(*a, &abi::IERC20::balanceOfCall { account: pemilik })
         })
         .collect();
-    let hasil = crate::chain::multicall::batch_call(provider, multicall, calls)
-        .await
-        .ok();
+    // Saldo native dan batch ERC20 tidak saling bergantung. Menunggunya
+    // berurutan menambah satu latensi RPC penuh pada pasangan ETH.
+    let native = async {
+        if a.is_zero() || b.is_zero() {
+            provider.get_balance(pemilik).await.ok()
+        } else {
+            None
+        }
+    };
+    let erc20 = crate::chain::multicall::batch_call(provider, multicall, calls);
+    let (native, hasil) = tokio::join!(native, erc20);
+    let hasil = hasil.ok();
     let baca = |alamat: Address| {
         if alamat.is_zero() {
             return native;
@@ -877,6 +881,7 @@ pub async fn ukur_stats<P: Provider>(
     registry: &Registry,
     meta: &TokenMeta,
     kelompok: &mut QuoteGroup,
+    jeda_latar: Option<&crate::chain::logs::JedaLatar>,
 ) {
     use crate::pools::kandidat;
 
@@ -898,7 +903,7 @@ pub async fn ukur_stats<P: Provider>(
 
     if !v4.is_empty() {
         let ids: Vec<String> = v4.iter().map(|p| p.id.clone()).collect();
-        match volume::ukur_volume(provider, registry, &ids).await {
+        match volume::ukur_volume(provider, registry, &ids, jeda_latar).await {
             Ok(v) => {
                 let j = v.jendela_detik(registry.chain.block_time_ms);
                 durasi.extend(v.per_pool.keys().map(|id| (id.clone(), j)));
@@ -911,7 +916,7 @@ pub async fn ukur_stats<P: Provider>(
 
     if !v3.is_empty() {
         let alamat: Vec<String> = v3.iter().map(|p| p.id.clone()).collect();
-        match volume::ukur_volume_v3(provider, registry, &alamat).await {
+        match volume::ukur_volume_v3(provider, registry, &alamat, jeda_latar).await {
             Ok(v) => {
                 // Setiap volume mempertahankan jendela aslinya. Memendekkan
                 // penyebut tanpa memangkas event akan membesarkan APR.

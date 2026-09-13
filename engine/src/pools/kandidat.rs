@@ -578,11 +578,11 @@ pub async fn perkaya<P: Provider>(
     // menit menghasilkan APR jutaan persen. Hasil pemindaian sungguhan pernah
     // menampilkan 7.645.797 persen karena hal itu.
     //
-    // Pada tahap ini poolnya sudah diketahui, jadi lognya bisa disaring menurut
-    // poolId dan jendela satu jam menjadi murah: satu permintaan untuk seluruh
-    // kandidat sekaligus.
+    // Pada tahap ini poolnya sudah diketahui, jadi log 24 jam bisa disaring
+    // menurut poolId dalam potongan: satu permintaan untuk seluruh kandidat
+    // pada setiap potongan.
     let ids: Vec<String> = hasil.kandidat.iter().map(|k| k.pool_id.clone()).collect();
-    let panjang = match super::volume::ukur_volume(provider, registry, &ids).await {
+    let panjang = match super::volume::ukur_volume(provider, registry, &ids, None).await {
         Ok(v) => Some(v),
         Err(e) => {
             // Kegagalan di sini TIDAK boleh diam diam menjadi jendela pendek.

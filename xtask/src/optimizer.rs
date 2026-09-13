@@ -50,10 +50,10 @@ pub async fn run(repo_root: &Path, token_arg: &str) -> Result<bool> {
     );
 
     let ids: Vec<String> = kelompok.pools.iter().map(|p| p.id.clone()).collect();
-    let terukur = volume::ukur_volume(&provider, &registry, &ids).await?;
+    let terukur = volume::ukur_volume(&provider, &registry, &ids, None).await?;
 
     println!(
-        "  volume    {} swap pada blok {} sampai {}, kira kira satu jam",
+        "  volume    {} swap pada blok {} sampai {}, kira kira 24 jam",
         terukur.jumlah_swap, terukur.dari_blok, terukur.sampai_blok
     );
     println!();

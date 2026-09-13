@@ -507,6 +507,14 @@ Kiriman kedua hanya terjadi kalau kumpulan poolnya benar benar berubah. Panel ya
 
 Token yang belum pernah dibuka tidak punya tahap satu, dan itu memang tidak bisa dihindari: pool V4 hanya bisa ditemukan lewat log, dan log harus dipindai sekali.
 
+**Permintaan interaktif mendapat giliran lebih dulu.** Statistik volume 24 jam
+berjalan di latar dan memeriksa penanda prioritas sebelum membaca setiap
+potongan log. Saat user meminta rencana posisi atau menjalankan transaksi,
+potongan yang sedang berjalan diselesaikan, lalu pemindaian menunggu sampai
+permintaan interaktif selesai. Tahap cache dan discovery penuh juga tidak boleh
+memulai dua pengukuran statistik untuk token, pasangan, dan himpunan pool yang
+sama.
+
 **Yang tidak pernah di-cache adalah harga dan likuiditas.** Keduanya selalu dibaca ulang dari rantai. Pada alat yang mengirim transaksi, angka basi yang terlihat sah jauh lebih berbahaya daripada menunggu sebentar.
 
 **Hasil terukur** pada FIG di `0xdc4Dd883...`, 39 pool:
@@ -1049,6 +1057,14 @@ Selisihnya bukan hal kecil. Pada pool FIG/USDG dengan modal yang sama, versi yan
 
 **Kutipan selalu datang dari rantai.** V4Quoter dipanggil lewat `eth_call`, dan hasilnya tidak pernah ditebak. Perlu dicatat bahwa `quoteExactInputSingle` tidak bertanda `view`: ia benar benar menjalankan swap lalu revert untuk membatalkannya, dan hasilnya dibaca dari data revert. Karena itu ia tidak boleh dikirim sebagai transaksi.
 
+Titik pencarian Zap yang tidak saling bergantung dikutip maksimal enam belas
+sekaligus. Semua jawaban tetap berasal dari V4Quoter, dan jumlah final yang
+akan ditukar dikutip sekali lagi secara langsung. Titik yang gagal sekali
+dicoba ulang berurutan. Paralelisme ini hanya mengubah waktu tunggu, bukan
+sumber harga atau batas slippage. Izin PositionManager belum dibaca sebelum
+Zap karena saldo akhirnya belum ada; izin itu dihitung sesudah swap ketika
+rencana disusun ulang.
+
 Kutipan yang menjawab nol diperlakukan sebagai kegagalan, bukan sebagai jawaban. Nol yang diterima sebagai jawaban sah akan menghasilkan pembagian modal yang sepenuhnya salah.
 
 **Zap dijalankan sebagai transaksi terpisah, bukan atomik.** Bagian 5.1 menyebut zap LPZenith bersifat atomik, dan itu memang lebih baik. Di rantai ini tidak bisa ditiru untuk V4: swap berjalan lewat UniversalRouter sedangkan posisi dibuat lewat PositionManager, dan tidak ada kontrak yang bisa melakukan keduanya dalam satu panggilan.
@@ -1469,6 +1485,8 @@ Saldo wallet ikut di `token_state`. `None` berarti wallet belum dibuka, bukan
 saldo nol: yang pertama menuntun ke membuka wallet, yang kedua ke membeli
 tokennya dulu. Saat user berpindah pasangan, engine mengirim saldo segera
 setelah pembacaan RPC selesai dan baru mengukur statistik pool sesudahnya.
+Saldo native dan batch ERC20 dibaca bersamaan. Pada pasangan ETH asli, saldo
+yang sama dipakai juga sebagai saldo gas supaya tidak ada pembacaan RPC kedua.
 Panel mengulang subscribe saat koneksi pairing siap agar permintaan awal tidak hilang.
 
 **Riwayat notifikasi dihapus dari panel**, menyimpang dari 3.7. Toast di halaman

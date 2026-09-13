@@ -79,6 +79,14 @@ pub struct AppState {
     /// kali sebelum rencana sempat disusun ulang.
     pub flow_lock: Arc<Mutex<()>>,
     pub positions_lock: Arc<Mutex<()>>,
+    /// Penanda permintaan interaktif agar pembacaan statistik per potongan
+    /// memberi jalan kepada rencana dan transaksi yang sedang ditunggu user.
+    pub jeda_latar: Arc<crate::chain::logs::JedaLatar>,
+    /// Token/pasangan yang statistiknya sedang diukur.
+    ///
+    /// Subscribe dari cache dan hasil discovery penuh dapat datang berdekatan.
+    /// Tanpa deduplikasi keduanya memindai 24 jam yang sama secara bersamaan.
+    pub stats_berjalan: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     pub cfg: Arc<Config>,
     pub auth: Arc<PairingToken>,
     pub wallet: Arc<Mutex<Wallet>>,
@@ -162,6 +170,35 @@ struct RingkasanKonversi {
 struct HasilKirimAksi {
     view: execute::SendResultView,
     konversi: Option<RingkasanKonversi>,
+}
+
+struct PenjagaStatistik {
+    berjalan: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    kunci: String,
+}
+
+impl Drop for PenjagaStatistik {
+    fn drop(&mut self) {
+        self.berjalan
+            .lock()
+            .expect("mutex statistik")
+            .remove(&self.kunci);
+    }
+}
+
+fn mulai_statistik(
+    berjalan: &Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    kunci: String,
+) -> Option<PenjagaStatistik> {
+    let mut guard = berjalan.lock().expect("mutex statistik");
+    if !guard.insert(kunci.clone()) {
+        return None;
+    }
+    drop(guard);
+    Some(PenjagaStatistik {
+        berjalan: berjalan.clone(),
+        kunci,
+    })
 }
 
 impl ActiveToken {
@@ -429,6 +466,7 @@ impl AppState {
         mode: crate::pools::ModePencarian,
         ticket: u64,
     ) -> protocol::TokenState {
+        let _prioritas = self.jeda_latar.prioritaskan();
         let mut out = protocol::TokenState {
             address: address.clone(),
             meta: None,
@@ -689,7 +727,10 @@ impl AppState {
                 )
             };
 
-            let saldo = s.baca_saldo(&provider, &meta, &kelompok).await;
+            let saldo = {
+                let _prioritas = s.jeda_latar.prioritaskan();
+                s.baca_saldo(&provider, &meta, &kelompok).await
+            };
 
             // Saldo adalah angka yang langsung dibutuhkan kotak amount. Kirim
             // begitu RPC menjawab; pengukuran APR/TVL di bawah tidak boleh
@@ -727,9 +768,33 @@ impl AppState {
             if !perlu_stats {
                 return;
             }
-            if let Some(m) = meta.as_ref() {
-                crate::pools::ukur_stats(&provider, &s.registry, m, &mut kelompok).await;
-            }
+            let Some(meta_stats) = meta.as_ref() else {
+                return;
+            };
+            let mut pool_stats: Vec<&str> = kelompok.pools.iter().map(|p| p.id.as_str()).collect();
+            pool_stats.sort_unstable();
+            let kunci_stats = format!(
+                "{}:{}:{}",
+                meta_stats.address.to_lowercase(),
+                kelompok.quote.to_lowercase(),
+                pool_stats.join(",")
+            );
+            let Some(_penjaga) = mulai_statistik(&s.stats_berjalan, kunci_stats) else {
+                tracing::debug!(
+                    token = %meta_stats.address,
+                    quote = %kelompok.quote,
+                    "pengukuran statistik yang sama sudah berjalan"
+                );
+                return;
+            };
+            crate::pools::ukur_stats(
+                &provider,
+                &s.registry,
+                meta_stats,
+                &mut kelompok,
+                Some(&s.jeda_latar),
+            )
+            .await;
 
             {
                 // Hasil pengukuran disimpan ke keadaan aktif supaya tidak
@@ -818,6 +883,7 @@ impl AppState {
     /// range yang sedang digambar, dan saldo wallet. Panel hanya menyebut
     /// nominalnya, karena itu satu satunya hal yang memang keputusan user.
     pub async fn on_quote_range(&self, task: execute::QuoteTask) {
+        let _prioritas = self.jeda_latar.prioritaskan();
         let revision = task.revision;
         match self.susun_rencana(task).await {
             Ok(view) => {
@@ -1095,10 +1161,19 @@ impl AppState {
         let is_new_pool = self.cfg.limits.new_pool_first_size_usd.is_some()
             && !usage.used_pools.contains(&pool.id);
 
-        let eth_balance = provider
-            .get_balance(pemilik)
-            .await
-            .map_err(|e| format!("gagal membaca saldo ETH: {e}"))?;
+        // Kalau salah satu sisi adalah ETH asli, pembacaan saldo pasangan di
+        // atas sudah menghasilkan saldo gas yang sama. Memintanya lagi hanya
+        // menambah satu perjalanan RPC sebelum kutipan Zap bisa dimulai.
+        let eth_balance = if token0.is_zero() {
+            saldo0
+        } else if token1.is_zero() {
+            saldo1
+        } else {
+            provider
+                .get_balance(pemilik)
+                .await
+                .map_err(|e| format!("gagal membaca saldo ETH: {e}"))?
+        };
         let eth_balance_f64 = eth_balance.to_string().parse::<f64>().unwrap_or(0.0) / 1e18;
 
         let eth_komitmen = if token0.is_zero() {
@@ -1154,23 +1229,26 @@ impl AppState {
         };
 
         // Untuk posisi baru, izin mengikuti ANGGARAN yang sudah dibatasi input
-        // user, bukan jumlah mint pada satu snapshot harga. Jumlah mint dapat
-        // bergeser sedikit ketika approval masuk blok; memakai angka snapshot
-        // membuat Permit2 kurang lagi setelah setiap quote ulang dan memicu
-        // rangkaian approval tanpa akhir. Anggaran tetap menjadi batas keras:
-        // engine tidak pernah mengizinkan lebih dari dana flow ini.
-        let allowances = crate::exec::plan::izin_yang_kurang(
-            &provider,
-            &alamat,
-            pool.version,
-            pemilik,
-            token0,
-            available0,
-            token1,
-            available1,
-            chrono::Utc::now().timestamp().max(0) as u64,
-        )
-        .await?;
+        // user, bukan jumlah mint pada satu snapshot harga. Sebelum Zap, saldo
+        // posisi belum terbentuk dan izin PositionManager akan dihitung ulang
+        // sesudah swap. Membacanya sekarang hanya menambah satu RPC lalu
+        // hasilnya dibuang.
+        let mut allowances = if zap.is_some() {
+            Vec::new()
+        } else {
+            crate::exec::plan::izin_yang_kurang(
+                &provider,
+                &alamat,
+                pool.version,
+                pemilik,
+                token0,
+                available0,
+                token1,
+                available1,
+                chrono::Utc::now().timestamp().max(0) as u64,
+            )
+            .await?
+        };
         let disusun_pada = chrono::Utc::now();
         let expires_at = (disusun_pada
             + chrono::Duration::seconds(execute::RENCANA_KEDALUWARSA_DETIK))
@@ -1178,11 +1256,6 @@ impl AppState {
 
         // Swap zap berjalan lewat UniversalRouter, yang menarik token lewat
         // Permit2 juga. Izin ke PositionManager tidak berlaku untuknya.
-        let mut allowances = if zap.is_some() {
-            Vec::new()
-        } else {
-            allowances
-        };
         if let Some((v, _, _)) = zap.as_ref() {
             if let (Ok(router), Ok(dari)) = (
                 self.registry.contract("uniswap_v4", "universal_router"),
@@ -1623,19 +1696,58 @@ impl AppState {
             });
         }
         titik.truncate(24);
-        for x in titik {
+        titik.sort_unstable();
+        titik.dedup();
+
+        // Titik ini sudah ditentukan oleh penyelesai dan tidak saling
+        // bergantung. Menanyakannya berurutan pernah membuat satu quote Zap
+        // menunggu sekitar 30 detik. Enam belas sekaligus membuat sekitar
+        // empat belas titik yang lazim selesai dalam satu gelombang. Titik
+        // yang gagal sekali dicoba ulang berurutan agar pembatasan singkat RPC
+        // tidak menghilangkan Zap dari rencana.
+        use futures_util::StreamExt;
+        const KUTIPAN_PARALEL: usize = 16;
+        let key_ref = &key;
+        let hasil_kutipan = futures_util::stream::iter(titik)
+            .map(|x| async move {
+                (
+                    x,
+                    crate::exec::v4::quote::kutip_exact_in(
+                        provider,
+                        quoter,
+                        key_ref,
+                        zero_for_one,
+                        x,
+                    )
+                    .await,
+                )
+            })
+            .buffer_unordered(KUTIPAN_PARALEL)
+            .collect::<Vec<_>>()
+            .await;
+        let mut gagal = Vec::new();
+        for (x, hasil) in hasil_kutipan {
             let kunci = x.to_string();
-            if cache.contains_key(&kunci) {
-                continue;
-            }
-            match crate::exec::v4::quote::kutip_exact_in(provider, quoter, &key, zero_for_one, x)
-                .await
-            {
+            match hasil {
                 Ok(v) => {
                     cache.insert(kunci, v);
                 }
                 Err(e) => {
-                    tracing::debug!(error = %e, "kutipan zap gagal, zap dilewati");
+                    tracing::debug!(error = %e, jumlah = %x, "kutipan zap akan dicoba ulang");
+                    gagal.push(x);
+                }
+            }
+        }
+        for x in gagal {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            match crate::exec::v4::quote::kutip_exact_in(provider, quoter, &key, zero_for_one, x)
+                .await
+            {
+                Ok(v) => {
+                    cache.insert(x.to_string(), v);
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "kutipan zap gagal dua kali, zap dilewati");
                     return None;
                 }
             }
@@ -1793,6 +1905,7 @@ impl AppState {
 
     /// Jalankan approval, zap, dan mint dari satu klik.
     pub async fn on_run_open_flow(&self, plan_id: String) {
+        let _prioritas = self.jeda_latar.prioritaskan();
         let subject = {
             let guard = self.pending_plan.read().await;
             guard
@@ -3462,6 +3575,7 @@ impl AppState {
 
     /// Jalankan seluruh izin lalu aksi posisi dari satu tombol.
     pub async fn on_run_action_flow(&self, plan_id: String) {
+        let _prioritas = self.jeda_latar.prioritaskan();
         let (action, subject) = {
             let guard = self.pending_action.read().await;
             guard
@@ -5083,17 +5197,21 @@ impl AppState {
             return None;
         };
 
-        let (sa, sb) = crate::pools::saldo_dua(provider, &self.registry, pemilik, a, b).await;
-
-        // Saldo gas dibaca terpisah karena ia bukan ERC20. Kegagalannya tidak
-        // menggagalkan yang lain: user yang punya token tapi tidak punya gas
-        // tetap perlu melihat tokennya.
-        let gas = provider
-            .get_balance(pemilik)
-            .await
-            .ok()
-            .map(|v| f64::from(v) / 1e18)
-            .unwrap_or(0.0);
+        let (sa, sb, gas_mentah) = if b.is_zero() {
+            let (sa, sb) = crate::pools::saldo_dua(provider, &self.registry, pemilik, a, b).await;
+            // Kutipan native dan saldo gas adalah angka yang sama. Membacanya
+            // lagi hanya menambah satu perjalanan RPC.
+            (sa, sb, sb)
+        } else {
+            // Pada pasangan ERC20, saldo gas tidak bergantung pada multicall
+            // kedua token dan dapat dibaca bersamaan.
+            let (pasangan, gas) = tokio::join!(
+                crate::pools::saldo_dua(provider, &self.registry, pemilik, a, b),
+                provider.get_balance(pemilik)
+            );
+            (pasangan.0, pasangan.1, gas.ok())
+        };
+        let gas = gas_mentah.map(|v| f64::from(v) / 1e18).unwrap_or(0.0);
 
         Some(protocol::SaldoPasangan {
             memecoin: sa.map(|v| f64::from(v) / 10f64.powi(meta.decimals as i32))?,
@@ -5309,4 +5427,21 @@ fn sidik_pool(state: &protocol::TokenState) -> String {
         ada_stats,
         bagian.join(",")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn statistik_pasangan_yang_sama_hanya_berjalan_sekali() {
+        let berjalan = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+
+        let pertama = mulai_statistik(&berjalan, "token:quote".into())
+            .expect("pengukuran pertama harus dimulai");
+        assert!(mulai_statistik(&berjalan, "token:quote".into()).is_none());
+
+        drop(pertama);
+        assert!(mulai_statistik(&berjalan, "token:quote".into()).is_some());
+    }
 }

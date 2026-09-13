@@ -120,6 +120,8 @@ async fn main() -> Result<()> {
         execution_lock: Arc::new(Mutex::new(())),
         flow_lock: Arc::new(Mutex::new(())),
         positions_lock: Arc::new(Mutex::new(())),
+        jeda_latar: Arc::new(rangefinder_engine::chain::logs::JedaLatar::default()),
+        stats_berjalan: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         cfg: Arc::new(cfg.clone()),
         auth: Arc::new(token),
         wallet: Arc::new(Mutex::new(wallet)),

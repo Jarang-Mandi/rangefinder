@@ -27,6 +27,10 @@
 //!   "hasil kosong", dan hasil kosong berarti pool itu sepi, kesimpulan yang
 //!   sangat berbeda dari tidak bisa membaca.
 
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 use std::time::Duration;
 
 use alloy::providers::Provider;
@@ -44,6 +48,43 @@ pub const JEDA_DIBATASI_MS: u64 = 800;
 /// Mempersempit berarti permintaan tambahan, dan permintaan yang datang
 /// berturut turut tanpa jeda justru memicu batas laju.
 pub const JEDA_PERSEMPIT_MS: u64 = 400;
+
+/// Membuat pekerjaan log latar memberi jalan kepada permintaan interaktif.
+///
+/// Satu `PrioritasInteraktif` hidup selama penyusunan rencana atau pengiriman
+/// transaksi. Pembaca log memeriksa penanda ini sebelum setiap potongan, jadi
+/// satu request yang sedang berjalan dibiarkan selesai tetapi potongan
+/// berikutnya menunggu. Dengan begitu statistik 1D tidak memenuhi RPC saat
+/// user sedang menekan tombol utama.
+#[derive(Debug, Clone, Default)]
+pub struct JedaLatar {
+    interaktif: Arc<AtomicUsize>,
+}
+
+impl JedaLatar {
+    pub fn prioritaskan(&self) -> PrioritasInteraktif {
+        self.interaktif.fetch_add(1, Ordering::SeqCst);
+        PrioritasInteraktif {
+            interaktif: self.interaktif.clone(),
+        }
+    }
+
+    async fn tunggu(&self) {
+        while self.interaktif.load(Ordering::SeqCst) > 0 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
+pub struct PrioritasInteraktif {
+    interaktif: Arc<AtomicUsize>,
+}
+
+impl Drop for PrioritasInteraktif {
+    fn drop(&mut self) {
+        self.interaktif.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 /// Benar kalau RPC menolak karena hasilnya terlalu banyak.
 ///
@@ -168,6 +209,10 @@ where
 /// lalu pembacaan diteruskan sampai batas bawah semula. Ini diperlukan untuk
 /// statistik 24 jam: mengambil satu jam terakhir lalu menamainya satu hari
 /// akan menghasilkan angka yang terlihat sah tetapi salah.
+// Batas jendela tetap terpisah agar pemanggil menyebut satuan bloknya secara
+// eksplisit. Membungkusnya hanya untuk memenuhi hitungan argumen akan membuat
+// perbedaan jendela total, potongan, dan minimum lebih mudah tertukar.
+#[allow(clippy::too_many_arguments)]
 pub async fn baca_mundur_lengkap<P, F>(
     provider: &P,
     sampai: u64,
@@ -175,6 +220,7 @@ pub async fn baca_mundur_lengkap<P, F>(
     jendela_total: u64,
     potongan_awal: u64,
     potongan_minimum: u64,
+    jeda_latar: Option<&JedaLatar>,
     bangun: F,
 ) -> Result<LogTerjendela>
 where
@@ -191,6 +237,9 @@ where
     'bagian: loop {
         let mut sabar = SABAR_MAKSIMUM;
         loop {
+            if let Some(jeda) = jeda_latar {
+                jeda.tunggu().await;
+            }
             let awal = ujung.saturating_sub(ukuran.saturating_sub(1)).max(target);
             match provider.get_logs(&bangun(awal, ujung)).await {
                 Ok(mut hasil) => {
@@ -331,7 +380,7 @@ mod tests {
         rpc.push_success(&Vec::<Log>::new());
         let provider = alloy::providers::ProviderBuilder::new().connect_mocked_client(rpc.clone());
 
-        let hasil = baca_mundur_lengkap(&provider, 1_000, 0, 199, 100, 25, |dari, sampai| {
+        let hasil = baca_mundur_lengkap(&provider, 1_000, 0, 199, 100, 25, None, |dari, sampai| {
             Filter::new().from_block(dari).to_block(sampai)
         })
         .await
@@ -342,5 +391,34 @@ mod tests {
         assert!(hasil.logs.is_empty());
         assert!(!hasil.dipersempit);
         assert!(rpc.read_q().is_empty(), "dua potongan harus dibaca semua");
+    }
+
+    #[test]
+    fn penjaga_interaktif_dihitung_sampai_semuanya_selesai() {
+        let jeda = JedaLatar::default();
+        let satu = jeda.prioritaskan();
+        let dua = jeda.prioritaskan();
+        assert_eq!(jeda.interaktif.load(Ordering::SeqCst), 2);
+        drop(satu);
+        assert_eq!(jeda.interaktif.load(Ordering::SeqCst), 1);
+        drop(dua);
+        assert_eq!(jeda.interaktif.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn pembaca_latar_menunggu_sampai_permintaan_interaktif_selesai() {
+        let jeda = JedaLatar::default();
+        let prioritas = jeda.prioritaskan();
+        let salinan = jeda.clone();
+        let penunggu = tokio::spawn(async move { salinan.tunggu().await });
+
+        tokio::task::yield_now().await;
+        assert!(!penunggu.is_finished());
+
+        drop(prioritas);
+        tokio::time::timeout(Duration::from_millis(200), penunggu)
+            .await
+            .expect("pembaca latar harus dilepas")
+            .expect("tugas penunggu tidak boleh gagal");
     }
 }
