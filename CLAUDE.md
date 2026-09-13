@@ -205,8 +205,9 @@ Skripnya ada di repo, jadi tidak perlu ditulis ulang.
 - **Empat keputusan sudah dikunci user dan tidak dibuka ulang**: hot wallet
   lokal satu wallet, Uniswap V3 dan V4 sekaligus dengan gate validasi berlapis,
   otomasi semi otomatis dengan klik user, dan Robinhood Chain saja.
-- **Pembatas nominal bawaannya tidak terbatas.** User sudah diberi tahu
-  risikonya dan tetap memilih itu. Jangan menawarkan ulang.
+- **Profil risiko bawaan untuk modal di bawah 50 USD.** Maksimal 5 USD per
+  posisi dan per hari, dua posisi aktif, 2,50 USD untuk posisi pertama di pool
+  baru, slippage 200 bps, serta cadangan 0,002 ETH. Semua ditegakkan engine.
 
 ## Prasyarat membangun
 

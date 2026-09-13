@@ -18,7 +18,7 @@ Product Requirements Document
 | Otomasi | Semi otomatis: engine memantau, side panel menampilkan kartu aksi, user klik sekali | Tidak ada transaksi yang terjadi tanpa persetujuan eksplisit per aksi. |
 | Chain | Robinhood Chain saja (chain id 4663) | Kode tetap memakai chain abstraction supaya penambahan chain lain nanti murah. |
 | Wallet | Satu wallet saja | Tidak ada pemilih wallet di UI. Struktur data tetap menyimpan `wallet_address` supaya penambahan nanti tidak butuh migrasi. |
-| Batas nominal | Tanpa batas secara bawaan | `maxPositionUsd` dan `maxDailyDeployUsd` tetap ada di kode dan bisa diisi user, tapi nilai bawaannya tidak terbatas. Rincian di 9.2. |
+| Batas nominal | Profil modal di bawah 50 USD | Maksimal 5 USD per posisi dan per hari, dua posisi aktif, serta 2,50 USD untuk pool baru. Rincian di 9.2. |
 | Posisi dari luar | Dikelola penuh | Posisi V3 dan V4 milik wallet yang dibuka di platform lain bisa direbalance, diklaim, dan ditutup dari Rangefinder. |
 | Allowlist hook V4 | Berbasis adopsi nyata | Hook masuk allowlist otomatis jika lolos ambang pemakaian on chain. Kriteria di 5.4. |
 | Notifikasi | Toast diinjeksi di pojok kanan atas halaman gmgn, dengan suara | Tidak bergantung pada side panel yang sedang terbuka. Spesifikasi di 3.7. |
@@ -1843,17 +1843,25 @@ Side panel bekerja pada lebar 320 sampai 480 piksel dan wajib benar di seluruh r
 Dipaksakan di sisi engine, bukan di UI, sehingga tidak bisa dilewati dengan memanipulasi panel.
 
 ```
-maxPositionUsd        nilai maksimum satu posisi                 bawaan: tidak terbatas
-maxDailyDeployUsd     total maksimum yang dikerahkan per hari    bawaan: tidak terbatas
-maxOpenPositions      jumlah posisi terbuka bersamaan            bawaan: tidak terbatas
-newPoolFirstSizeUsd   batas ukuran posisi pertama di pool baru   bawaan: tidak terbatas
-minEthReserve         saldo ETH yang disisakan untuk gas         bawaan: aktif
-maxSlippageBps        batas slippage zap                         bawaan: aktif
+maxPositionUsd        nilai maksimum satu posisi                 bawaan: 5 USD
+maxDailyDeployUsd     total maksimum yang dikerahkan per hari    bawaan: 5 USD
+maxOpenPositions      jumlah posisi terbuka bersamaan            bawaan: 2
+newPoolFirstSizeUsd   batas ukuran posisi pertama di pool baru   bawaan: 2,50 USD
+minEthReserve         saldo ETH yang disisakan untuk gas         bawaan: 0,002 ETH
+maxSlippageBps        batas slippage zap                         bawaan: 200 bps
 ```
 
-Keputusan user: keempat pembatas nominal bernilai tidak terbatas secara bawaan. Mekanismenya tetap dibangun dan tetap dipaksakan di engine, sehingga user bisa menyalakannya kapan saja lewat konfigurasi tanpa perubahan kode.
+Profil ini ditujukan untuk modal operasional sampai sekitar 50 USD. Satu posisi
+dibatasi 5 USD, paling banyak satu jatah baru ditempatkan per hari, dan eksposur
+dari dua posisi berukuran maksimum berhenti pada 10 USD. Posisi pertama di pool
+yang belum pernah dipakai dimulai dari setengah ukuran biasa. Semua batas
+diperiksa engine terhadap jurnal dan posisi on-chain, termasuk posisi yang
+dibuka dari aplikasi lain.
 
-Dua pembatas terakhir tetap aktif secara bawaan karena sifatnya berbeda. `minEthReserve` mencegah wallet kehabisan gas sehingga posisi tidak bisa ditutup, dan itu kegagalan operasional, bukan pilihan strategi. `maxSlippageBps` mencegah zap dieksekusi pada harga yang jauh meleset, dan tanpa itu satu swap buruk bisa menghapus fee berhari hari.
+Cadangan ETH mencegah wallet kehabisan gas sehingga posisi tidak bisa ditutup.
+Batas slippage 2 persen membuat Zap batal jika harga bergerak terlalu jauh dari
+kutipan. Batas yang lebih ketat lebih tepat untuk modal kecil karena satu swap
+buruk dapat menghapus fee beberapa hari.
 
 Selain itu ada satu saklar terpisah:
 
@@ -1914,7 +1922,7 @@ Tidak ada telemetri. Tidak ada server jarak jauh. Seluruh basis data, log, dan k
 
 ### 9.5 Batasan yang disadari
 
-Hot wallet lokal berarti perangkat yang sudah disusupi sama dengan dana yang hilang. Ini konsekuensi yang diterima secara sadar demi otomasi dan kecepatan. Karena pembatas nominal bawaannya tidak terbatas, satu satunya pengaman yang tersisa adalah berapa banyak dana yang benar benar ada di wallet itu. Mitigasi yang wajib disampaikan ke user di layar setup: pakai wallet terpisah khusus operasi ini, isi hanya sebanyak yang siap dipertaruhkan, dan jangan menyimpan dana jangka panjang di sana.
+Hot wallet lokal berarti perangkat yang sudah disusupi sama dengan dana yang hilang. Ini konsekuensi yang diterima secara sadar demi otomasi dan kecepatan. Pembatas nominal mengurangi nilai yang bisa dipakai oleh satu flow, tetapi isi wallet tetap menjadi batas kerugian terburuk jika perangkat atau kunci sudah dikuasai pihak lain. Mitigasi yang wajib disampaikan ke user di layar setup: pakai wallet terpisah khusus operasi ini, isi hanya sebanyak yang siap dipertaruhkan, dan jangan menyimpan dana jangka panjang di sana.
 
 ---
 
@@ -2178,7 +2186,7 @@ Lima pertanyaan terbuka pada draft awal sudah dijawab user pada 5 September 2026
 | --- | --- | --- |
 | Perlu banyak wallet, atau satu cukup | Satu saja | Tidak ada pemilih wallet di UI. Kolom `wallet_address` tetap disimpan supaya penambahan nanti tidak butuh migrasi basis data |
 | Notifikasi keluar dari side panel, misalnya ke Telegram | Tidak. Injeksi saja ke pojok kanan atas halaman gmgn | Tidak ada integrasi Telegram. Toast di halaman jadi saluran utama, notifikasi Chrome jadi cadangan saat tidak ada tab gmgn. Rincian di 3.7 |
-| Ambang bawaan `maxPositionUsd` dan `maxDailyDeployUsd` | Tanpa batas | Mekanisme tetap dibangun dan dipaksakan di engine, nilainya saja yang tidak terbatas. Karena itu pengaman satu satunya adalah isi wallet, dan hal itu dinyatakan terang terangan di 9.5 |
+| Profil risiko modal di bawah 50 USD | 5 USD per posisi dan per hari, dua posisi aktif, 2,50 USD untuk pool baru | Menahan satu kegagalan pada nominal kecil dan membatasi eksposur maksimum dua posisi ke 10 USD |
 | Posisi dari platform lain dikelola penuh atau ditampilkan saja | Dikelola penuh | Set aksi sama persis dengan posisi milik sendiri. Cost basis direkonstruksi dari log on chain. Rincian di 3.5 |
 | BagsV4Hook langsung masuk allowlist atau tunggu audit | Masuk allowlist kalau memang banyak dipakai | Allowlist jadi berbasis ukuran adopsi on chain, bukan penilaian manual, dengan satu syarat mutlak: hook yang masih bisa diupgrade tetap ditolak berapa pun adopsinya. Kriteria di 5.4 |
 

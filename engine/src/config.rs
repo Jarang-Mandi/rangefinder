@@ -6,8 +6,8 @@
 //! - Alamat kontrak tidak pernah ditulis di sini. Sumber tunggalnya adalah
 //!   `chain.toml` di akar repo, dibaca `chain::registry`, supaya engine dan
 //!   `cargo xtask verify` memakai daftar yang sama persis.
-//! - Pembatas nominal bawaannya tidak terbatas. Ini keputusan user yang sudah
-//!   dikunci, lihat PRD 9.2. Mekanismenya tetap ada supaya bisa dinyalakan.
+//! - Pembatas nominal bawaan memakai profil modal di bawah 50 USD. Profil ini
+//!   menjaga satu posisi kecil, membatasi laju penempatan, dan menyisakan gas.
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -116,13 +116,8 @@ impl Default for WalletConfig {
 
 /// Pembatas risiko. `None` berarti tidak terbatas.
 ///
-/// Empat pembatas nominal bawaannya `None` atas keputusan user. Dua pembatas
-/// terakhir tetap aktif karena sifatnya operasional, bukan pilihan strategi.
-/// CATATAN SERIALISASI
-/// Crate `toml` tidak bisa menserialkan `None`, ia melempar `UnsupportedNoneValue`.
-/// Karena keempat pembatas di bawah bawaannya `None`, tanpa `skip_serializing_if`
-/// penulisan config.toml bawaan akan gagal pada saat start pertama. Field yang
-/// dilewati tetap terbaca sebagai `None` saat dimuat, karena semuanya `default`.
+/// Nilai bawaan dibuat untuk modal operasional di bawah 50 USD. Pembatas tetap
+/// berupa konfigurasi agar dapat diubah tanpa mengompilasi ulang engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LimitsConfig {
@@ -143,12 +138,12 @@ pub struct LimitsConfig {
 impl Default for LimitsConfig {
     fn default() -> Self {
         Self {
-            max_position_usd: None,
-            max_daily_deploy_usd: None,
-            max_open_positions: None,
-            new_pool_first_size_usd: None,
+            max_position_usd: Some(5.0),
+            max_daily_deploy_usd: Some(5.0),
+            max_open_positions: Some(2),
+            new_pool_first_size_usd: Some(2.5),
             min_eth_reserve: 0.002,
-            max_slippage_bps: 300,
+            max_slippage_bps: 200,
         }
     }
 }
@@ -307,8 +302,8 @@ mod tests {
         let text = toml::to_string_pretty(&cfg).expect("config bawaan harus bisa diserialkan");
         assert!(text.contains("[server]"));
         assert!(text.contains("[limits]"));
-        // Pembatas yang tidak terbatas memang sengaja tidak muncul di berkas.
-        assert!(!text.contains("max_position_usd"));
+        assert!(text.contains("max_position_usd = 5.0"));
+        assert!(text.contains("max_open_positions = 2"));
     }
 
     #[test]
@@ -320,23 +315,19 @@ mod tests {
         assert_eq!(kembali.server.port, cfg.server.port);
         assert_eq!(kembali.rpc.chain_id, cfg.rpc.chain_id);
         assert_eq!(kembali.limits.max_slippage_bps, cfg.limits.max_slippage_bps);
-        // Field yang dilewati saat menulis harus kembali sebagai None.
-        assert!(kembali.limits.max_position_usd.is_none());
-        assert!(kembali.limits.max_daily_deploy_usd.is_none());
+        assert_eq!(kembali.limits.max_position_usd, Some(5.0));
+        assert_eq!(kembali.limits.max_daily_deploy_usd, Some(5.0));
     }
 
     #[test]
-    fn pembatas_nominal_bawaannya_tidak_terbatas() {
-        // Keputusan user yang sudah dikunci, lihat PRD 9.2. Kalau uji ini gagal,
-        // seseorang mengubah kebijakan tanpa membaca dokumen.
+    fn profil_bawaan_melindungi_modal_di_bawah_lima_puluh_dolar() {
         let l = LimitsConfig::default();
-        assert!(l.max_position_usd.is_none());
-        assert!(l.max_daily_deploy_usd.is_none());
-        assert!(l.max_open_positions.is_none());
-        assert!(l.new_pool_first_size_usd.is_none());
-        // Dua ini sifatnya operasional dan tetap aktif.
-        assert!(l.min_eth_reserve > 0.0);
-        assert!(l.max_slippage_bps > 0);
+        assert_eq!(l.max_position_usd, Some(5.0));
+        assert_eq!(l.max_daily_deploy_usd, Some(5.0));
+        assert_eq!(l.max_open_positions, Some(2));
+        assert_eq!(l.new_pool_first_size_usd, Some(2.5));
+        assert_eq!(l.min_eth_reserve, 0.002);
+        assert_eq!(l.max_slippage_bps, 200);
     }
 
     #[test]

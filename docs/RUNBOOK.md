@@ -148,10 +148,11 @@ auto-lock selama engine hidup. Profil layanan lokal di atas menyimpan
 passphrase lewat Windows Credential Manager agar user tidak perlu membuka
 wallet berulang kali.
 
-**Peringatan.** Pembatas nominal bawaannya tidak terbatas, atas keputusan yang
-sudah diambil sadar. Artinya pengaman satu satunya adalah isi wallet itu
-sendiri. Pakai wallet terpisah khusus operasi ini, isi hanya sebanyak yang siap
-dipertaruhkan.
+Pembatas bawaan memakai profil modal di bawah 50 USD: maksimal 5 USD per posisi
+dan per hari, dua posisi aktif, serta 2,50 USD untuk posisi pertama di pool baru.
+Engine juga menyisakan 0,002 ETH dan membatasi slippage Zap ke 2 persen. Tetap
+pakai wallet terpisah karena batas kerugian terburuk tetap isi wallet jika
+perangkat atau kunci sudah dikuasai pihak lain.
 
 ## Memakai RPC berbayar untuk menghindari 429
 

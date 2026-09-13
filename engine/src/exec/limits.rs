@@ -3,9 +3,8 @@
 //! INVARIAN
 //! - Pembatas ditegakkan DI ENGINE, bukan di panel. Panel bisa dimanipulasi,
 //!   engine tidak. Lihat PRD 9.2.
-//! - Keempat pembatas nominal bawaannya tidak terbatas atas keputusan user yang
-//!   sudah dikunci. Jangan menawarkan ulang untuk menyalakannya. Mekanismenya
-//!   tetap ada supaya user bisa menyalakan sendiri kapan saja.
+//! - Pembatas nominal bawaan memakai profil modal di bawah 50 USD: 5 USD per
+//!   posisi dan per hari, dua posisi aktif, serta 2,50 USD untuk pool baru.
 //! - Dua pembatas operasional, yaitu cadangan ETH dan slippage, TETAP aktif
 //!   secara bawaan. Sifatnya berbeda: kehabisan gas berarti posisi tidak bisa
 //!   ditutup, dan itu kegagalan operasional, bukan pilihan strategi.
@@ -124,15 +123,27 @@ mod tests {
         }
     }
 
+    fn tanpa_batas() -> LimitsConfig {
+        LimitsConfig {
+            max_position_usd: None,
+            max_daily_deploy_usd: None,
+            max_open_positions: None,
+            new_pool_first_size_usd: None,
+            ..Default::default()
+        }
+    }
+
     #[test]
-    fn bawaan_tanpa_batas_meloloskan_posisi_besar() {
-        // Keputusan user yang sudah dikunci. Kalau uji ini gagal, seseorang
-        // mengubah kebijakan tanpa membaca PRD 9.2.
+    fn profil_modal_kecil_menolak_posisi_besar() {
         let cfg = LimitsConfig::default();
         let mut ctx = konteks();
-        ctx.position_usd = 1_000_000.0;
-        ctx.daily_spent_usd = 5_000_000.0;
-        ctx.open_positions = 99;
+        let e = check(&cfg, &ctx).unwrap_err();
+        assert!(e.iter().any(|m| m.contains("batas per posisi")));
+        assert!(e.iter().any(|m| m.contains("batas harian")));
+
+        ctx.position_usd = 5.0;
+        ctx.daily_spent_usd = 0.0;
+        ctx.open_positions = 1;
         assert!(check(&cfg, &ctx).is_ok());
     }
 
@@ -151,7 +162,7 @@ mod tests {
     fn batas_per_posisi_ditegakkan_saat_dinyalakan() {
         let cfg = LimitsConfig {
             max_position_usd: Some(50.0),
-            ..Default::default()
+            ..tanpa_batas()
         };
         let e = check(&cfg, &konteks()).unwrap_err();
         assert!(e.iter().any(|m| m.contains("batas per posisi")));
@@ -161,7 +172,7 @@ mod tests {
     fn batas_harian_menghitung_posisi_yang_akan_dibuka() {
         let cfg = LimitsConfig {
             max_daily_deploy_usd: Some(150.0),
-            ..Default::default()
+            ..tanpa_batas()
         };
         let mut ctx = konteks();
         ctx.daily_spent_usd = 100.0;
@@ -178,7 +189,7 @@ mod tests {
     fn batas_jumlah_posisi_memakai_lebih_besar_sama() {
         let cfg = LimitsConfig {
             max_open_positions: Some(3),
-            ..Default::default()
+            ..tanpa_batas()
         };
         let mut ctx = konteks();
         ctx.open_positions = 3;
@@ -192,7 +203,7 @@ mod tests {
     fn batas_pool_baru_hanya_berlaku_untuk_pool_baru() {
         let cfg = LimitsConfig {
             new_pool_first_size_usd: Some(10.0),
-            ..Default::default()
+            ..tanpa_batas()
         };
         let mut ctx = konteks();
 
