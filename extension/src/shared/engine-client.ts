@@ -42,6 +42,7 @@ import {
   type PositionsView,
   type TransactionsView,
   type RangeView,
+  type RpcPurpose,
   type Distribusi,
   type ScanView,
   type SignalsView,
@@ -452,14 +453,12 @@ export class EngineClient {
     this.send({ type: "get_depth" });
   }
 
-  /**
-   * Ganti daftar endpoint RPC.
-   *
-   * Engine hanya menulis config.toml. Endpoint yang sedang dipakai tidak
-   * ditukar saat engine berjalan, jadi engine harus dijalankan ulang.
-   */
-  setRpc(http: string[]) {
-    this.send({ type: "set_rpc", http });
+  addRpc(purpose: RpcPurpose, endpoint: string) {
+    this.send({ type: "add_rpc", purpose, endpoint });
+  }
+
+  removeRpc(id: string) {
+    this.send({ type: "remove_rpc", id });
   }
 
   /**

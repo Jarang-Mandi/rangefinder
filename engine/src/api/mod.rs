@@ -80,6 +80,9 @@ pub struct AppState {
     /// kali sebelum rencana sempat disusun ulang.
     pub flow_lock: Arc<Mutex<()>>,
     pub positions_lock: Arc<Mutex<()>>,
+    /// Menyerialkan suntingan config.toml supaya dua klik berdekatan tidak
+    /// saling menimpa hasil baca-tulis.
+    pub rpc_lock: Arc<Mutex<()>>,
     /// Tugas discovery token yang sedang berjalan. Subscribe baru membatalkan
     /// tugas lama agar pemindaian yang hasilnya sudah tidak akan dipakai tidak
     /// terus membebani RPC dan menahan saldo token terbaru.
@@ -327,6 +330,7 @@ impl AppState {
 
     pub async fn status(&self) -> EngineStatus {
         let chain = self.chain.health().await;
+        let rpc = self.chain.rpc_config().await;
         let wallet = self.wallet.lock().await.status();
         let (_, mut blocked_reasons) = protocol::evaluate_execution_readiness(&chain, &wallet);
         let registry = self.registry_summary().await;
@@ -346,15 +350,24 @@ impl AppState {
             registry,
             can_execute,
             blocked_reasons,
-            // Disunting saat dibuat, bukan saat ditampilkan. Uji struktural di
-            // chain/mod.rs menjaga kunci Alchemy tidak pernah sampai ke sini.
-            rpc_http: self
-                .cfg
-                .rpc
-                .http
-                .iter()
-                .map(|u| crate::chain::endpoint::aman(u))
-                .collect(),
+            rpc_endpoints: [
+                crate::config::RpcPurpose::Transaction,
+                crate::config::RpcPurpose::Read,
+                crate::config::RpcPurpose::Logs,
+            ]
+            .into_iter()
+            .flat_map(|purpose| {
+                rpc.endpoints(purpose)
+                    .iter()
+                    .enumerate()
+                    .map(move |(priority, url)| protocol::RpcEndpointView {
+                        id: crate::config::rpc_endpoint_id(purpose, url),
+                        url: crate::chain::endpoint::aman(url),
+                        purpose,
+                        priority,
+                    })
+            })
+            .collect(),
         }
     }
 
@@ -4515,20 +4528,53 @@ impl AppState {
     /// distribusi kosong. Histogram kosong berarti tidak ada yang menaruh dana
     /// di sekitar harga ini, dan itu justru sinyal yang sangat kuat. Ia tidak
     /// boleh tertukar dengan gagal membaca.
-    /// Tulis daftar endpoint RPC baru ke config.toml.
-    ///
-    /// Tidak menukar endpoint yang sedang dipakai. Panel diberi tahu bahwa
-    /// engine perlu dijalankan ulang, karena mengatakan tersimpan saja akan
-    /// membuat user mengira RPC barunya sudah bekerja padahal belum.
-    pub async fn on_set_rpc(&self, http: Vec<String>) {
-        match crate::config::tulis_rpc(&http) {
-            Ok(path) => self.alert_info(
-                "rpc_saved",
-                format!(
-                    "Endpoint tersimpan di {}. Jalankan ulang engine supaya dipakai.",
-                    path.display()
-                ),
-            ),
+    pub async fn on_add_rpc(&self, purpose: crate::config::RpcPurpose, endpoint: String) {
+        let _edit = self.rpc_lock.lock().await;
+        match crate::config::ubah_rpc(Some(purpose), Some(&endpoint), None) {
+            Ok((_path, rpc)) => {
+                self.chain.replace_rpc_config(rpc).await;
+                let health = self.chain.check_health().await;
+                let _ = self
+                    .events
+                    .send(protocol::ServerMessage::EngineStatus(Box::new(
+                        self.status().await,
+                    )));
+                if health.healthy {
+                    self.alert_info("rpc_saved", "RPC ditambahkan dan langsung aktif".into());
+                } else {
+                    self.alert_kritis(
+                        "rpc_failed",
+                        "RPC tersimpan, tetapi jalur transaksi belum sehat".into(),
+                    );
+                }
+            }
+            Err(e) => self.alert_kritis("rpc_failed", e.to_string()),
+        }
+    }
+
+    pub async fn on_remove_rpc(&self, id: String) {
+        let _edit = self.rpc_lock.lock().await;
+        match crate::config::ubah_rpc(None, None, Some(&id)) {
+            Ok((_path, rpc)) => {
+                self.chain.replace_rpc_config(rpc).await;
+                let health = self.chain.check_health().await;
+                let _ = self
+                    .events
+                    .send(protocol::ServerMessage::EngineStatus(Box::new(
+                        self.status().await,
+                    )));
+                if health.healthy {
+                    self.alert_info(
+                        "rpc_saved",
+                        "RPC dihapus dan konfigurasi sudah aktif".into(),
+                    );
+                } else {
+                    self.alert_kritis(
+                        "rpc_failed",
+                        "RPC dihapus, tetapi jalur transaksi belum sehat".into(),
+                    );
+                }
+            }
             Err(e) => self.alert_kritis("rpc_failed", e.to_string()),
         }
     }
@@ -4977,8 +5023,44 @@ impl AppState {
         )
         .await;
 
-        let posisi = snapshot.positions;
+        let mut posisi = snapshot.positions;
         let mut errors = snapshot.errors;
+        let snapshot_lengkap = errors.is_empty();
+        let posisi_kosong: Vec<_> = posisi
+            .iter()
+            .filter(|position| position.kosong)
+            .cloned()
+            .collect();
+        if let Err(error) = crate::pnl::rekonsiliasi_tertutup_eksternal(
+            &self.store,
+            self.registry.chain.id,
+            pemilik,
+            &mut posisi,
+            snapshot_lengkap,
+            &waktu,
+        ) {
+            errors.push(format!("status posisi tertutup tidak tersinkron: {error}"));
+        }
+        if !posisi_kosong.is_empty() {
+            let state = self.clone();
+            tokio::spawn(async move {
+                match state.chain.logs_provider().await {
+                    Ok(provider_logs) => {
+                        crate::pnl::lengkapi_tertutup_eksternal(
+                            &provider_logs,
+                            &state.registry,
+                            &state.store,
+                            pemilik,
+                            &posisi_kosong,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "RPC log untuk close eksternal belum tersedia");
+                    }
+                }
+            });
+        }
         let mut tertutup =
             match crate::pnl::histori_tertutup(&self.store, self.registry.chain.id, pemilik) {
                 Ok(items) => items,

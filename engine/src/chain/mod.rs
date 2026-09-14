@@ -95,7 +95,9 @@ pub enum RegistryStatus {
 }
 
 pub struct ChainClient {
-    cfg: RpcConfig,
+    /// Konfigurasi diambil sebagai snapshot setiap kali sebuah provider baru
+    /// dibuat. Mengganti snapshot tidak mengubah permintaan yang sudah jalan.
+    cfg: RwLock<RpcConfig>,
     /// Endpoint aktif saat ini. Failover mengubah indeks ini.
     endpoint: RwLock<usize>,
     /// Pilihan terakhir yang berhasil untuk dua jalur baca yang berbeda.
@@ -185,7 +187,7 @@ impl ChainClient {
         let first = cfg.http.first().cloned().unwrap_or_default();
         let max_lag = cfg.max_block_lag_secs;
         Arc::new(Self {
-            cfg,
+            cfg: RwLock::new(cfg),
             endpoint: RwLock::new(0),
             read_endpoint: Arc::new(AtomicUsize::new(0)),
             logs_endpoint: Arc::new(AtomicUsize::new(0)),
@@ -197,25 +199,43 @@ impl ChainClient {
         self.health.read().await.clone()
     }
 
+    pub async fn rpc_config(&self) -> RpcConfig {
+        self.cfg.read().await.clone()
+    }
+
+    /// Terapkan daftar endpoint untuk provider yang dibuat setelah pemanggilan
+    /// ini. Provider yang sudah dimiliki transaksi lain tetap memakai snapshot
+    /// lamanya sampai permintaan tersebut selesai.
+    pub async fn replace_rpc_config(&self, cfg: RpcConfig) {
+        let first = cfg.http.first().cloned().unwrap_or_default();
+        let max_lag = cfg.max_block_lag_secs;
+        *self.cfg.write().await = cfg;
+        *self.endpoint.write().await = 0;
+        self.read_endpoint.store(0, Ordering::Relaxed);
+        self.logs_endpoint.store(0, Ordering::Relaxed);
+        *self.health.write().await = ChainHealth::unknown(&first, max_lag);
+    }
+
     async fn current_endpoint(&self) -> String {
+        let cfg = self.cfg.read().await.clone();
         let idx = *self.endpoint.read().await;
-        self.cfg
-            .http
+        cfg.http
             .get(idx)
-            .or_else(|| self.cfg.http.first())
+            .or_else(|| cfg.http.first())
             .cloned()
             .unwrap_or_default()
     }
 
     /// Pindah ke endpoint berikutnya. Dipanggil setelah kegagalan.
     async fn rotate_endpoint(&self) {
-        if self.cfg.http.len() <= 1 {
+        let cfg = self.cfg.read().await.clone();
+        if cfg.http.len() <= 1 {
             return;
         }
         let mut idx = self.endpoint.write().await;
-        *idx = (*idx + 1) % self.cfg.http.len();
+        *idx = (*idx + 1) % cfg.http.len();
         tracing::warn!(
-            endpoint = %endpoint::aman(&self.cfg.http[*idx]),
+            endpoint = %endpoint::aman(&cfg.http[*idx]),
             "beralih ke RPC cadangan"
         );
     }
@@ -236,10 +256,11 @@ impl ChainClient {
     /// permintaan. RPC publik cepat dapat melayani state, sedangkan endpoint
     /// utama tetap punya kuota dan nonce yang konsisten untuk transaksi.
     pub async fn read_provider(&self) -> Result<impl Provider> {
-        let endpoints = if self.cfg.read_http.is_empty() {
+        let cfg = self.cfg.read().await.clone();
+        let endpoints = if cfg.read_http.is_empty() {
             vec![self.current_endpoint().await]
         } else {
-            self.cfg.read_http.clone()
+            cfg.read_http
         };
         Self::provider_for_many(
             &endpoints,
@@ -254,10 +275,11 @@ impl ChainClient {
     /// log sengaja boleh lebih lambat pada `eth_call` selama menerima rentang
     /// `eth_getLogs` lebar yang dibutuhkan discovery dan volume.
     pub async fn logs_provider(&self) -> Result<impl Provider> {
-        let endpoints = if self.cfg.logs_http.is_empty() {
+        let cfg = self.cfg.read().await.clone();
+        let endpoints = if cfg.logs_http.is_empty() {
             vec![self.current_endpoint().await]
         } else {
-            self.cfg.logs_http.clone()
+            cfg.logs_http
         };
         Self::provider_for_many(
             &endpoints,
@@ -340,13 +362,14 @@ impl ChainClient {
             Ok(h) => h,
             Err(e) => {
                 self.rotate_endpoint().await;
+                let max_lag = self.cfg.read().await.max_block_lag_secs;
                 ChainHealth {
                     healthy: false,
                     endpoint: endpoint::aman(&endpoint),
                     chain_id: None,
                     block_number: None,
                     block_lag_secs: None,
-                    max_block_lag_secs: self.cfg.max_block_lag_secs,
+                    max_block_lag_secs: max_lag,
                     error: Some(e.to_string()),
                     checked_at: chrono::Utc::now().to_rfc3339(),
                 }
@@ -358,6 +381,7 @@ impl ChainClient {
     }
 
     async fn probe(&self, endpoint: &str) -> Result<ChainHealth> {
+        let cfg = self.cfg.read().await.clone();
         let provider = Self::provider_for(endpoint)?;
 
         let chain_id = provider
@@ -367,12 +391,12 @@ impl ChainClient {
 
         // Chain id yang tidak cocok berarti kita bicara dengan jaringan yang
         // salah. Ini tidak boleh dianggap sehat dalam kondisi apa pun.
-        if chain_id != self.cfg.chain_id {
+        if chain_id != cfg.chain_id {
             anyhow::bail!(
                 "chain id RPC {} tidak cocok dengan {} yang diharapkan. \
                  Periksa rpc.http di config.toml",
                 chain_id,
-                self.cfg.chain_id
+                cfg.chain_id
             );
         }
 
@@ -383,7 +407,7 @@ impl ChainClient {
 
         let lag = self.block_lag(&provider, block_number).await;
 
-        let healthy = lag.is_none_or(|l| l <= self.cfg.max_block_lag_secs);
+        let healthy = lag.is_none_or(|l| l <= cfg.max_block_lag_secs);
 
         Ok(ChainHealth {
             healthy,
@@ -391,14 +415,14 @@ impl ChainClient {
             chain_id: Some(chain_id),
             block_number: Some(block_number),
             block_lag_secs: lag,
-            max_block_lag_secs: self.cfg.max_block_lag_secs,
+            max_block_lag_secs: cfg.max_block_lag_secs,
             error: if healthy {
                 None
             } else {
                 Some(format!(
                     "lag blok {} detik melebihi ambang {} detik",
                     lag.unwrap_or_default(),
-                    self.cfg.max_block_lag_secs
+                    cfg.max_block_lag_secs
                 ))
             },
             checked_at: chrono::Utc::now().to_rfc3339(),

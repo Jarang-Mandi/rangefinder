@@ -111,7 +111,7 @@ pub struct Currency {
     pub symbol: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Hasil {
     pub currency: Currency,
     /// Fee yang diperoleh, yang sudah diklaim maupun belum.
@@ -138,7 +138,7 @@ pub struct Hasil {
 }
 
 /// Hasil posisi yang sudah ditutup dan tidak lagi muncul dari enumerasi NFT.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PosisiTertutup {
     pub position_id: String,
     pub token0: String,
@@ -153,6 +153,299 @@ pub struct PosisiTertutup {
     pub pnl: Option<Hasil>,
     /// Alasan angka hasil belum dapat disusun. Tidak memuat detail transport.
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SnapshotAktif {
+    position_id: String,
+    token0: String,
+    token1: String,
+    symbol0: Option<String>,
+    symbol1: Option<String>,
+    amount0: String,
+    amount1: String,
+    pnl: Option<Hasil>,
+    observed_at: String,
+}
+
+fn snapshot_prefix(chain: u64, owner: Address) -> String {
+    format!("position_snapshot:v1:{chain}:{owner:#x}:")
+}
+
+fn snapshot_key(chain: u64, owner: Address, position_id: &str) -> String {
+    format!(
+        "{}{}",
+        snapshot_prefix(chain, owner),
+        position_id.to_lowercase()
+    )
+}
+
+fn external_closed_prefix(chain: u64, owner: Address) -> String {
+    format!("position_closed_external:v1:{chain}:{owner:#x}:")
+}
+
+fn external_closed_key(chain: u64, owner: Address, position_id: &str) -> String {
+    format!(
+        "{}{}",
+        external_closed_prefix(chain, owner),
+        position_id.to_lowercase()
+    )
+}
+
+fn external_attempt_key(chain: u64, owner: Address, position_id: &str) -> String {
+    format!(
+        "position_closed_external_attempt:v3:{chain}:{owner:#x}:{}",
+        position_id.to_lowercase()
+    )
+}
+
+fn snapshot_dari_posisi(position: &crate::positions::Posisi, observed_at: &str) -> SnapshotAktif {
+    SnapshotAktif {
+        position_id: position.position_id.clone(),
+        token0: position.token0.clone(),
+        token1: position.token1.clone(),
+        symbol0: position.symbol0.clone(),
+        symbol1: position.symbol1.clone(),
+        amount0: position.amount0.clone(),
+        amount1: position.amount1.clone(),
+        pnl: position.pnl.clone(),
+        observed_at: observed_at.to_owned(),
+    }
+}
+
+fn tutup_dari_snapshot(
+    snapshot: SnapshotAktif,
+    ditutup_pada: &str,
+    punya_snapshot_aktif: bool,
+) -> PosisiTertutup {
+    let mut pnl = snapshot.pnl;
+    if let Some(hasil) = pnl.as_mut() {
+        hasil.perkiraan = true;
+        if !punya_snapshot_aktif {
+            // State nol membuktikan posisi sudah kosong, tetapi tidak
+            // membuktikan jumlah token yang keluar ke wallet atau router.
+            hasil.value = None;
+            hasil.net = None;
+            hasil.pnl_percent = None;
+        }
+    }
+    PosisiTertutup {
+        position_id: snapshot.position_id,
+        token0: snapshot.token0,
+        token1: snapshot.token1,
+        symbol0: snapshot.symbol0,
+        symbol1: snapshot.symbol1,
+        tx_hash: String::new(),
+        ditutup_pada: ditutup_pada.to_owned(),
+        diterima0: if punya_snapshot_aktif {
+            snapshot.amount0
+        } else {
+            String::new()
+        },
+        diterima1: if punya_snapshot_aktif {
+            snapshot.amount1
+        } else {
+            String::new()
+        },
+        bukti_penerimaan: if punya_snapshot_aktif {
+            "snapshot_terakhir".into()
+        } else {
+            "likuiditas_onchain_nol".into()
+        },
+        pnl,
+        error: Some("ditutup di luar Rangefinder; hasil memakai snapshot on-chain terakhir".into()),
+    }
+}
+
+/// Pindahkan posisi yang sudah kosong atau tidak lagi dimiliki wallet ke
+/// histori persisten. Kesimpulan dari posisi yang hilang hanya dibuat ketika
+/// seluruh sumber posisi selesai tanpa error; state parsial tidak boleh
+/// menutup posisi secara palsu.
+pub fn rekonsiliasi_tertutup_eksternal(
+    store: &crate::store::Store,
+    chain: u64,
+    owner: Address,
+    positions: &mut Vec<crate::positions::Posisi>,
+    snapshot_lengkap: bool,
+    observed_at: &str,
+) -> anyhow::Result<()> {
+    let journal_closed: std::collections::HashSet<String> =
+        crate::exec::journal::entries(store, chain, owner)?
+            .into_iter()
+            .filter(|entry| {
+                entry.context.operation == crate::exec::journal::Operation::Close
+                    && entry.status == crate::exec::journal::Status::Succeeded
+            })
+            .filter_map(|entry| entry.context.position_id.map(|id| id.to_lowercase()))
+            .collect();
+    let current: std::collections::HashSet<String> = positions
+        .iter()
+        .map(|position| position.position_id.to_lowercase())
+        .collect();
+
+    for position in positions.iter() {
+        let id = position.position_id.to_lowercase();
+        let snapshot_key = snapshot_key(chain, owner, &id);
+        let closed_key = external_closed_key(chain, owner, &id);
+        if journal_closed.contains(&id) {
+            let _ = store.delete(&closed_key);
+            continue;
+        }
+        if !position.kosong {
+            store.put(&snapshot_key, &snapshot_dari_posisi(position, observed_at))?;
+            let _ = store.delete(&closed_key);
+            continue;
+        }
+        if store.get::<PosisiTertutup>(&closed_key)?.is_some() {
+            continue;
+        }
+        let previous = store.get::<SnapshotAktif>(&snapshot_key)?;
+        let punya_snapshot_aktif = previous.is_some();
+        let snapshot = previous.unwrap_or_else(|| snapshot_dari_posisi(position, observed_at));
+        store.put(
+            &closed_key,
+            &tutup_dari_snapshot(snapshot, observed_at, punya_snapshot_aktif),
+        )?;
+    }
+
+    if snapshot_lengkap {
+        for (_key, snapshot) in store.prefix::<SnapshotAktif>(&snapshot_prefix(chain, owner))? {
+            let id = snapshot.position_id.to_lowercase();
+            if current.contains(&id) || journal_closed.contains(&id) {
+                continue;
+            }
+            let closed_key = external_closed_key(chain, owner, &id);
+            if store.get::<PosisiTertutup>(&closed_key)?.is_none() {
+                store.put(
+                    &closed_key,
+                    &tutup_dari_snapshot(snapshot, observed_at, true),
+                )?;
+            }
+        }
+    }
+
+    // Posisi kosong tetap dapat ditemukan lagi lewat cache kandidat, tetapi
+    // tidak boleh muncul sebagai posisi terbuka atau menawarkan tombol aksi.
+    positions.retain(|position| !position.kosong);
+    Ok(())
+}
+
+fn nilai_bukti_tutup(
+    registry: &crate::chain::registry::Registry,
+    position: &crate::positions::Posisi,
+    amount0: U256,
+    amount1: U256,
+) -> Option<f64> {
+    let sqrt = position.sqrt_price_x96.as_deref()?.parse::<U256>().ok()?;
+    let harga = crate::pools::raw_price_from_sqrt_x96(sqrt);
+    if !(harga.is_finite() && harga > 0.0) {
+        return None;
+    }
+    let (quote0, decimals, _) =
+        crate::positions::muat::kutipan_pool(registry, &position.token0, &position.token1)?;
+    let amount0 = amount0.to_string().parse::<f64>().ok()?;
+    let amount1 = amount1.to_string().parse::<f64>().ok()?;
+    let scale = 10f64.powi(i32::from(decimals));
+    let value = if quote0 {
+        (amount0 + amount1 / harga) / scale
+    } else {
+        (amount0 * harga + amount1) / scale
+    };
+    (value.is_finite() && value >= 0.0).then_some(value)
+}
+
+/// Lengkapi close eksternal lama dari event penurunan likuiditas dan transfer
+/// ERC20 pada receipt yang sama. Percobaan gagal ditahan lima menit agar RPC
+/// log tidak dibebani oleh pemuatan berkala.
+pub async fn lengkapi_tertutup_eksternal<P: alloy::providers::Provider>(
+    provider: &P,
+    registry: &crate::chain::registry::Registry,
+    store: &crate::store::Store,
+    owner: Address,
+    empty_positions: &[crate::positions::Posisi],
+) -> bool {
+    let now = chrono::Utc::now().timestamp();
+    let mut changed = false;
+    for position in empty_positions {
+        let closed_key = external_closed_key(registry.chain.id, owner, &position.position_id);
+        let Ok(Some(mut closed)) = store.get::<PosisiTertutup>(&closed_key) else {
+            continue;
+        };
+        // Versi lama sempat menyimpan timestamp log kosong sebagai Unix epoch.
+        // Catatan itu dipindai sekali lagi agar tanggalnya ikut diperbaiki.
+        if closed.bukti_penerimaan == "erc20_transfer_receipt"
+            && !closed.ditutup_pada.starts_with("1970-")
+        {
+            continue;
+        }
+        let attempt_key = external_attempt_key(registry.chain.id, owner, &position.position_id);
+        let last = store
+            .get::<i64>(&attempt_key)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        if now.saturating_sub(last) < 300 {
+            continue;
+        }
+        let _ = store.put(&attempt_key, &now);
+        let evidence = match crate::positions::history::bukti_tutup_eksternal(
+            provider, registry, store, owner, position,
+        )
+        .await
+        {
+            Ok(Some(evidence)) => evidence,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(
+                    position_id = %position.position_id,
+                    %error,
+                    "bukti penutupan eksternal belum terbaca"
+                );
+                continue;
+            }
+        };
+        let Some(value) = nilai_bukti_tutup(registry, position, evidence.amount0, evidence.amount1)
+        else {
+            continue;
+        };
+        let mut pnl = closed.pnl.take().or_else(|| position.pnl.clone());
+        if let Some(result) = pnl.as_mut() {
+            result.value = Some(value);
+            result.fee = None;
+            result.net = result.deposited.map(|deposited| {
+                value
+                    - deposited
+                    - result.gas.unwrap_or_default()
+                    - result.slippage.unwrap_or_default()
+            });
+            result.pnl_percent = result
+                .net
+                .zip(result.deposited)
+                .filter(|(_, deposited)| *deposited > 0.0)
+                .map(|(net, deposited)| net / deposited * 100.0);
+            result.perkiraan = true;
+        }
+        closed.pnl = pnl;
+        closed.tx_hash = format!("{:#x}", evidence.tx_hash);
+        closed.diterima0 = evidence.amount0.to_string();
+        closed.diterima1 = evidence.amount1.to_string();
+        closed.bukti_penerimaan = "erc20_transfer_receipt".into();
+        if let Some(timestamp) = evidence
+            .timestamp
+            .and_then(|value| chrono::DateTime::from_timestamp(value as i64, 0))
+        {
+            closed.ditutup_pada = timestamp.to_rfc3339();
+        }
+        closed.error = Some(
+            "jumlah diterima terbukti dari receipt; pemisahan fee penutupan tetap perkiraan".into(),
+        );
+        if let Err(error) = store.put(&closed_key, &closed) {
+            tracing::warn!(position_id = %position.position_id, %error, "close eksternal gagal disimpan");
+        } else {
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// Nilai sekumpulan token dalam satuan token kutipan.
@@ -381,7 +674,7 @@ pub fn histori_tertutup(
     let mut out = Vec::new();
     for entry in closes {
         let position_id = entry.context.position_id.clone().unwrap_or_default();
-        if !seen.insert(position_id.clone()) {
+        if !seen.insert(position_id.to_lowercase()) {
             continue;
         }
         let Some(received) = entry.received.clone() else {
@@ -454,6 +747,12 @@ pub fn histori_tertutup(
             error,
         });
     }
+    for (_key, position) in store.prefix::<PosisiTertutup>(&external_closed_prefix(chain, owner))? {
+        if seen.insert(position.position_id.to_lowercase()) {
+            out.push(position);
+        }
+    }
+    out.sort_by(|a, b| b.ditutup_pada.cmp(&a.ditutup_pada));
     Ok(out)
 }
 
@@ -1020,5 +1319,108 @@ mod tests {
         assert_eq!(r.currencies[0].total_net, Some(1.0));
         assert_eq!(r.currencies[1].total_net, Some(100.0));
         assert_eq!(ringkas(&[eth.clone(), eth]).total_net, Some(2.0));
+    }
+
+    fn posisi_aktif_untuk_rekonsiliasi() -> crate::positions::Posisi {
+        crate::positions::Posisi {
+            position_id: "4663:0xmanager:77".into(),
+            token_id: "77".into(),
+            version: crate::pools::PoolVersion::V4,
+            token0: Address::repeat_byte(1).to_string(),
+            token1: Address::repeat_byte(2).to_string(),
+            symbol0: Some("MEME".into()),
+            symbol1: Some("USDG".into()),
+            decimals0: Some(18),
+            decimals1: Some(6),
+            base_symbol: Some("MEME".into()),
+            quote_symbol: Some("USDG".into()),
+            price_current: Some(1.0),
+            price_lower: Some(0.8),
+            price_upper: Some(1.2),
+            fee: 3_000,
+            tick_spacing: 60,
+            tick_lower: -120,
+            tick_upper: 120,
+            liquidity: "100".into(),
+            tick_sekarang: Some(0),
+            in_range: true,
+            fee0: Some("1".into()),
+            fee1: Some("2".into()),
+            hooks: None,
+            sqrt_price_x96: Some("79228162514264337593543950336".into()),
+            amount0: "10".into(),
+            amount1: "20".into(),
+            pnl: Some(Hasil {
+                currency: Currency {
+                    id: "4663:usdg".into(),
+                    symbol: "USDG".into(),
+                },
+                fee: Some(1.0),
+                deposited: Some(10.0),
+                value: Some(12.0),
+                pnl_percent: Some(20.0),
+                opened_at: Some("2026-09-14T01:00:00Z".into()),
+                impermanent_loss: 0.0,
+                gas: Some(0.1),
+                slippage: Some(0.0),
+                net: Some(2.0),
+                perkiraan: false,
+            }),
+            kosong: false,
+        }
+    }
+
+    #[test]
+    fn posisi_yang_dikosongkan_di_luar_engine_masuk_histori_dan_bisa_dibuka_lagi() {
+        let dir =
+            std::env::temp_dir().join(format!("rangefinder-external-close-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = crate::store::Store::open(&dir).unwrap();
+        let owner = Address::repeat_byte(9);
+        let mut active = vec![posisi_aktif_untuk_rekonsiliasi()];
+        rekonsiliasi_tertutup_eksternal(
+            &store,
+            4663,
+            owner,
+            &mut active,
+            true,
+            "2026-09-14T02:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(active.len(), 1);
+
+        let mut empty = vec![posisi_aktif_untuk_rekonsiliasi()];
+        empty[0].kosong = true;
+        empty[0].liquidity = "0".into();
+        empty[0].pnl.as_mut().unwrap().value = Some(0.0);
+        rekonsiliasi_tertutup_eksternal(
+            &store,
+            4663,
+            owner,
+            &mut empty,
+            true,
+            "2026-09-14T03:00:00Z",
+        )
+        .unwrap();
+        assert!(empty.is_empty(), "posisi kosong tidak boleh tetap aktif");
+        let closed = histori_tertutup(&store, 4663, owner).unwrap();
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].bukti_penerimaan, "snapshot_terakhir");
+        assert_eq!(closed[0].pnl.as_ref().unwrap().value, Some(12.0));
+        assert!(closed[0].pnl.as_ref().unwrap().perkiraan);
+
+        let mut reopened = vec![posisi_aktif_untuk_rekonsiliasi()];
+        rekonsiliasi_tertutup_eksternal(
+            &store,
+            4663,
+            owner,
+            &mut reopened,
+            true,
+            "2026-09-14T04:00:00Z",
+        )
+        .unwrap();
+        assert!(histori_tertutup(&store, 4663, owner).unwrap().is_empty());
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

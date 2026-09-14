@@ -125,12 +125,14 @@ pub enum ClientMessage {
     /// Cabut persetujuan sebuah hook.
     ForgetHook { hook: String },
 
-    /// Ganti daftar endpoint RPC di config.toml.
-    ///
-    /// Hanya menulis berkas. Endpoint yang sedang dipakai tidak ditukar saat
-    /// engine berjalan, karena permintaan yang sudah berangkat ke satu RPC
-    /// tidak boleh ditunggu jawabannya dari RPC yang lain.
-    SetRpc { http: Vec<String> },
+    /// Tambah endpoint pada jalur transaksi, baca cepat, atau log historis.
+    AddRpc {
+        purpose: crate::config::RpcPurpose,
+        endpoint: String,
+    },
+
+    /// Hapus endpoint memakai identitas aman yang dikirim EngineStatus.
+    RemoveRpc { id: String },
 
     /// Minta distribusi likuiditas pool yang sedang aktif.
     ///
@@ -264,12 +266,18 @@ pub struct EngineStatus {
     pub can_execute: bool,
     /// Alasan `can_execute` bernilai salah, supaya panel tidak perlu menebak.
     pub blocked_reasons: Vec<String>,
-    /// Endpoint HTTP yang sedang dipakai, kunci API sudah disunting.
-    ///
-    /// Penyuntingan terjadi di `chain::endpoint` saat endpointnya dibuat, bukan
-    /// saat ditampilkan, supaya tidak ada jalur mana pun yang bisa lolos
-    /// membawa kunci utuh.
-    pub rpc_http: Vec<String>,
+    /// Seluruh endpoint aktif beserta jalur pemakaiannya. URL berkunci sudah
+    /// disunting dan operasi hapus memakai `id`, bukan URL tampilan.
+    pub rpc_endpoints: Vec<RpcEndpointView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RpcEndpointView {
+    pub id: String,
+    pub url: String,
+    pub purpose: crate::config::RpcPurpose,
+    /// Urutan nol adalah pilihan pertama; berikutnya merupakan failover.
+    pub priority: usize,
 }
 
 /// Keadaan satu token beserta pool yang bisa dipakai.
@@ -411,7 +419,7 @@ pub struct SignalsView {
     pub dihitung_pada: String,
 }
 
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// Tentukan apakah engine boleh mengeksekusi transaksi, beserta alasannya.
 ///

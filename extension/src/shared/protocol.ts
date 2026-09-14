@@ -10,7 +10,7 @@
  *   tidak mengizinkan memasang header pada koneksi WebSocket.
  */
 
-export const PROTOCOL_VERSION = 7;
+export const PROTOCOL_VERSION = 8;
 export const WS_SUBPROTOCOL = "rangefinder";
 export const DEFAULT_ENGINE_ORIGIN = "http://127.0.0.1:8787";
 
@@ -65,8 +65,17 @@ export interface EngineStatus {
   registry: RegistrySummary;
   can_execute: boolean;
   blocked_reasons: string[];
-  /** Endpoint HTTP yang sedang dipakai, kunci API sudah disunting engine. */
-  rpc_http: string[];
+  /** Seluruh endpoint aktif. URL berkunci sudah disunting oleh engine. */
+  rpc_endpoints: RpcEndpointView[];
+}
+
+export type RpcPurpose = "transaction" | "read" | "logs";
+
+export interface RpcEndpointView {
+  id: string;
+  url: string;
+  purpose: RpcPurpose;
+  priority: number;
 }
 
 export type PoolVersion = "v3" | "v4";
@@ -860,7 +869,8 @@ export type ClientMessage =
   | { type: "get_notifications" }
   | { type: "scan" }
   | { type: "get_depth" }
-  | { type: "set_rpc"; http: string[] }
+  | { type: "add_rpc"; purpose: RpcPurpose; endpoint: string }
+  | { type: "remove_rpc"; id: string }
   | { type: "approve_hook"; hook: string }
   | { type: "forget_hook"; hook: string }
   | {

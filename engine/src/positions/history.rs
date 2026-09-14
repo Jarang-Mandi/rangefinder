@@ -24,6 +24,223 @@ use crate::pools::PoolVersion;
 use super::Posisi;
 
 #[derive(Debug, Clone)]
+pub struct BuktiTutupEksternal {
+    pub tx_hash: B256,
+    pub timestamp: Option<u64>,
+    pub amount0: U256,
+    pub amount1: U256,
+}
+
+async fn blok_buka<P: Provider>(
+    provider: &P,
+    store: &crate::store::Store,
+    position: &Posisi,
+    fallback: u64,
+) -> u64 {
+    let Some(hash) = crate::pnl::ambil(store, &position.position_id)
+        .and_then(|catatan| catatan.tx_buka)
+        .and_then(|hash| hash.parse::<B256>().ok())
+    else {
+        return fallback;
+    };
+    provider
+        .get_transaction_receipt(hash)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|receipt| receipt.block_number)
+        .unwrap_or(fallback)
+}
+
+fn transfer_ke_owner(
+    receipt: &alloy::rpc::types::TransactionReceipt,
+    token: Address,
+    owner: Address,
+) -> U256 {
+    const TRANSFER: [u8; 32] = [
+        0xdd, 0xf2, 0x52, 0xad, 0x1b, 0xe2, 0xc8, 0x9b, 0x69, 0xc2, 0xb0, 0x68, 0xfc, 0x37, 0x8d,
+        0xaa, 0x95, 0x2b, 0xa7, 0xf1, 0x63, 0xc4, 0xa1, 0x16, 0x28, 0xf5, 0x5a, 0x4d, 0xf5, 0x23,
+        0xb3, 0xef,
+    ];
+    receipt
+        .inner
+        .logs()
+        .iter()
+        .filter_map(|log| {
+            let inner = &log.inner;
+            let topics = inner.data.topics();
+            if inner.address != token
+                || topics.len() != 3
+                || topics[0].as_slice() != TRANSFER
+                || Address::from_word(topics[2]) != owner
+                || inner.data.data.len() != 32
+            {
+                return None;
+            }
+            Some(U256::from_be_slice(&inner.data.data))
+        })
+        .fold(U256::ZERO, |total, value| {
+            total.checked_add(value).unwrap_or(U256::MAX)
+        })
+}
+
+/// Temukan transaksi yang membuat likuiditas menjadi nol dan jumlah ERC20
+/// yang benar benar diterima wallet. Native ETH dan transaksi yang menaruh
+/// hasil di router lain dibiarkan tanpa bukti karena receipt tidak memuat
+/// perubahan saldo historisnya.
+pub async fn bukti_tutup_eksternal<P: Provider>(
+    provider: &P,
+    registry: &Registry,
+    store: &crate::store::Store,
+    owner: Address,
+    position: &Posisi,
+) -> Result<Option<BuktiTutupEksternal>> {
+    if !position.kosong {
+        return Ok(None);
+    }
+    let token0 = position
+        .token0
+        .parse::<Address>()
+        .context("token0 posisi tertutup tidak valid")?;
+    let token1 = position
+        .token1
+        .parse::<Address>()
+        .context("token1 posisi tertutup tidak valid")?;
+    if token0.is_zero() || token1.is_zero() {
+        return Ok(None);
+    }
+    let token_id = position
+        .token_id
+        .parse::<U256>()
+        .context("token id posisi tertutup tidak valid")?;
+    let latest = provider.get_block_number().await?;
+    let mulai = blok_buka(provider, store, position, registry.chain.deploy_block).await;
+    let mut sampai = latest;
+    let mut kandidat: Option<(u64, u64, u64, B256, Option<u64>)> = None;
+
+    while mulai <= sampai && kandidat.is_none() {
+        let hasil = match position.version {
+            PoolVersion::V3 => {
+                let manager = registry.contract("uniswap_v3", "position_manager")?;
+                let topic_id = B256::from(token_id.to_be_bytes::<32>());
+                crate::chain::logs::baca_mundur(
+                    provider,
+                    sampai,
+                    mulai,
+                    super::LOOKBACK_TRANSFER,
+                    100,
+                    |lo, hi| {
+                        Filter::new()
+                            .address(manager)
+                            .event_signature(DecreaseLiquidity::SIGNATURE_HASH)
+                            .topic1(topic_id)
+                            .from_block(lo)
+                            .to_block(hi)
+                    },
+                )
+                .await?
+            }
+            PoolVersion::V4 => {
+                let manager = registry.contract("uniswap_v4", "position_manager")?;
+                let pool_manager = registry.contract("uniswap_v4", "pool_manager")?;
+                let key = PmV4::PoolKey {
+                    currency0: token0,
+                    currency1: token1,
+                    fee: alloy::primitives::aliases::U24::from(position.fee),
+                    tickSpacing: alloy::primitives::aliases::I24::try_from(position.tick_spacing)
+                        .context("tick spacing posisi tertutup tidak valid")?,
+                    hooks: position
+                        .hooks
+                        .as_deref()
+                        .unwrap_or(crate::pools::ZERO_ADDRESS)
+                        .parse()
+                        .context("hook posisi tertutup tidak valid")?,
+                };
+                let pool_id = super::muat::pool_id_dari(&key);
+                crate::chain::logs::baca_mundur(
+                    provider,
+                    sampai,
+                    mulai,
+                    super::LOOKBACK_TRANSFER,
+                    100,
+                    |lo, hi| {
+                        Filter::new()
+                            .address(pool_manager)
+                            .event_signature(ModifyLiquidity::SIGNATURE_HASH)
+                            .topic1(pool_id)
+                            .topic2(manager.into_word())
+                            .from_block(lo)
+                            .to_block(hi)
+                    },
+                )
+                .await?
+            }
+        };
+
+        for log in &hasil.logs {
+            if log.removed {
+                continue;
+            }
+            let cocok = match position.version {
+                PoolVersion::V3 => DecreaseLiquidity::decode_log(&log.inner)
+                    .is_ok_and(|event| event.tokenId == token_id && event.liquidity > 0),
+                PoolVersion::V4 => ModifyLiquidity::decode_log(&log.inner).is_ok_and(|event| {
+                    U256::from_be_bytes(event.salt.0) == token_id
+                        && event.liquidityDelta.into_sign_and_abs().0 == Sign::Negative
+                }),
+            };
+            let Some(hash) = log.transaction_hash.filter(|_| cocok) else {
+                continue;
+            };
+            let (block, tx_index, log_index) = urutan(log);
+            let next = (block, tx_index, log_index, hash, log.block_timestamp);
+            if kandidat
+                .as_ref()
+                .is_none_or(|current| (next.0, next.1, next.2) > (current.0, current.1, current.2))
+            {
+                kandidat = Some(next);
+            }
+        }
+        if hasil.dari_blok <= mulai {
+            break;
+        }
+        sampai = hasil.dari_blok - 1;
+    }
+
+    let Some((block, _tx_index, _log_index, hash, timestamp)) = kandidat else {
+        return Ok(None);
+    };
+    let receipt = provider
+        .get_transaction_receipt(hash)
+        .await?
+        .context("receipt penutupan eksternal tidak ditemukan")?;
+    let amount0 = transfer_ke_owner(&receipt, token0, owner);
+    let amount1 = transfer_ke_owner(&receipt, token1, owner);
+    if amount0.is_zero() && amount1.is_zero() {
+        return Ok(None);
+    }
+    // Beberapa RPC mengembalikan `blockTimestamp: null` pada eth_getLogs dan
+    // Alloy men-deserialisasikannya sebagai nol. Ambil header blok agar waktu
+    // penutupan tetap tepat dan tidak berubah menjadi 1 Januari 1970.
+    let timestamp = match timestamp.filter(|value| *value > 0) {
+        Some(value) => Some(value),
+        None => provider
+            .get_block_by_number(block.into())
+            .await
+            .ok()
+            .flatten()
+            .map(|block| block.header.timestamp)
+            .filter(|value| *value > 0),
+    };
+    Ok(Some(BuktiTutupEksternal {
+        tx_hash: hash,
+        timestamp,
+        amount0,
+        amount1,
+    }))
+}
+
+#[derive(Debug, Clone)]
 enum PerubahanV3 {
     Increase {
         liquidity: u128,

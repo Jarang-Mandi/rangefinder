@@ -66,7 +66,7 @@ impl Default for ServerConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RpcConfig {
     /// Endpoint utama untuk pemeriksaan kesehatan dan pengiriman transaksi.
@@ -95,6 +95,83 @@ pub struct RpcConfig {
     pub max_block_lag_secs: u64,
     /// Selang pemeriksaan kesehatan dalam detik.
     pub health_interval_secs: u64,
+}
+
+/// Jalur pemakaian sebuah endpoint RPC.
+///
+/// Satu URL boleh dipasang pada lebih dari satu jalur. Identitas endpoint
+/// menyertakan jalurnya supaya menghapus endpoint log tidak ikut menghapus URL
+/// yang sama dari jalur transaksi.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RpcPurpose {
+    Transaction,
+    Read,
+    Logs,
+}
+
+impl RpcPurpose {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Transaction => "transaction",
+            Self::Read => "read",
+            Self::Logs => "logs",
+        }
+    }
+}
+
+impl RpcConfig {
+    pub fn endpoints(&self, purpose: RpcPurpose) -> &[String] {
+        match purpose {
+            RpcPurpose::Transaction => &self.http,
+            RpcPurpose::Read => &self.read_http,
+            RpcPurpose::Logs => &self.logs_http,
+        }
+    }
+
+    fn endpoints_mut(&mut self, purpose: RpcPurpose) -> &mut Vec<String> {
+        match purpose {
+            RpcPurpose::Transaction => &mut self.http,
+            RpcPurpose::Read => &mut self.read_http,
+            RpcPurpose::Logs => &mut self.logs_http,
+        }
+    }
+
+    pub fn add_endpoint(&mut self, purpose: RpcPurpose, endpoint: &str) -> Result<()> {
+        let endpoint = endpoint.trim();
+        if !(endpoint.starts_with("http://") || endpoint.starts_with("https://")) {
+            bail!("`{endpoint}` bukan endpoint HTTP");
+        }
+        let list = self.endpoints_mut(purpose);
+        if list.iter().any(|item| item.eq_ignore_ascii_case(endpoint)) {
+            bail!("endpoint itu sudah ada pada jalur {}", purpose.label());
+        }
+        list.push(endpoint.to_owned());
+        Ok(())
+    }
+
+    pub fn remove_endpoint(&mut self, id: &str) -> Result<RpcPurpose> {
+        for purpose in [RpcPurpose::Transaction, RpcPurpose::Read, RpcPurpose::Logs] {
+            let list = self.endpoints_mut(purpose);
+            if let Some(index) = list
+                .iter()
+                .position(|url| rpc_endpoint_id(purpose, url) == id)
+            {
+                if purpose == RpcPurpose::Transaction && list.len() == 1 {
+                    bail!("minimal satu RPC transaksi harus tetap ada");
+                }
+                list.remove(index);
+                return Ok(purpose);
+            }
+        }
+        bail!("endpoint RPC tidak ditemukan; muat ulang Settings")
+    }
+}
+
+/// Identitas aman untuk operasi hapus. Hash ini tidak membuka URL atau API key.
+pub fn rpc_endpoint_id(purpose: RpcPurpose, endpoint: &str) -> String {
+    let material = format!("{}:{}", purpose.label(), endpoint.trim());
+    format!("{:#x}", alloy::primitives::keccak256(material.as_bytes()))
 }
 
 impl Default for RpcConfig {
@@ -237,53 +314,29 @@ impl Config {
 
 /// Direktori data engine. Bisa ditimpa lewat `RANGEFINDER_DATA_DIR`,
 /// yang dipakai tes integrasi supaya tidak menyentuh data asli user.
-/// Tulis ulang daftar endpoint HTTP di `config.toml`.
-///
-/// KENAPA HANYA MENULIS, TIDAK MENERAPKAN LANGSUNG
-/// `ChainClient` dibangun sekali saat start dan dipegang seluruh engine. Menukar
-/// endpointnya saat sedang jalan berarti ada permintaan yang berangkat ke satu
-/// RPC dan jawabannya ditunggu dari yang lain, dan itu bukan jenis kekeliruan
-/// yang layak ditanggung demi menghindari satu kali start ulang.
-///
-/// Berkasnya dibaca ulang, disunting bagian `rpc.http` saja, lalu ditulis
-/// kembali. Bagian lain tidak disentuh, karena user bisa saja sudah menyunting
-/// batas nominal atau `dry_run` sendiri, dan menimpanya diam diam akan
-/// mengembalikan `dry_run` ke keadaan bawaan tanpa ada yang memberi tahu.
-pub fn tulis_rpc(http: &[String]) -> Result<PathBuf> {
-    let bersih: Vec<String> = http
-        .iter()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    if bersih.is_empty() {
-        anyhow::bail!("daftar endpoint kosong, engine tidak akan bisa jalan");
-    }
-    for e in &bersih {
-        if !(e.starts_with("http://") || e.starts_with("https://")) {
-            anyhow::bail!("`{e}` bukan endpoint HTTP");
-        }
-    }
-
+/// Sunting satu endpoint di `config.toml` dan kembalikan konfigurasi barunya.
+/// Bagian di luar `[rpc]` tidak disentuh.
+pub fn ubah_rpc(
+    purpose: Option<RpcPurpose>,
+    endpoint: Option<&str>,
+    remove_id: Option<&str>,
+) -> Result<(PathBuf, RpcConfig)> {
     let path = data_dir()?.join("config.toml");
     let teks = std::fs::read_to_string(&path)
         .with_context(|| format!("gagal membaca {}", path.display()))?;
-    let mut doc: toml::Value =
+    let mut config: Config =
         toml::from_str(&teks).with_context(|| format!("{} tidak valid", path.display()))?;
-
-    let rpc = doc
-        .get_mut("rpc")
-        .and_then(|v| v.as_table_mut())
-        .ok_or_else(|| anyhow::anyhow!("bagian [rpc] tidak ada di config.toml"))?;
-    rpc.insert(
-        "http".to_string(),
-        toml::Value::Array(bersih.into_iter().map(toml::Value::String).collect()),
-    );
-
-    let keluaran = toml::to_string_pretty(&doc)?;
+    match (purpose, endpoint, remove_id) {
+        (Some(purpose), Some(endpoint), None) => config.rpc.add_endpoint(purpose, endpoint)?,
+        (None, None, Some(id)) => {
+            config.rpc.remove_endpoint(id)?;
+        }
+        _ => bail!("perubahan RPC tidak valid"),
+    }
+    config.validate()?;
+    let keluaran = toml::to_string_pretty(&config)?;
     std::fs::write(&path, keluaran).with_context(|| format!("gagal menulis {}", path.display()))?;
-
-    Ok(path)
+    Ok((path, config.rpc))
 }
 
 pub fn data_dir() -> Result<PathBuf> {
@@ -406,5 +459,39 @@ mod tests {
         assert_eq!(cfg.rpc.chain_id, 4663);
         assert!(cfg.validate().is_ok());
         assert_eq!(cfg.bind_addr().unwrap().port(), 8787);
+    }
+
+    #[test]
+    fn rpc_bisa_ditambah_dan_dihapus_per_jalur() {
+        let mut rpc = RpcConfig::default();
+        rpc.add_endpoint(RpcPurpose::Logs, "https://logs.example")
+            .unwrap();
+        rpc.add_endpoint(RpcPurpose::Read, "https://read.example")
+            .unwrap();
+        let id = rpc_endpoint_id(RpcPurpose::Logs, "https://logs.example");
+        assert_eq!(rpc.remove_endpoint(&id).unwrap(), RpcPurpose::Logs);
+        assert!(rpc.logs_http.is_empty());
+        assert!(rpc
+            .read_http
+            .iter()
+            .any(|url| url == "https://read.example"));
+    }
+
+    #[test]
+    fn rpc_transaksi_terakhir_tidak_bisa_dihapus() {
+        let mut rpc = RpcConfig::default();
+        let id = rpc_endpoint_id(RpcPurpose::Transaction, &rpc.http[0]);
+        assert!(rpc.remove_endpoint(&id).is_err());
+        assert_eq!(rpc.http.len(), 1);
+    }
+
+    #[test]
+    fn rpc_menolak_skema_dan_duplikat() {
+        let mut rpc = RpcConfig::default();
+        assert!(rpc
+            .add_endpoint(RpcPurpose::Read, "ws://bukan-http.example")
+            .is_err());
+        let existing = rpc.read_http[0].clone();
+        assert!(rpc.add_endpoint(RpcPurpose::Read, &existing).is_err());
     }
 }

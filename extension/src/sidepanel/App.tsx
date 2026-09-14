@@ -54,6 +54,8 @@ import {
   type QuoteGroup,
   type RangeBound,
   type RangeView,
+  type RpcEndpointView,
+  type RpcPurpose,
   type TokenState,
 } from "../shared/protocol";
 
@@ -1000,7 +1002,8 @@ function SettingsTab({
       <RegistryCard status={status} />
       <EngineCard
         status={status}
-        onSetRpc={(http) => client?.setRpc(http)}
+        onAddRpc={(purpose, endpoint) => client?.addRpc(purpose, endpoint)}
+        onRemoveRpc={(id) => client?.removeRpc(id)}
         onForget={onForget}
       />
     </div>
@@ -1780,6 +1783,8 @@ export function PnlTab({
 function ClosedPnlCard({ pos }: { pos: PosisiTertutup }) {
   const h = pos.pnl;
   const pair = namaPairTertutup(pos);
+  const eksternal = pos.bukti_penerimaan === "snapshot_terakhir"
+    || pos.bukti_penerimaan === "likuiditas_onchain_nol";
   return (
     <section class="card pnl-position">
       <div class="pnl-position-head">
@@ -1793,7 +1798,7 @@ function ClosedPnlCard({ pos }: { pos: PosisiTertutup }) {
             <PnlMetric label="Dibuka" text={tanggalSingkat(h.opened_at)} />
             <PnlMetric label="Ditutup" text={tanggalSingkat(pos.ditutup_pada)} />
             <PnlMetric label="Disetor" value={h.deposited} symbol={h.currency.symbol} signed={false} />
-            <PnlMetric label="Diterima" value={h.value} symbol={h.currency.symbol} signed={false} />
+            <PnlMetric label={eksternal ? "Nilai terakhir" : "Diterima"} value={h.value} symbol={h.currency.symbol} signed={false} />
             <PnlMetric label="Fee diperoleh" value={h.fee} symbol={h.currency.symbol} tone="naik" />
             <PnlMetric label="PnL" text={formatPersen(h.pnl_percent)} tone={h.pnl_percent == null ? "" : h.pnl_percent >= 0 ? "naik" : "turun"} />
           </div>
@@ -3281,91 +3286,115 @@ function RegistryCard({ status }: { status: EngineStatus }) {
  * di sini: engine menyuntingnya sebelum URL pernah masuk ke log atau ke status,
  * dan yang ditampilkan di bawah adalah versi yang sudah tersunting.
  *
- * Engine tidak menukar endpoint saat sedang jalan, jadi perubahannya baru
- * berlaku setelah engine dijalankan ulang. Itu dikatakan apa adanya, karena
- * user yang mengira RPC barunya sudah bekerja akan salah menilai kecepatannya.
+ * Penambahan dan penghapusan berlaku untuk provider baru tanpa memutus
+ * permintaan yang sudah berjalan.
  */
+const RPC_GROUPS: { purpose: RpcPurpose; label: string; use: string }[] = [
+  { purpose: "transaction", label: "Transaksi", use: "Kirim & verifikasi" },
+  { purpose: "read", label: "Baca cepat", use: "Saldo & data pool" },
+  { purpose: "logs", label: "Riwayat", use: "Volume & posisi" },
+];
+
 function RpcEditor({
   endpoints,
-  onSimpan,
+  onAdd,
+  onRemove,
 }: {
-  endpoints: string[] | undefined;
-  onSimpan: (http: string[]) => void;
+  endpoints: RpcEndpointView[] | undefined;
+  onAdd: (purpose: RpcPurpose, endpoint: string) => void;
+  onRemove: (id: string) => void;
 }) {
-  // Engine versi lama tidak mengirim daftar ini. Tanpa penjagaan, seluruh
-  // kartu Settings gagal dirender dan yang terlihat user adalah bagian yang
-  // kosong, bukan pesan yang menjelaskan apa pun.
   const daftar = Array.isArray(endpoints) ? endpoints : [];
-  const [buka, setBuka] = useState(false);
-  const [teks, setTeks] = useState("");
-
-  const mulai = () => {
-    // Kotak dibiarkan kosong, bukan diisi versi tersunting. Menyimpan kembali
-    // teks bertanda bintang akan mengganti endpoint yang bekerja dengan URL
-    // yang tidak sah, dan itu baru ketahuan setelah engine dijalankan ulang.
-    setTeks("");
-    setBuka(true);
-  };
+  const [purpose, setPurpose] = useState<RpcPurpose>("read");
+  const [endpoint, setEndpoint] = useState("");
+  const valid = /^https?:\/\/\S+$/i.test(endpoint.trim());
 
   return (
     <div class="rpc">
-      <div class="row">
-        <span class="label">RPC</span>
-        <button class="chip" style="cursor: pointer" onClick={() => (buka ? setBuka(false) : mulai())}>
-          {buka ? "batal" : "ganti"}
-        </button>
+      <div class="rpc-title">
+        <h3>RPC</h3>
+        <span>{daftar.length} endpoint</span>
       </div>
 
-      {daftar.length === 0 ? (
-        <p class="rpc-baris">
-          Engine belum melaporkan endpointnya. Jalankan ulang engine versi
-          terbaru.
-        </p>
-      ) : null}
+      <div class="rpc-groups">
+        {RPC_GROUPS.map((group) => {
+          const items = daftar
+            .filter((item) => item.purpose === group.purpose)
+            .sort((a, b) => a.priority - b.priority);
+          return (
+            <div class="rpc-group" key={group.purpose}>
+              <div class="rpc-group-head">
+                <strong>{group.label}</strong>
+                <span>{group.use}</span>
+              </div>
+              {items.length === 0 ? (
+                <p class="rpc-empty">Mengikuti RPC Transaksi</p>
+              ) : items.map((item, index) => (
+                <div class="rpc-endpoint" key={item.id}>
+                  <div>
+                    <span>{index === 0 ? "Utama" : `Cadangan ${index}`}</span>
+                    <code title={item.url}>{item.url}</code>
+                  </div>
+                  <button
+                    type="button"
+                    class="rpc-remove"
+                    disabled={group.purpose === "transaction" && items.length === 1}
+                    onClick={() => onRemove(item.id)}
+                  >
+                    Hapus
+                  </button>
+                </div>
+              ))}
+            </div>
+          );
+        })}
+      </div>
 
-      {daftar.map((e, i) => (
-        <p key={e} class="rpc-baris">
-          {i === 0 ? "dipakai" : "cadangan"} · {e}
-        </p>
-      ))}
-
-      {buka ? (
-        <>
-          <textarea
-            class="rpc-input"
-            rows={3}
-            spellcheck={false}
-            placeholder={"Satu endpoint per baris. Yang pertama dipakai."}
-            value={teks}
-            onInput={(e) => setTeks((e.target as HTMLTextAreaElement).value)}
-          />
-          <button
-            class="lebar"
-            onClick={() => {
-              const baris = teks
-                .split("\n")
-                .map((x) => x.trim())
-                .filter((x) => x.length > 0);
-              if (baris.length === 0) return;
-              onSimpan(baris);
-              setBuka(false);
-            }}
-          >
-            simpan, lalu jalankan ulang engine
-          </button>
-        </>
-      ) : null}
+      <div class="rpc-add">
+        <select
+          value={purpose}
+          onChange={(event) => setPurpose((event.target as HTMLSelectElement).value as RpcPurpose)}
+        >
+          {RPC_GROUPS.map((group) => (
+            <option value={group.purpose} key={group.purpose}>{group.label}</option>
+          ))}
+        </select>
+        <input
+          type="url"
+          spellcheck={false}
+          placeholder="https://rpc.provider.com"
+          value={endpoint}
+          onInput={(event) => setEndpoint((event.target as HTMLInputElement).value)}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter" || !valid) return;
+            onAdd(purpose, endpoint.trim());
+            setEndpoint("");
+          }}
+        />
+        <button
+          type="button"
+          disabled={!valid}
+          onClick={() => {
+            onAdd(purpose, endpoint.trim());
+            setEndpoint("");
+          }}
+        >
+          Tambah
+        </button>
+      </div>
     </div>
   );
 }
 
 function EngineCard({
   status,
-  onSetRpc,
+  onAddRpc,
+  onRemoveRpc,
   onForget,
 }: {
   status: EngineStatus;
-  onSetRpc: (http: string[]) => void;
+  onAddRpc: (purpose: RpcPurpose, endpoint: string) => void;
+  onRemoveRpc: (id: string) => void;
   onForget: () => void;
 }) {
   const alasanTampil = status.blocked_reasons.filter(alasanStatusTerlihat);
@@ -3389,7 +3418,7 @@ function EngineCard({
         </ul>
       ) : null}
 
-      <RpcEditor endpoints={status.rpc_http} onSimpan={onSetRpc} />
+      <RpcEditor endpoints={status.rpc_endpoints} onAdd={onAddRpc} onRemove={onRemoveRpc} />
 
       
 

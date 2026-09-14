@@ -51,8 +51,11 @@ golden vector di runtime.
 Histogram selesai dengan uji interaksi browser. PnL menyimpan gas receipt,
 jumlah mint V3, klaim, dan close aktual. Ledger menjumlahkan approval, zap,
 open, tambah likuiditas, rebalance, klaim, dan close setelah finalitas 20 blok.
-Histori posisi tertutup tetap ada setelah NFT dibakar dan menandai komponen
-yang belum diketahui sebagai null. Rekonstruksi V3 eksternal membaca IncreaseLiquidity,
+Histori posisi tertutup tetap ada setelah NFT dibakar. Posisi yang ditutup atau
+dipindahkan lewat aplikasi lain memakai snapshot aktif terakhir, tetap ada
+setelah restart, lalu jumlah token yang diterima dilengkapi dari transfer ERC20
+pada receipt penutupan jika tersedia. Komponen yang belum terbukti tetap null.
+Rekonstruksi V3 eksternal membaca IncreaseLiquidity,
 DecreaseLiquidity, serta Collect dan mempertahankan lot basis saat likuiditas
 berkurang. V4 membaca batas jumlah dari calldata PositionManager bertipe dan
 menandainya perkiraan karena ModifyLiquidity tidak membawa jumlah aktual.

@@ -138,9 +138,13 @@ async fn session(socket: WebSocket, state: AppState) {
                             Ok(ClientMessage::GetTransactions) => {
                                 state.on_get_transactions().await;
                             }
-                            Ok(ClientMessage::SetRpc { http }) => {
+                            Ok(ClientMessage::AddRpc { purpose, endpoint }) => {
                                 let s = state.clone();
-                                tokio::spawn(async move { s.on_set_rpc(http).await });
+                                tokio::spawn(async move { s.on_add_rpc(purpose, endpoint).await });
+                            }
+                            Ok(ClientMessage::RemoveRpc { id }) => {
+                                let s = state.clone();
+                                tokio::spawn(async move { s.on_remove_rpc(id).await });
                             }
                             Ok(ClientMessage::GetDepth) => {
                                 let s = state.clone();
