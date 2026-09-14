@@ -58,6 +58,7 @@ import {
 } from "../shared/protocol";
 
 import { Histogram } from "./Histogram";
+import { gabungkanTokenState, statistikPoolSiap } from "./token-state";
 
 const TOKEN_KEY = "rangefinder.pairingToken";
 
@@ -212,13 +213,14 @@ export function App() {
       onStatus: setStatus,
       onTokenState: (t) => {
         if (t.address.toLowerCase() !== addressRef.current?.toLowerCase()) return;
-        const statistikUtuh = t.pools.length === 0 || t.pools.every((pool) =>
-          pool.stats?.volume != null && pool.stats?.jendela_menit != null
-        );
         // Daftar pool muncul sebagai satu snapshot. Kalau discovery menemukan
         // pool baru, pertahankan daftar lama sampai angka pool baru siap agar
-        // user tidak melihat APR, TVL, atau volume terisi satu per satu.
-        if (!statistikUtuh) return;
+        // user tidak melihat APR, TVL, atau volume terisi satu per satu. Saldo
+        // tetap diterapkan segera karena tidak bergantung pada statistik itu.
+        if (!statistikPoolSiap(t)) {
+          setTokenState((sebelumnya) => gabungkanTokenState(sebelumnya, t));
+          return;
+        }
         // Satu token bisa mengirim beberapa kali: tahap cepat dari cache,
         // tahap penuh yang membawa statistik pool, lalu susulan saldo.
         // Mereset range pada setiap kiriman akan menghapus garis yang sudah
@@ -238,14 +240,7 @@ export function App() {
         // Discovery penuh tidak perlu membaca saldo lagi sebelum mengirim
         // daftar pool. Pertahankan saldo terakhir untuk token dan pairing yang
         // sama supaya kotak amount tidak berkedip kosong saat hasil latar tiba.
-        setTokenState((sebelumnya) => {
-          const pairingSama = sebelumnya
-            && sebelumnya.address.toLowerCase() === t.address.toLowerCase()
-            && sebelumnya.selected_quote?.toLowerCase() === t.selected_quote?.toLowerCase();
-          return t.saldo == null && pairingSama && sebelumnya.saldo != null
-            ? { ...t, saldo: sebelumnya.saldo }
-            : t;
-        });
+        setTokenState((sebelumnya) => gabungkanTokenState(sebelumnya, t));
         setTokenLoading(false);
 
         if (tokenBerganti || poolBerganti) {
@@ -938,8 +933,7 @@ function RangeTab({
       <AddressInput onSubmit={(a) => onLoadToken(a, true)} busy={loadingToken} />
 
       {loadingToken ? <p class="phase-note">Memuat pool.</p> : null}
-      {token ? (
-        <>
+      {token && !loadingToken ? (
         <TokenCard
           token={token}
           rangeView={rangeView}
@@ -950,6 +944,8 @@ function RangeTab({
           onSelectPool={onSelectPool}
           onSelectQuote={onSelectQuote}
         />
+      ) : null}
+      {token ? (
         <ExecuteCard
           view={rangeView}
           token={token}
@@ -961,7 +957,6 @@ function RangeTab({
           onPreview={onPreviewDeposit}
           onRun={onRunOpenFlow}
         />
-        </>
       ) : null}
 
     </div>

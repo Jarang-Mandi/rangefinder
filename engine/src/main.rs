@@ -261,6 +261,9 @@ fn spawn_position_loop(state: AppState) {
             ticker.tick().await;
             if state.chain.health().await.healthy && state.wallet.lock().await.address().is_some() {
                 reconcile_transactions(&state).await;
+                // Saldo pasangan aktif berubah juga lewat swap atau aplikasi
+                // lain. Segarkan sebelum pemindaian posisi yang lebih berat.
+                state.on_refresh_balance().await;
                 state.on_get_positions().await;
             }
         }

@@ -98,11 +98,21 @@ pub fn position_id(chain: u64, manager: Address, token_id: U256) -> String {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CacheV4 {
     pub scanned_to: u64,
+    /// Percobaan pemindaian penuh terakhir. Dipakai untuk menahan RPC yang
+    /// diketahui menolak rentang sejarah agar tidak dipukul tiap 30 detik.
+    #[serde(default)]
+    pub last_scan_attempt_unix: i64,
     /// Token id yang pernah terlihat berpindah ke wallet ini.
     ///
     /// Kepemilikan sekarang TIDAK disimpan, karena ia bisa berubah kapan saja.
     /// Yang disimpan hanya daftar calon, dan pemiliknya selalu dibaca ulang.
     pub kandidat: Vec<String>,
+}
+
+fn pemindaian_ditahan(cache: &CacheV4, kandidat: &[String], sekarang_unix: i64) -> bool {
+    !kandidat.is_empty()
+        && cache.last_scan_attempt_unix > 0
+        && sekarang_unix.saturating_sub(cache.last_scan_attempt_unix) < 300
 }
 
 fn kunci_cache(chain: u64, manager: Address, owner: &str) -> String {
@@ -111,6 +121,44 @@ fn kunci_cache(chain: u64, manager: Address, owner: &str) -> String {
         manager.to_string().to_lowercase(),
         owner.to_lowercase()
     )
+}
+
+/// Ambil kandidat yang sudah dibuktikan receipt pembukaan Rangefinder.
+///
+/// Ini hanya jalur cepat tambahan. Posisi yang dibuat aplikasi lain tetap
+/// ditemukan lewat log, dan setiap kandidat tetap diperiksa dengan `ownerOf`
+/// sebelum ditampilkan.
+fn kandidat_v4_dari_jurnal(
+    store: &crate::store::Store,
+    chain: u64,
+    owner: Address,
+    manager: Address,
+) -> Result<Vec<String>> {
+    let manager = manager.to_string().to_lowercase();
+    let mut out = Vec::new();
+    for entry in crate::exec::journal::entries(store, chain, owner)? {
+        if entry.context.operation != crate::exec::journal::Operation::Open {
+            continue;
+        }
+        let Some(position_id) = entry.context.position_id.as_deref() else {
+            continue;
+        };
+        let mut bagian = position_id.splitn(3, ':');
+        let cocok = bagian
+            .next()
+            .and_then(|value| value.parse::<u64>().ok())
+            .is_some_and(|value| value == chain)
+            && bagian
+                .next()
+                .is_some_and(|value| value.eq_ignore_ascii_case(&manager));
+        let Some(token_id) = bagian.next().filter(|_| cocok) else {
+            continue;
+        };
+        if token_id.parse::<U256>().is_ok() && !out.iter().any(|id| id == token_id) {
+            out.push(token_id.to_owned());
+        }
+    }
+    Ok(out)
 }
 
 /// Jendela mundur pemindaian Transfer, dalam blok.
@@ -168,10 +216,32 @@ pub async fn kandidat_v4<P: Provider>(
     };
 
     let mut kandidat: Vec<String> = tersimpan.kandidat.clone();
+    if let Some(store) = store {
+        match kandidat_v4_dari_jurnal(store, registry.chain.id, owner, pm) {
+            Ok(dari_jurnal) => {
+                for id in dari_jurnal {
+                    if !kandidat.contains(&id) {
+                        kandidat.push(id);
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "kandidat posisi dari jurnal tidak terbaca");
+            }
+        }
+    }
+
+    let sekarang_unix = chrono::Utc::now().timestamp();
+    if pemindaian_ditahan(&tersimpan, &kandidat, sekarang_unix) {
+        return Ok(kandidat
+            .into_iter()
+            .filter_map(|s| s.parse::<U256>().ok())
+            .collect());
+    }
 
     let mut sampai = latest;
     while dari <= sampai {
-        let hasil = crate::chain::logs::baca_mundur(
+        let baca = crate::chain::logs::baca_mundur(
             provider,
             sampai,
             dari,
@@ -185,8 +255,48 @@ pub async fn kandidat_v4<P: Provider>(
                     .from_block(lo)
                     .to_block(hi)
             },
-        )
-        .await?;
+        );
+        // Kalau kandidat aman sudah tersedia, pemindaian historis tetap dicoba
+        // untuk menemukan posisi dari aplikasi lain tetapi tidak boleh menahan
+        // posisi yang baru dibuka di belakang failover RPC yang lambat.
+        let hasil = if kandidat.is_empty() {
+            baca.await
+        } else {
+            match tokio::time::timeout(std::time::Duration::from_secs(2), baca).await {
+                Ok(hasil) => hasil,
+                Err(_) => Err(anyhow::anyhow!(
+                    "pemindaian posisi V4 melewati batas respons dua detik"
+                )),
+            }
+        };
+        let hasil = match hasil {
+            Ok(hasil) => hasil,
+            Err(error) if !kandidat.is_empty() => {
+                // RPC publik sering menolak rentang log sejarah. Kandidat yang
+                // sudah ada tetap aman dipakai karena muat_v4 membaca ownerOf
+                // dan metadata posisi langsung dari rantai sesudah fungsi ini.
+                tracing::warn!(
+                    %error,
+                    kandidat = kandidat.len(),
+                    "pemindaian posisi V4 gagal; memakai kandidat tersimpan"
+                );
+                if let Some(s) = store {
+                    let sebagian = CacheV4 {
+                        scanned_to: tersimpan.scanned_to,
+                        last_scan_attempt_unix: sekarang_unix,
+                        kandidat: kandidat.clone(),
+                    };
+                    if let Err(e) = s.put(&cache_key, &sebagian) {
+                        tracing::warn!(error = %e, "cache kandidat posisi V4 gagal disimpan");
+                    }
+                }
+                return Ok(kandidat
+                    .into_iter()
+                    .filter_map(|s| s.parse::<U256>().ok())
+                    .collect());
+            }
+            Err(error) => return Err(error),
+        };
 
         for log in hasil.logs {
             let topics = log.inner.data.topics();
@@ -207,6 +317,7 @@ pub async fn kandidat_v4<P: Provider>(
     if let Some(s) = store {
         let baru = CacheV4 {
             scanned_to: latest,
+            last_scan_attempt_unix: sekarang_unix,
             kandidat: kandidat.clone(),
         };
         if let Err(e) = s.put(&cache_key, &baru) {
@@ -223,6 +334,67 @@ pub async fn kandidat_v4<P: Provider>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jurnal_open_menjadi_kandidat_v4_tanpa_memercayai_manager_lain() {
+        use alloy::{
+            network::TransactionBuilder, primitives::B256, rpc::types::TransactionRequest,
+        };
+
+        let dir = std::env::temp_dir().join(format!(
+            "rangefinder-position-candidate-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let store = crate::store::Store::open(&dir).unwrap();
+        let owner = Address::repeat_byte(1);
+        let manager = Address::repeat_byte(2);
+        let journal = crate::exec::journal::Journal {
+            store: &store,
+            context: crate::exec::journal::test_context(),
+        };
+        let request = TransactionRequest::default()
+            .with_from(owner)
+            .with_to(manager)
+            .with_chain_id(4663)
+            .with_nonce(7)
+            .with_gas_limit(100_000);
+        let hash = B256::repeat_byte(3);
+        journal.prepare(4663, owner, hash, request).unwrap();
+        crate::exec::journal::link_position(
+            &store,
+            4663,
+            owner,
+            hash,
+            &position_id(4663, manager, U256::from(2_671_313u64)),
+        )
+        .unwrap();
+
+        assert_eq!(
+            kandidat_v4_dari_jurnal(&store, 4663, owner, manager).unwrap(),
+            vec!["2671313"]
+        );
+        assert!(
+            kandidat_v4_dari_jurnal(&store, 4663, owner, Address::repeat_byte(9))
+                .unwrap()
+                .is_empty()
+        );
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn kegagalan_log_ditahan_meski_cache_punya_blok_lama_nonzero() {
+        let cache = CacheV4 {
+            scanned_to: 62_472_850,
+            last_scan_attempt_unix: 1_000,
+            kandidat: vec!["2671313".into()],
+        };
+        assert!(pemindaian_ditahan(&cache, &cache.kandidat, 1_299));
+        assert!(!pemindaian_ditahan(&cache, &cache.kandidat, 1_300));
+        assert!(!pemindaian_ditahan(&cache, &[], 1_001));
+    }
 
     fn posisi(lower: i32, upper: i32, tick: Option<i32>) -> Posisi {
         Posisi {

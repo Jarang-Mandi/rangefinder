@@ -58,10 +58,11 @@ const PERKIRAAN_GAS_ETH: f64 = 0.0005;
 /// paling buruk sekalipun pada rantai berblok 100 ms.
 const DEADLINE_DETIK: u64 = 300;
 
-/// Batas keras jumlah transaksi dalam satu alur tombol utama. Jalur normal
-/// membutuhkan paling banyak beberapa approval, satu zap, lalu aksi akhir.
-/// Batas ini mencegah replanning yang rusak mengulang transaksi tanpa akhir.
-const MAX_FLOW_STEPS: usize = 12;
+/// Batas transaksi nyata dalam satu klik. Perencanaan ulang tidak ikut dihitung:
+/// alur V4 single-token yang sah dapat membutuhkan banyak approval, satu zap,
+/// lalu mint, dan sebelumnya berhenti hanya karena setiap replan memakan slot.
+const MAX_FLOW_TRANSACTIONS: usize = 16;
+const MAX_FLOW_REPLANS: usize = 8;
 
 /// Deret candle beserta alamat token yang memilikinya.
 ///
@@ -2148,6 +2149,7 @@ impl AppState {
         .await;
         match self.run_open_flow(plan_id).await {
             Ok((status, terverifikasi)) => {
+                let sukses = status == crate::exec::send::TxStatus::Sukses;
                 let (level, code, message) = match (status, terverifikasi) {
                     (crate::exec::send::TxStatus::Sukses, true) => (
                         protocol::AlertLevel::Info,
@@ -2171,6 +2173,9 @@ impl AppState {
                     ),
                 };
                 self.beri_tahu_subjek(level, code, message, subject).await;
+                if sukses {
+                    self.spawn_portfolio_refresh(true);
+                }
             }
             Err(pesan) => {
                 self.alert_kritis("open_flow_failed", pesan.clone());
@@ -2191,7 +2196,9 @@ impl AppState {
     ) -> Result<(crate::exec::send::TxStatus, bool), String> {
         let _flow = self.flow_lock.lock().await;
         let mut izin_selesai = false;
-        for _ in 0..MAX_FLOW_STEPS {
+        let mut transaksi = 0usize;
+        let mut replan = 0usize;
+        loop {
             let (step_id, perlu_zap, siap) = {
                 let guard = self.pending_plan.read().await;
                 let r = guard
@@ -2206,6 +2213,10 @@ impl AppState {
             };
 
             if let Some(step_id) = step_id {
+                if transaksi >= MAX_FLOW_TRANSACTIONS {
+                    return Err("Alur pembukaan melebihi batas transaksi yang aman".into());
+                }
+                transaksi += 1;
                 let view = self.kirim_approve(plan_id.clone(), step_id.clone()).await?;
                 let status = view.outcome.status;
                 let _ = self
@@ -2227,6 +2238,10 @@ impl AppState {
             // Susun ulang sekali setelah semuanya selesai, bukan sekali per
             // approval. Gate akhir tetap memakai state rantai terbaru.
             if izin_selesai {
+                if replan >= MAX_FLOW_REPLANS {
+                    return Err("Rencana pembukaan terus berubah setelah izin diproses".into());
+                }
+                replan += 1;
                 let task = {
                     let guard = self.pending_plan.read().await;
                     let r = guard
@@ -2251,6 +2266,10 @@ impl AppState {
             }
 
             if perlu_zap {
+                if transaksi >= MAX_FLOW_TRANSACTIONS {
+                    return Err("Alur pembukaan melebihi batas transaksi yang aman".into());
+                }
+                transaksi += 1;
                 let (view, lanjut) = self.kirim_zap(plan_id.clone()).await?;
                 let status = view.outcome.status;
                 let _ = self
@@ -2262,6 +2281,11 @@ impl AppState {
                     }
                     return Ok((status, false));
                 }
+                self.spawn_portfolio_refresh(false);
+                if replan >= MAX_FLOW_REPLANS {
+                    return Err("Rencana pembukaan terus berubah setelah zap".into());
+                }
+                replan += 1;
                 let task = lanjut.ok_or("saldo hasil penyesuaian belum bisa dipakai")?;
                 let view = self.susun_rencana(task).await?;
                 plan_id = view.plan_id.clone();
@@ -2275,6 +2299,9 @@ impl AppState {
                 return Err("Posisi belum siap dibuka. Periksa jumlah setoran dan saldo".into());
             }
 
+            if transaksi >= MAX_FLOW_TRANSACTIONS {
+                return Err("Alur pembukaan melebihi batas transaksi yang aman".into());
+            }
             let view = self.kirim_open(plan_id).await?;
             let status = view.outcome.status;
             let terverifikasi = view.outcome.fully_verified();
@@ -2283,7 +2310,6 @@ impl AppState {
                 .send(protocol::ServerMessage::SendResult(Box::new(view)));
             return Ok((status, terverifikasi));
         }
-        Err("Alur pembukaan berhenti karena terlalu banyak langkah".into())
     }
 
     /// Hapus approval pertama sesudah receipt-nya sukses.
@@ -3770,6 +3796,7 @@ impl AppState {
                     .verification
                     .as_ref()
                     .is_some_and(|gate| !gate.passed);
+                let sukses = view.outcome.status == crate::exec::send::TxStatus::Sukses;
                 let _ = self
                     .events
                     .send(protocol::ServerMessage::SendResult(Box::new(view)));
@@ -3790,9 +3817,11 @@ impl AppState {
                         ),
                     );
                 }
-                // Keadaan posisi berubah setelah aksi, jadi daftarnya dimuat
-                // ulang. Tanpa ini kartunya menampilkan fee yang sudah diambil.
-                self.on_get_positions().await;
+                if sukses {
+                    // Pembaruan berjalan setelah hasil transaksi dikirim agar
+                    // tombol selesai segera, lalu saldo dan kartu menyusul.
+                    self.spawn_portfolio_refresh(true);
+                }
             }
             Err(pesan) => self.alert_kritis("action_failed", pesan),
         }
@@ -3934,7 +3963,9 @@ impl AppState {
     ) -> Result<(crate::exec::send::TxStatus, bool, Option<RingkasanKonversi>), String> {
         let _flow = self.flow_lock.lock().await;
         let mut izin_selesai = false;
-        for _ in 0..MAX_FLOW_STEPS {
+        let mut transaksi = 0usize;
+        let mut replan = 0usize;
+        loop {
             let (step_id, siap) = {
                 let guard = self.pending_action.read().await;
                 let r = guard.as_ref().ok_or("rencana aksi sudah tidak tersedia")?;
@@ -3946,6 +3977,10 @@ impl AppState {
             };
 
             if let Some(step_id) = step_id {
+                if transaksi >= MAX_FLOW_TRANSACTIONS {
+                    return Err("Alur aksi melebihi batas transaksi yang aman".into());
+                }
+                transaksi += 1;
                 let view = self.kirim_approve(plan_id.clone(), step_id.clone()).await?;
                 let status = view.outcome.status;
                 let _ = self
@@ -3964,6 +3999,10 @@ impl AppState {
             }
 
             if izin_selesai {
+                if replan >= MAX_FLOW_REPLANS {
+                    return Err("Rencana aksi terus berubah setelah izin diproses".into());
+                }
+                replan += 1;
                 let (position_id, action, input, request_id) = {
                     let guard = self.pending_action.read().await;
                     let r = guard
@@ -3993,6 +4032,9 @@ impl AppState {
                 return Err("Aksi belum siap. Muat ulang posisi lalu coba lagi".into());
             }
 
+            if transaksi >= MAX_FLOW_TRANSACTIONS {
+                return Err("Alur aksi melebihi batas transaksi yang aman".into());
+            }
             let HasilKirimAksi { view, konversi } = self.kirim_aksi(plan_id).await?;
             let verifikasi_gagal = view
                 .outcome
@@ -4003,10 +4045,11 @@ impl AppState {
             let _ = self
                 .events
                 .send(protocol::ServerMessage::SendResult(Box::new(view)));
-            self.on_get_positions().await;
+            if status == crate::exec::send::TxStatus::Sukses {
+                self.spawn_portfolio_refresh(true);
+            }
             return Ok((status, !verifikasi_gagal, konversi));
         }
-        Err("Alur aksi berhenti karena terlalu banyak langkah".into())
     }
 
     async fn kirim_aksi(&self, plan_id: String) -> Result<HasilKirimAksi, String> {
@@ -4825,6 +4868,21 @@ impl AppState {
 
         if view.error.is_none() {
             *self.positions.write().await = view.positions.clone();
+        } else if !view.positions.is_empty() {
+            // Kegagalan satu sumber (misalnya histori log) tidak boleh membuat
+            // posisi yang sudah terbaca tak dapat dipakai untuk aksi. Pertahankan
+            // posisi lama yang belum bisa diperiksa dan perbarui yang berhasil.
+            let mut tersimpan = self.positions.write().await;
+            for posisi in &view.positions {
+                if let Some(lama) = tersimpan
+                    .iter_mut()
+                    .find(|lama| lama.position_id == posisi.position_id)
+                {
+                    *lama = posisi.clone();
+                } else {
+                    tersimpan.push(posisi.clone());
+                }
+            }
         }
         let _ = self
             .events
@@ -5032,9 +5090,13 @@ impl AppState {
         let _flow = self.flow_lock.lock().await;
         match self.kirim_zap(plan_id).await {
             Ok((view, lanjut)) => {
+                let sukses = view.outcome.status == crate::exec::send::TxStatus::Sukses;
                 let _ = self
                     .events
                     .send(protocol::ServerMessage::SendResult(Box::new(view)));
+                if sukses {
+                    self.spawn_portfolio_refresh(false);
+                }
                 if let Some(task) = lanjut {
                     self.on_quote_range(task).await;
                 }
@@ -5205,9 +5267,13 @@ impl AppState {
         match self.kirim_open(plan_id).await {
             Ok(view) => {
                 let terverifikasi = view.outcome.fully_verified();
+                let sukses = view.outcome.status == crate::exec::send::TxStatus::Sukses;
                 let _ = self
                     .events
                     .send(protocol::ServerMessage::SendResult(Box::new(view)));
+                if sukses {
+                    self.spawn_portfolio_refresh(true);
+                }
                 if !terverifikasi {
                     self.alert_kritis(
                         "open_unverified",
@@ -5398,12 +5464,75 @@ impl AppState {
         });
     }
 
-    /// Pasang range selebar yang diizinkan protokol.
-    ///
-    /// Batasnya dihitung dari tick terjauh yang masih kelipatan spacing, lalu
-    /// diubah menjadi market cap supaya sisa alurnya sama persis dengan range
-    /// biasa. Tidak ada jalur eksekusi terpisah untuk range penuh, dan itu
-    /// disengaja: jalur yang jarang dipakai adalah jalur yang jarang teruji.
+    /// Segarkan saldo token aktif tanpa mengulang discovery atau statistik.
+    pub async fn on_refresh_balance(&self) {
+        let (meta, kelompok) = {
+            let guard = self.active.read().await;
+            let Some(active) = guard.as_ref() else {
+                return;
+            };
+            let Some(kelompok) = active
+                .quotes
+                .iter()
+                .find(|g| g.quote.eq_ignore_ascii_case(&active.selected_quote))
+                .cloned()
+            else {
+                return;
+            };
+            (active.meta.clone(), kelompok)
+        };
+
+        let provider = match self.chain.read_provider().await {
+            Ok(provider) => provider,
+            Err(error) => {
+                tracing::warn!(%error, "saldo aktif tidak dapat disegarkan");
+                return;
+            }
+        };
+        let Some(saldo) = self
+            .baca_saldo(&provider, &Some(meta.clone()), &kelompok)
+            .await
+        else {
+            return;
+        };
+
+        let keadaan = {
+            let guard = self.active.read().await;
+            let Some(active) = guard.as_ref() else {
+                return;
+            };
+            if !active.meta.address.eq_ignore_ascii_case(&meta.address)
+                || !active.selected_quote.eq_ignore_ascii_case(&kelompok.quote)
+            {
+                return;
+            }
+            protocol::TokenState {
+                address: active.meta.address.clone(),
+                meta: Some(active.meta.clone()),
+                quotes: active.quotes.clone(),
+                pools: active.pools.clone(),
+                selected_quote: Some(active.selected_quote.clone()),
+                selected_pool_id: Some(active.selected_pool_id.clone()),
+                saldo: Some(saldo),
+                error: None,
+            }
+        };
+        let _ = self
+            .events
+            .send(protocol::ServerMessage::TokenState(Box::new(keadaan)));
+    }
+
+    /// Kirim hasil transaksi dulu, lalu perbarui data yang berubah di latar.
+    fn spawn_portfolio_refresh(&self, positions: bool) {
+        let state = self.clone();
+        tokio::spawn(async move {
+            state.on_refresh_balance().await;
+            if positions {
+                state.on_get_positions().await;
+            }
+        });
+    }
+
     /// Baca saldo kedua sisi pasangan untuk wallet yang sedang dibuka.
     ///
     /// Mengembalikan `None` kalau wallet belum dibuka. Itu berbeda dari saldo
@@ -5450,6 +5579,12 @@ impl AppState {
         })
     }
 
+    /// Pasang range selebar yang diizinkan protokol.
+    ///
+    /// Batasnya dihitung dari tick terjauh yang masih kelipatan spacing, lalu
+    /// diubah menjadi market cap supaya sisa alurnya sama persis dengan range
+    /// biasa. Tidak ada jalur eksekusi terpisah untuk range penuh, dan itu
+    /// disengaja: jalur yang jarang dipakai adalah jalur yang jarang teruji.
     pub async fn on_set_full_range(&self) {
         let batas = {
             let guard = self.active.read().await;
