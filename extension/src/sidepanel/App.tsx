@@ -2745,15 +2745,25 @@ function PoolRow({
         </span>
         <span>
           <i>TVL</i>
-          {s?.tvl != null ? formatCompact(s.tvl) : "-"}
+          {s?.tvl != null ? formatPoolMetric(s.tvl, s.dalam_usd) : "-"}
         </span>
         <span>
           <i>{labelJendelaVolume(s?.jendela_menit ?? null)}</i>
-          {s?.volume == null ? "-" : formatCompact(s.volume)}
+          {s?.volume == null ? "-" : formatPoolMetric(s.volume, s.dalam_usd)}
         </span>
+        {s?.volume_30d != null ? (
+          <span>
+            <i>vol 30D</i>
+            {formatPoolMetric(s.volume_30d, s.dalam_usd)}
+          </span>
+        ) : null}
       </span>
     </button>
   );
+}
+
+function formatPoolMetric(value: number, usd?: boolean): string {
+  return `${usd ? "$" : ""}${formatCompact(value)}`;
 }
 
 function labelJendelaVolume(menit: number | null): string {

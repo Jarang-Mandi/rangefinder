@@ -90,16 +90,19 @@ export type PoolVersion = "v3" | "v4";
 /**
  * Angka pembanding antar pool pada token yang sama.
  *
- * Seluruhnya dalam token kutipan pool itu, bukan dolar. `tvl` hanya mencakup
- * pita di sekitar harga selebar `tvl_lebar_persen`, karena likuiditas yang jauh
- * dari harga tidak menerima fee apa pun.
+ * Data indeks Uniswap memakai USD. Fallback on-chain memakai token kutipan dan
+ * menghitung TVL pada pita aktif di sekitar harga.
  */
 export interface PoolStats {
-  /** Null berarti belum bisa diukur, bukan nol. Pool V3 belum terukur. */
+  /** Null berarti belum tersedia, bukan nol. */
   volume: number | null;
+  /** Volume tiga puluh hari dari indeks Uniswap, bila tersedia. */
+  volume_30d?: number | null;
   jendela_menit: number | null;
   tvl: number | null;
   apr: number | null;
+  /** TVL dan volume memakai USD, bukan token kutipan. */
+  dalam_usd?: boolean;
 }
 
 export interface PoolInfo {

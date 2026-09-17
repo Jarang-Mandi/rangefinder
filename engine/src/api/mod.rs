@@ -199,9 +199,7 @@ struct PenjagaStatistik {
 
 /// Dua batas selesai yang dibutuhkan lookup utama.
 ///
-/// Discovery inkremental boleh mulai setelah saldo dan snapshot statistik awal
-/// selesai. Kalau hanya menunggu saldo, discovery berat mengambil prioritas dan
-/// snapshot tiga jam justru tertahan di belakangnya.
+/// Discovery fallback boleh mulai setelah saldo dan statistik awal selesai.
 struct SusulanToken {
     saldo: tokio::sync::oneshot::Receiver<()>,
     statistik_awal: tokio::sync::oneshot::Receiver<()>,
@@ -497,7 +495,7 @@ impl AppState {
                 }
                 *active = None;
             }
-            let cepat = state
+            let (cepat, dari_index_uniswap) = state
                 .build_token_state(
                     address.clone(),
                     crate::pools::ModePencarian::CacheSaja,
@@ -526,9 +524,15 @@ impl AppState {
                 if !statistik_awal_siap {
                     let _ = susulan.statistik_awal.await;
                 }
+                // Data API Uniswap sudah mengembalikan discovery, state, TVL,
+                // volume 1D/30D, dan APR dalam satu respons. Tidak ada alasan
+                // mengulang scan log penuh sesudah hasil lengkap ini tiba.
+                if dari_index_uniswap {
+                    return;
+                }
             }
 
-            let penuh = state
+            let (penuh, _) = state
                 .build_token_state(address, crate::pools::ModePencarian::Penuh, ticket)
                 .await;
             if !state.intent.lookup_current(ticket) {
@@ -553,7 +557,7 @@ impl AppState {
         address: String,
         mode: crate::pools::ModePencarian,
         ticket: u64,
-    ) -> protocol::TokenState {
+    ) -> (protocol::TokenState, bool) {
         let _prioritas = self.jeda_latar.prioritaskan();
         let mut out = protocol::TokenState {
             address: address.clone(),
@@ -570,7 +574,7 @@ impl AppState {
             Ok(a) => a,
             Err(_) => {
                 out.error = Some(format!("`{address}` bukan alamat EVM yang valid"));
-                return out;
+                return (out, false);
             }
         };
 
@@ -607,18 +611,43 @@ impl AppState {
         // Mode cache memakai RPC interaktif yang cepat untuk pembacaan state.
         // Discovery penuh memakai RPC log karena ia perlu rentang sejarah
         // lebar yang ditolak sebagian penyedia berbayar.
+        let mut dari_index_uniswap = false;
         let snapshot_result = match mode {
             crate::pools::ModePencarian::CacheSaja => match self.chain.read_provider().await {
                 Ok(provider) => {
-                    crate::pools::muat_token(
-                        &provider,
-                        &provider,
-                        &self.registry,
-                        Some(&self.store),
-                        token,
-                        mode,
-                    )
-                    .await
+                    let indexed = tokio::time::timeout(
+                        std::time::Duration::from_millis(3_500),
+                        self.uniswap.indexed_pools(token, self.registry.chain.id),
+                    );
+                    let metadata = crate::pools::token_meta_via(&provider, &self.registry, token);
+                    let (indexed, metadata) = tokio::join!(indexed, metadata);
+                    match indexed {
+                        Ok(Ok(indexed)) if !indexed.pools.is_empty() => {
+                            dari_index_uniswap = true;
+                            Ok(crate::pools::snapshot_dari_uniswap(
+                                indexed,
+                                token,
+                                metadata.ok(),
+                                &self.registry,
+                            ))
+                        }
+                        hasil => {
+                            match hasil {
+                                Ok(Ok(_)) => tracing::debug!("Data API Uniswap tidak menemukan pool"),
+                                Ok(Err(error)) => tracing::warn!(%error, "Data API Uniswap gagal, memakai fallback on-chain"),
+                                Err(_) => tracing::warn!("Data API Uniswap melewati batas 3,5 detik, memakai fallback on-chain"),
+                            }
+                            crate::pools::muat_token(
+                                &provider,
+                                &provider,
+                                &self.registry,
+                                Some(&self.store),
+                                token,
+                                mode,
+                            )
+                            .await
+                        }
+                    }
                 }
                 Err(e) => Err(e),
             },
@@ -644,7 +673,7 @@ impl AppState {
             Ok(s) => s,
             Err(e) => {
                 out.error = Some(format!("pencarian pool gagal: {e}"));
-                return out;
+                return (out, false);
             }
         };
 
@@ -654,7 +683,7 @@ impl AppState {
             out.error = Some(format!(
                 "{address} tidak menjawab decimals(), apakah ini ERC20?"
             ));
-            return out;
+            return (out, false);
         };
         out.meta = Some(meta.clone());
 
@@ -663,8 +692,13 @@ impl AppState {
         // Beri hasil paralel maksimal 75 ms setelah RPC lokal selesai. Biasanya
         // API sudah selesai lebih dulu; kalau belum, snapshot on-chain langsung
         // dipakai dan tugas API menyelesaikan pemeriksaan koneksinya di latar.
-        let uniswap_states = match uniswap_state_task {
-            Some(task) => {
+        let uniswap_states = match (dari_index_uniswap, uniswap_state_task) {
+            (true, Some(task)) => {
+                task.abort();
+                None
+            }
+            (true, None) => None,
+            (false, Some(task)) => {
                 match tokio::time::timeout(std::time::Duration::from_millis(75), task).await {
                     Ok(Ok(Ok(states))) => Some(states),
                     Ok(Ok(Err(error))) => {
@@ -678,7 +712,7 @@ impl AppState {
                     Err(_) => None,
                 }
             }
-            None => None,
+            (false, None) => None,
         };
         let uniswap_states: std::collections::HashMap<String, crate::uniswap::PoolState> =
             uniswap_states
@@ -703,6 +737,17 @@ impl AppState {
         // sementara cache yang sudah lama tetap disegarkan oleh tugas latar.
         let sekarang_unix = chrono::Utc::now().timestamp();
         for kelompok in &mut groups {
+            if dari_index_uniswap {
+                crate::pools::urutkan_pool_terukur(&mut kelompok.pools);
+                crate::pools::stats_cache::simpan(
+                    &self.store,
+                    &meta.address,
+                    &kelompok.quote,
+                    &kelompok.pools,
+                    sekarang_unix,
+                );
+                continue;
+            }
             crate::pools::stats_cache::terapkan(
                 &self.store,
                 &meta.address,
@@ -722,9 +767,11 @@ impl AppState {
                 };
                 let stats = pool.stats.get_or_insert(crate::pools::PoolStats {
                     volume: None,
+                    volume_30d: None,
                     jendela_menit: None,
                     tvl: None,
                     apr: None,
+                    dalam_usd: false,
                 });
                 stats.tvl = Some(tvl);
                 stats.apr = if pool.dynamic_fee {
@@ -752,7 +799,7 @@ impl AppState {
                  karena tidak berguna untuk LP"
                     .into(),
             );
-            return out;
+            return (out, dari_index_uniswap);
         }
 
         // Kelompok teratas sudah diurutkan menurut total likuiditas, jadi ia
@@ -779,7 +826,7 @@ impl AppState {
         if let (Some(meta), Some(selected)) = (out.meta.clone(), out.selected_pool_id.clone()) {
             let mut guard = self.active.write().await;
             if !self.intent.lookup_current(ticket) {
-                return out;
+                return (out, dari_index_uniswap);
             }
             let sebelumnya = guard
                 .as_ref()
@@ -815,7 +862,7 @@ impl AppState {
         }
 
         out.quotes = groups;
-        out
+        (out, dari_index_uniswap)
     }
 
     /// Catat market cap dari chart, lalu kirim ulang tampilan range.
@@ -937,13 +984,6 @@ impl AppState {
         let s = self.clone();
         tokio::spawn(async move {
             let mut statistik_awal_tx = Some(statistik_awal_tx);
-            let Ok(provider) = s.chain.read_provider().await else {
-                return;
-            };
-            let Ok(provider_logs) = s.chain.logs_provider().await else {
-                return;
-            };
-
             let (meta, kelompok, pool_awal) = {
                 let guard = s.active.read().await;
                 let Some(active) = guard.as_ref() else { return };
@@ -1009,10 +1049,23 @@ impl AppState {
                     )));
             });
 
+            // Respons indeks sudah memuat statistik 1D/30D. Beberapa pool
+            // sangat kecil memang dapat memiliki field kosong; itu bukan
+            // alasan memindai 864 ribu blok dan menahan jalur cepat Uniswap.
+            if kelompok
+                .pools
+                .iter()
+                .any(|pool| pool.stats.as_ref().is_some_and(|stats| stats.dalam_usd))
+            {
+                if let Some(selesai) = statistik_awal_tx.take() {
+                    let _ = selesai.send(());
+                }
+                return;
+            }
+
             // Statistik diukur untuk kelompok yang sedang dipilih, bukan hanya
             // yang teratas. Tanpa ini, setiap kali user berpindah pasangan,
             // kolom APR, TVL, dan volume kosong tanpa penjelasan.
-            let mut kelompok = kelompok;
             let status_stats = crate::pools::stats_cache::status(
                 &s.store,
                 meta.as_ref()
@@ -1053,58 +1106,17 @@ impl AppState {
                 );
                 return;
             };
-            let mut pilihan_yang_diharapkan = pool_awal;
+            let pilihan_yang_diharapkan = pool_awal;
 
-            // Cache kosong memakai satu potongan tiga jam agar daftar pertama
-            // sudah mempunyai APR, TVL, dan volume dalam batas interaktif.
-            // Angka 24 jam tetap dihitung sesudahnya, tanpa menahan panel.
-            if matches!(
-                status_stats,
-                crate::pools::stats_cache::StatusCache::Kosong
-                    | crate::pools::stats_cache::StatusCache::Parsial
-            ) {
-                let mut cepat = kelompok.clone();
-                crate::pools::ukur_stats_cepat(
-                    &provider_logs,
-                    &provider,
-                    &s.registry,
-                    meta_stats,
-                    &mut cepat,
-                    Some(&tugas_stats),
-                )
-                .await;
-                if !tugas_stats.aktif() {
-                    return;
-                }
-                if statistik_pool_siap(&cepat.pools) {
-                    crate::pools::stats_cache::simpan(
-                        &s.store,
-                        &meta_stats.address,
-                        &cepat.quote,
-                        &cepat.pools,
-                        chrono::Utc::now().timestamp(),
-                    );
-                    let Some((pilihan, berganti)) = s
-                        .terapkan_dan_siarkan_stats(
-                            meta_stats,
-                            &cepat,
-                            &pilihan_yang_diharapkan,
-                            saldo_bersama.read().await.clone(),
-                        )
-                        .await
-                    else {
-                        return;
-                    };
-                    kelompok = cepat;
-                    pilihan_yang_diharapkan = pilihan;
-                    if berganti {
-                        s.broadcast_range_view().await;
-                    }
-                    if let Some(selesai) = statistik_awal_tx.take() {
-                        let _ = selesai.send(());
-                    }
-                }
-            }
+            // Fallback RPC hanya berjalan bila indeks Uniswap dan cache tidak
+            // memberi statistik. Ia langsung membaca 1D; snapshot 3 jam sudah
+            // dihapus agar panel tidak pernah menampilkan periode sementara.
+            let Ok(provider) = s.chain.read_provider().await else {
+                return;
+            };
+            let Ok(provider_logs) = s.chain.logs_provider().await else {
+                return;
+            };
 
             let mut penuh = kelompok.clone();
             crate::pools::ukur_stats(
@@ -1153,8 +1165,7 @@ impl AppState {
     /// Terapkan satu hasil statistik ke token aktif dan kirim snapshot utuh.
     ///
     /// Pilihan pool hanya ikut berubah bila user belum memilih pool lain sejak
-    /// pengukuran dimulai. Fungsi ini dipakai dua kali, untuk snapshot tiga jam
-    /// dan penggantinya yang mencakup 24 jam.
+    /// pengukuran dimulai.
     async fn terapkan_dan_siarkan_stats(
         &self,
         meta: &crate::pools::TokenMeta,
@@ -2126,6 +2137,13 @@ impl AppState {
         // melewati batas yang mungkin dicapai.
         // Volume yang belum terukur berarti APR belum bisa dihitung, bukan nol.
         let apr = pool.stats.as_ref().and_then(|st| {
+            // Statistik indeks Uniswap dinyatakan dalam USD, sedangkan nominal
+            // setoran di sini masih dalam token kutipan. Jangan mencampur dua
+            // satuan saat menghitung pengenceran. Untuk modal kecil, tampilkan
+            // APR pool resmi sampai nilai setoran USD tersedia.
+            if st.dalam_usd {
+                return st.apr;
+            }
             let volume = st.volume?;
             let jendela_menit = st.jendela_menit?;
             if pool.dynamic_fee || nilai_quote <= 0.0 || jendela_menit <= 0.0 {

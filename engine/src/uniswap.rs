@@ -15,18 +15,21 @@ use std::time::Duration;
 
 use alloy::primitives::{Address, Bytes, U256};
 use anyhow::{bail, Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
 use zeroize::Zeroizing;
 
-use crate::pools::{PoolInfo, PoolVersion};
+use crate::pools::{PoolInfo, PoolStats, PoolVersion, DYNAMIC_FEE_FLAG};
 
 const BASE_URL: &str = "https://liquidity.api.uniswap.org";
+const DATA_POOLS_URL: &str =
+    "https://entry-gateway.backend-prod.api.uniswap.org/data.v2.DataApiService/ListPools";
 const CREDENTIAL_SERVICE: &str = "Rangefinder Uniswap API";
 const CREDENTIAL_USER: &str = "liquidity-api-key";
 const MAX_KEY_LEN: usize = 512;
 const MAX_REFERENCES: usize = 20;
+const DATA_POOL_LIMIT: usize = 100;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Status {
@@ -43,6 +46,22 @@ pub struct PoolState {
     pub liquidity: u128,
     pub reserve0: Option<U256>,
     pub reserve1: Option<U256>,
+}
+
+/// Metadata token yang ikut dalam respons indeks pool Uniswap.
+#[derive(Debug, Clone)]
+pub struct IndexedToken {
+    pub address: String,
+    pub symbol: String,
+    pub decimals: u8,
+}
+
+/// Snapshot pool lengkap dari Data API yang sama dengan tabel Explore
+/// Uniswap. State pool dan statistik USD tiba dalam satu permintaan.
+#[derive(Debug, Clone)]
+pub struct IndexedPools {
+    pub pools: Vec<PoolInfo>,
+    pub tokens: HashMap<String, IndexedToken>,
 }
 
 impl PoolState {
@@ -238,6 +257,57 @@ impl Client {
         *self.api_key.write().await = None;
         *self.connected.write().await = None;
         Ok(())
+    }
+
+    /// Ambil pool, state terbaru, TVL, volume 1D/30D, dan APR dari indeks yang
+    /// dipakai halaman Explore Uniswap. Endpoint ini tidak memakai API key
+    /// Liquidity; satu request menggantikan discovery log dan pengukuran log
+    /// tiga jam/24 jam pada jalur normal.
+    pub async fn indexed_pools(&self, token: Address, chain_id: u64) -> Result<IndexedPools> {
+        let body = json!({
+            "chainIds": [chain_id],
+            "sort": {
+                "orderBy": "POOLS_ORDER_BY_TVL",
+                "ascending": false,
+            },
+            "filter": {
+                "protocolVersions": ["PROTOCOL_VERSION_V3", "PROTOCOL_VERSION_V4"],
+                "includeSpam": false,
+                "tokenFilter": {
+                    "tokens": [token.to_string()],
+                    "logicalOperator": "POOL_TOKEN_LOGICAL_OPERATOR_OR",
+                },
+            },
+            "page": { "pageSize": DATA_POOL_LIMIT },
+        });
+        let started = std::time::Instant::now();
+        let response = self
+            .http
+            .post(DATA_POOLS_URL)
+            .header("connect-protocol-version", "1")
+            .header("x-request-source", "rangefinder")
+            .header("accept", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .context("Data API Uniswap tidak dapat dihubungi")?;
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .context("respons Data API Uniswap tidak dapat dibaca")?;
+        if !status.is_success() {
+            bail!("Data API Uniswap {status}: {}", api_error_detail(&text));
+        }
+        let response: DataPoolsResponse =
+            serde_json::from_str(&text).context("respons pool Data API Uniswap tidak valid")?;
+        let indexed = parse_indexed_pools(response, chain_id)?;
+        tracing::info!(
+            durasi_ms = started.elapsed().as_millis(),
+            pools = indexed.pools.len(),
+            "pool dan statistik Uniswap siap"
+        );
+        Ok(indexed)
     }
 
     /// Ambil state pool yang sudah diketahui. Referensi dipotong maksimal 20
@@ -438,6 +508,145 @@ impl Client {
         *self.connected.write().await = Some(false);
         Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Uniswap API tidak menjawab")))
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DataPoolsResponse {
+    #[serde(default)]
+    pools: Vec<DataRankedPool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DataRankedPool {
+    pool: DataPool,
+    stats: Option<DataPoolStats>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DataPool {
+    chain_id: u64,
+    pool_id: String,
+    token0: DataToken,
+    token1: DataToken,
+    protocol_version: String,
+    tick_spacing: Option<i32>,
+    fee_tier: Option<u32>,
+    #[serde(default)]
+    is_dynamic_fee: bool,
+    hook_address: Option<String>,
+    current_tick: Option<i32>,
+    sqrt_price_x96: Option<String>,
+    liquidity: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DataToken {
+    address: String,
+    symbol: String,
+    decimals: u8,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DataPoolStats {
+    tvl: Option<f64>,
+    volume1d: Option<f64>,
+    volume30d: Option<f64>,
+    apr: Option<f64>,
+}
+
+fn parse_indexed_pools(response: DataPoolsResponse, chain_id: u64) -> Result<IndexedPools> {
+    let mut pools = Vec::with_capacity(response.pools.len());
+    let mut tokens = HashMap::new();
+    let mut rejected = 0usize;
+    for ranked in response.pools {
+        let data = ranked.pool;
+        let indexed_tokens = [data.token0.clone(), data.token1.clone()];
+        let parsed = (|| -> Result<PoolInfo> {
+            anyhow::ensure!(data.chain_id == chain_id, "chain pool berbeda");
+            let version = match data.protocol_version.as_str() {
+                "PROTOCOL_VERSION_V3" => PoolVersion::V3,
+                "PROTOCOL_VERSION_V4" => PoolVersion::V4,
+                _ => bail!("versi pool tidak didukung"),
+            };
+            let sqrt: U256 = data
+                .sqrt_price_x96
+                .as_deref()
+                .context("sqrtPriceX96 kosong")?
+                .parse()
+                .context("sqrtPriceX96 bukan uint256")?;
+            let liquidity: u128 = data
+                .liquidity
+                .as_deref()
+                .context("liquidity kosong")?
+                .parse()
+                .context("liquidity bukan uint128")?;
+            anyhow::ensure!(!sqrt.is_zero() && liquidity > 0, "state pool kosong");
+            let dynamic_fee = data.is_dynamic_fee;
+            let fee = if dynamic_fee {
+                DYNAMIC_FEE_FLAG
+            } else {
+                data.fee_tier.unwrap_or_default()
+            };
+            let stats = ranked.stats.map(|stats| PoolStats {
+                volume: valid_metric(stats.volume1d),
+                volume_30d: valid_metric(stats.volume30d),
+                jendela_menit: valid_metric(stats.volume1d).map(|_| 1_440.0),
+                tvl: valid_metric(stats.tvl),
+                apr: valid_metric(stats.apr),
+                dalam_usd: true,
+            });
+            Ok(PoolInfo {
+                version,
+                id: data.pool_id,
+                token0: data.token0.address.clone(),
+                token1: data.token1.address.clone(),
+                fee,
+                dynamic_fee,
+                tick_spacing: data.tick_spacing.context("tick spacing kosong")?,
+                hooks: (version == PoolVersion::V4).then(|| {
+                    data.hook_address
+                        .unwrap_or_else(|| Address::ZERO.to_string())
+                }),
+                sqrt_price_x96: sqrt.to_string(),
+                tick: data.current_tick.context("tick pool kosong")?,
+                liquidity: liquidity.to_string(),
+                raw_price: crate::pools::raw_price_from_sqrt_x96(sqrt),
+                stats,
+            })
+        })();
+
+        match parsed {
+            Ok(pool) => {
+                for token in indexed_tokens {
+                    tokens
+                        .entry(token.address.to_lowercase())
+                        .or_insert(IndexedToken {
+                            address: token.address,
+                            symbol: token.symbol,
+                            decimals: token.decimals,
+                        });
+                }
+                pools.push(pool);
+            }
+            Err(error) => {
+                rejected += 1;
+                tracing::debug!(%error, "pool Data API Uniswap dilewati");
+            }
+        }
+    }
+    if pools.is_empty() && rejected > 0 {
+        bail!("seluruh pool Data API Uniswap tidak memiliki state yang dapat dipakai");
+    }
+    Ok(IndexedPools { pools, tokens })
+}
+
+fn valid_metric(value: Option<f64>) -> Option<f64> {
+    value.filter(|value| value.is_finite() && *value >= 0.0)
 }
 
 fn credential_entry() -> Result<keyring::Entry> {
@@ -768,6 +977,51 @@ mod tests {
         assert!((tvl - 4.0).abs() < 1e-9);
         response["tokenAddressB"] = Value::String(Address::repeat_byte(9).to_string());
         assert!(parse_pool_state(&response, &known, 4663).is_err());
+    }
+
+    #[test]
+    fn parse_indeks_pool_membawa_statistik_satu_dan_tiga_puluh_hari() {
+        let swarm = "0x462dff4be800c77a61e69dc2ea6010e4237f674d";
+        let usdg = "0xe8cefbef2673b4d19fc4e2c879e80d7b9d70d38c";
+        let response: DataPoolsResponse = serde_json::from_value(json!({
+            "pools": [{
+                "pool": {
+                    "chainId": 4663,
+                    "poolId": format!("0x{}", "11".repeat(32)),
+                    "token0": { "address": swarm, "symbol": "SWARM", "decimals": 18 },
+                    "token1": { "address": usdg, "symbol": "USDG", "decimals": 18 },
+                    "protocolVersion": "PROTOCOL_VERSION_V4",
+                    "tickSpacing": 800,
+                    "feeTier": 40000,
+                    "isDynamicFee": false,
+                    "hookAddress": Address::ZERO.to_string(),
+                    "currentTick": -1250,
+                    "sqrtPriceX96": "79228162514264337593543950336",
+                    "liquidity": "987654321"
+                },
+                "stats": {
+                    "tvl": 5652.83,
+                    "volume1d": 24619.52,
+                    "volume30d": 1011497.58,
+                    "apr": 6352.31
+                }
+            }]
+        }))
+        .unwrap();
+
+        let indexed = parse_indexed_pools(response, 4663).unwrap();
+        assert_eq!(indexed.pools.len(), 1);
+        let pool = &indexed.pools[0];
+        assert_eq!(pool.version, PoolVersion::V4);
+        assert_eq!(pool.fee, 40_000);
+        let stats = pool.stats.as_ref().unwrap();
+        assert_eq!(stats.volume, Some(24_619.52));
+        assert_eq!(stats.volume_30d, Some(1_011_497.58));
+        assert_eq!(stats.jendela_menit, Some(1_440.0));
+        assert_eq!(stats.tvl, Some(5_652.83));
+        assert_eq!(stats.apr, Some(6_352.31));
+        assert!(stats.dalam_usd);
+        assert_eq!(indexed.tokens[swarm].symbol, "SWARM");
     }
 
     #[tokio::test]

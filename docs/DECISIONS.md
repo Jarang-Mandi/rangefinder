@@ -319,7 +319,7 @@ rute multi hop.
 
 ## 0011 RPC dibagi menurut jenis pekerjaan dan statistik awal memakai tiga jam
 
-**Tanggal** 13 September 2026. **Status** berlaku.
+**Tanggal** 13 September 2026. **Status** digantikan sebagian oleh 0014.
 
 **Konteks.** Satu endpoint tidak unggul pada semua metode. Pengukuran lokal
 menunjukkan endpoint Alchemy menjawab `eth_call` jauh lebih cepat, tetapi paket
@@ -440,3 +440,30 @@ atau APR; volume tetap berasal dari index event persisten Rangefinder, lalu APR
 dihitung dari volume tersebut dan TVL Uniswap. Token baru tetap memerlukan
 discovery pertama; sesudah kuncinya masuk cache, pemuatan berikutnya memakai
 batch API dengan fallback on-chain.
+
+---
+
+## 0014 Data API v2 Uniswap menjadi jalur utama discovery dan statistik
+
+**Tanggal** 17 September 2026. **Status** berlaku.
+
+**Konteks.** Liquidity API mempercepat state pool yang sudah diketahui, tetapi
+tidak menyediakan discovery, volume, atau APR. GraphQL gateway Uniswap dapat
+menemukan pool dan TVL, tetapi uji Robinhood Chain mengembalikan volume 1D kosong
+dan membutuhkan sekitar empat detik. Data API v2 yang dipakai tabel Explore
+Uniswap mengembalikan ketujuh pool SWARM beserta state, TVL, volume 1D/30D, dan
+APR dalam sekitar satu detik.
+
+**Pilihan.** Lookup token lebih dulu memanggil
+`data.v2.DataApiService/ListPools` dengan filter token dan chain 4663. Metadata
+on-chain dibaca bersamaan. Respons indeks langsung menjadi `token_state`; saldo
+dimulai segera sesudahnya. Ketika respons lengkap ini tersedia, engine tidak
+menjalankan discovery atau pemindaian volume log. Snapshot tiga jam dihapus.
+Fallback RPC lama tetap tersedia bila indeks gagal, tetapi langsung mengukur
+24 jam dan tidak pernah menampilkan periode sementara.
+
+**Konsekuensi.** Jalur normal membutuhkan satu request indeks dan satu batch
+metadata, serta tidak bergantung pada kemampuan `eth_getLogs` RPC publik.
+Angka indeks ditandai sebagai USD agar tidak dicampur dengan fallback yang
+berdenominasi token kutipan. Perubahan skema atau kegagalan endpoint jatuh ke
+jalur on-chain yang lebih lambat tanpa mengarang angka nol.

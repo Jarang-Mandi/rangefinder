@@ -87,21 +87,20 @@ rencana selama input berubah dan memakai satu tombol final. Kartu PnL
 menampilkan waktu buka, durasi atau waktu tutup, setoran, nilai sekarang atau
 diterima, fee, net, dan persentase tanpa eyebrow teknis. Net tetap ditampilkan
 dengan tanda perkiraan ketika komponennya tersedia tetapi basis historis belum
-lengkap. Simbol histori lama diisi dari metadata on chain. Statistik pool token
-memakai snapshot awal tiga jam agar seluruh pool, APR, TVL, dan volume dapat
-muncul bersama dalam sasaran tujuh detik. Pengukuran 24 jam menggantikannya di
-latar, lalu pool diurutkan menurut APR terukur. Panel menahan snapshot parsial
-dan hanya membuka daftar saat volume serta jendela seluruh pool siap. RPC
+lengkap. Simbol histori lama diisi dari metadata on chain. Discovery dan
+statistik pool memakai satu respons Data API v2 Uniswap yang membawa state,
+TVL, volume 1D/30D, dan APR. Snapshot tiga jam tidak dipakai lagi. Respons
+pertama langsung memakai jendela 1D dan pool diurutkan menurut APR terukur. RPC
 interaktif dan RPC log dapat dipisah lewat `rpc.http` dan `rpc.logs_http`;
 endpoint cepat melayani state, saldo, rencana, dan transaksi, sedangkan
 endpoint yang menerima rentang lebar melayani discovery serta volume.
 Pengukuran statistik untuk snapshot pasangan yang sama dideduplikasi dan setiap
 potongan log memberi jalan kepada rencana atau transaksi interaktif. Potongan
-awalnya 216.000 blok, pembaca log latar diserialkan, statistik pairing lama
+awalnya 216.000 blok pada jalur fallback, pembaca log latar diserialkan, statistik pairing lama
 dibatalkan saat pairing berubah, dan discovery lama dibatalkan saat pool atau
 rencana dipilih. Snapshot APR, TVL, dan volume yang paling lama satu jam
 disimpan di redb; lima menit pertama dianggap segar dan sisanya ditampilkan
-sambil disegarkan. Snapshot tiga jam tetap meminta pengukuran 24 jam. Statistik
+sambil disegarkan. Fallback RPC langsung mengukur 24 jam. Statistik
 diterapkan per ID pool supaya perubahan daftar pool tidak mengosongkan semua
 angka. Saldo cache
 diselesaikan sebelum discovery penuh dimulai. Saldo native dan ERC20 dibaca bersamaan, saldo

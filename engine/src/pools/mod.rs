@@ -144,33 +144,36 @@ pub struct PoolInfo {
 
 /// Angka pembanding antar pool pada token yang sama.
 ///
-/// Seluruhnya dinyatakan dalam token kutipan pool itu, dengan alasan yang sama
-/// seperti di `kandidat`: satuan terkecil menghasilkan angka yang terbaca
-/// seperti dolar padahal bukan, dan kurs dolar yang ditebak memasukkan
-/// kesalahan ke angka yang seharusnya murni hasil penjumlahan.
+/// Indeks Uniswap memasok angka USD siap tampil. Fallback RPC menghitungnya
+/// dalam token kutipan agar tidak memasukkan kurs dolar hasil tebakan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolStats {
-    /// Volume pada jendela yang diukur, dalam kutipan.
+    /// Volume pada jendela yang diukur. Satuannya ditandai oleh `dalam_usd`.
     ///
-    /// `None` berarti belum bisa diukur, bukan nol. Pengukuran volume membaca
-    /// event `Swap` PoolManager V4 dan menyaringnya menurut poolId, dan pool V3
-    /// tidak punya keduanya. Nol berarti benar benar tidak ada perdagangan,
-    /// dan itu kesimpulan yang sangat berbeda.
+    /// `None` berarti belum tersedia, bukan nol. Nol berarti benar benar tidak
+    /// ada perdagangan, dan itu kesimpulan yang sangat berbeda.
     pub volume: Option<f64>,
+    /// Volume tiga puluh hari. Data ini tersedia langsung dari indeks Uniswap
+    /// dan tidak dihitung ulang lewat log RPC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume_30d: Option<f64>,
     /// Lamanya jendela itu, dalam menit. Volume tanpa jendela tidak berarti.
     pub jendela_menit: Option<f64>,
-    /// Seluruh modal yang tertanam di pool, dalam kutipan.
+    /// Seluruh modal yang tertanam di pool. Satuannya ditandai oleh
+    /// `dalam_usd`.
     ///
-    /// Dijumlahkan dari distribusi likuiditas, bukan ditaksir dari likuiditas
-    /// di satu tick. Taksiran seperti itu pernah melaporkan 0,82 untuk pool
-    /// yang isinya kira kira 360, karena likuiditas berubah di setiap tick yang
-    /// terinisialisasi dan satu titik tidak mewakili seluruhnya.
+    /// Pada fallback RPC, nilai ini dijumlahkan dari distribusi likuiditas,
+    /// bukan ditaksir dari likuiditas di satu tick.
     pub tvl: Option<f64>,
     /// Proyeksi fee marginal setahun terhadap TVL aktif, dalam persen.
     ///
-    /// `None` untuk fee dinamis, yang besarannya baru diketahui saat swap
-    /// terjadi, dan untuk pool yang kedalamannya tidak terbaca.
+    /// `None` berarti indeks/fallback tidak mempunyai data yang cukup.
     pub apr: Option<f64>,
+    /// Benar bila `volume`, `volume_30d`, dan `tvl` berasal dari indeks
+    /// Uniswap dan dinyatakan dalam USD. Jalur RPC lokal memakai token
+    /// kutipan dan membiarkan nilai ini `false`.
+    #[serde(default)]
+    pub dalam_usd: bool,
 }
 
 /// Ubah `sqrtPriceX96` menjadi harga mentah token1 per token0.
@@ -692,6 +695,43 @@ pub struct TokenSnapshot {
     pub quotes: Vec<QuoteGroup>,
 }
 
+/// Bentuk snapshot Data API Uniswap menjadi model yang sama dengan fallback
+/// on-chain. Metadata lawan sudah ikut dalam respons indeks, sehingga tidak
+/// perlu lagi satu batch RPC untuk setiap token pasangan.
+pub fn snapshot_dari_uniswap(
+    indexed: crate::uniswap::IndexedPools,
+    token: Address,
+    meta_onchain: Option<TokenMeta>,
+    registry: &Registry,
+) -> TokenSnapshot {
+    let token_key = token.to_string().to_lowercase();
+    let meta = meta_onchain.or_else(|| {
+        indexed.tokens.get(&token_key).map(|meta| TokenMeta {
+            address: meta.address.clone(),
+            symbol: meta.symbol.clone(),
+            decimals: meta.decimals,
+            total_supply: f64::NAN,
+        })
+    });
+    let dikenal = indexed
+        .tokens
+        .into_iter()
+        .map(|(key, meta)| {
+            (
+                key,
+                TokenMeta {
+                    address: meta.address,
+                    symbol: meta.symbol,
+                    decimals: meta.decimals,
+                    total_supply: f64::NAN,
+                },
+            )
+        })
+        .collect();
+    let quotes = kelompokkan(indexed.pools, token, registry, &dikenal);
+    TokenSnapshot { meta, quotes }
+}
+
 /// Muat metadata token dan seluruh poolnya dengan permintaan sesedikit mungkin.
 ///
 /// KENAPA SATU FUNGSI, BUKAN TIGA PANGGILAN TERPISAH
@@ -893,32 +933,6 @@ pub async fn ukur_stats<L: Provider, S: Provider>(
         meta,
         kelompok,
         tugas_latar,
-        false,
-    )
-    .await;
-}
-
-/// Isi statistik tiga jam untuk snapshot pertama.
-///
-/// Volume memakai satu permintaan log besar, sedangkan TVL dibaca dari RPC
-/// interaktif secara terpisah. Setelah hasil ini tampil, `ukur_stats` tetap
-/// memperbaruinya dengan jendela 24 jam di belakang layar.
-pub async fn ukur_stats_cepat<L: Provider, S: Provider>(
-    provider_logs: &L,
-    provider_state: &S,
-    registry: &Registry,
-    meta: &TokenMeta,
-    kelompok: &mut QuoteGroup,
-    tugas_latar: Option<&crate::chain::logs::TugasLatar>,
-) {
-    ukur_stats_dengan_jendela(
-        provider_logs,
-        provider_state,
-        registry,
-        meta,
-        kelompok,
-        tugas_latar,
-        true,
     )
     .await;
 }
@@ -931,7 +945,6 @@ async fn ukur_stats_dengan_jendela<L: Provider, S: Provider>(
     meta: &TokenMeta,
     kelompok: &mut QuoteGroup,
     tugas_latar: Option<&crate::chain::logs::TugasLatar>,
-    cepat: bool,
 ) {
     use crate::pools::kandidat;
 
@@ -1008,8 +1021,8 @@ async fn ukur_stats_dengan_jendela<L: Provider, S: Provider>(
         .collect();
 
     // Volume dan TVL tidak saling bergantung dan memakai endpoint yang berbeda.
-    // Menjalankannya berurutan pernah membuat snapshot cepat tiga jam nyaris
-    // melewati sasaran tujuh detik meski kedua RPC sehat.
+    // Fallback ini tetap menjalankannya bersamaan supaya pengukuran 1D tidak
+    // membayar dua latensi RPC secara berurutan.
     // Tinggi blok dibaca dari RPC interaktif agar RPC log hanya menerima satu
     // permintaan berat. Sepuluh blok terakhir dilewati karena node publik bisa
     // tertinggal sesaat dari endpoint interaktif.
@@ -1025,27 +1038,12 @@ async fn ukur_stats_dengan_jendela<L: Provider, S: Provider>(
         let mut durasi: std::collections::HashMap<String, f64> = Default::default();
 
         if !ids_v4.is_empty() {
-            let hasil = match (cepat, sampai_blok) {
-                (true, Some(blok)) => {
-                    volume::ukur_volume_cepat_pada(
-                        provider_logs,
-                        registry,
-                        &ids_v4,
-                        tugas_latar,
-                        blok,
-                    )
-                    .await
-                }
-                (false, Some(blok)) => {
+            let hasil = match sampai_blok {
+                Some(blok) => {
                     volume::ukur_volume_pada(provider_logs, registry, &ids_v4, tugas_latar, blok)
                         .await
                 }
-                (true, None) => {
-                    volume::ukur_volume_cepat(provider_logs, registry, &ids_v4, tugas_latar).await
-                }
-                (false, None) => {
-                    volume::ukur_volume(provider_logs, registry, &ids_v4, tugas_latar).await
-                }
+                None => volume::ukur_volume(provider_logs, registry, &ids_v4, tugas_latar).await,
             };
             match hasil {
                 Ok(v) => {
@@ -1065,18 +1063,8 @@ async fn ukur_stats_dengan_jendela<L: Provider, S: Provider>(
         }
 
         if !alamat_v3.is_empty() {
-            let hasil = match (cepat, sampai_blok) {
-                (true, Some(blok)) => {
-                    volume::ukur_volume_v3_cepat_pada(
-                        provider_logs,
-                        registry,
-                        &alamat_v3,
-                        tugas_latar,
-                        blok,
-                    )
-                    .await
-                }
-                (false, Some(blok)) => {
+            let hasil = match sampai_blok {
+                Some(blok) => {
                     volume::ukur_volume_v3_pada(
                         provider_logs,
                         registry,
@@ -1086,11 +1074,7 @@ async fn ukur_stats_dengan_jendela<L: Provider, S: Provider>(
                     )
                     .await
                 }
-                (true, None) => {
-                    volume::ukur_volume_v3_cepat(provider_logs, registry, &alamat_v3, tugas_latar)
-                        .await
-                }
-                (false, None) => {
+                None => {
                     volume::ukur_volume_v3(provider_logs, registry, &alamat_v3, tugas_latar).await
                 }
             };
@@ -1112,7 +1096,6 @@ async fn ukur_stats_dengan_jendela<L: Provider, S: Provider>(
             }
         }
         tracing::info!(
-            cepat,
             durasi_ms = mulai.elapsed().as_millis(),
             "pengukuran volume pool selesai"
         );
@@ -1129,7 +1112,6 @@ async fn ukur_stats_dengan_jendela<L: Provider, S: Provider>(
             hasil.extend(tambahan);
         }
         tracing::info!(
-            cepat,
             durasi_ms = mulai.elapsed().as_millis(),
             dihitung = daftar.len(),
             "pengukuran TVL pool selesai"
@@ -1175,9 +1157,11 @@ async fn ukur_stats_dengan_jendela<L: Provider, S: Provider>(
 
         pool.stats = Some(PoolStats {
             volume,
+            volume_30d: None,
             jendela_menit: terukur_volume.then(|| jendela_detik / 60.0),
             tvl,
             apr,
+            dalam_usd: false,
         });
     }
 
@@ -1924,7 +1908,10 @@ fn kelompokkan(
         .into_iter()
         .filter_map(|(quote, pools)| {
             let (symbol, decimals, kanonik) = kenali_quote(&quote, registry, dikenal)?;
-            let pools = usable_pools(pools);
+            let mut pools = usable_pools(pools);
+            if pools.iter().any(|pool| pool.stats.is_some()) {
+                urutkan_pool_terukur(&mut pools);
+            }
             (!pools.is_empty()).then_some(QuoteGroup {
                 quote,
                 quote_symbol: symbol,
@@ -1947,10 +1934,24 @@ fn kelompokkan(
     // bisa dipilih user, hanya tidak dipilihkan otomatis.
     out.sort_by(|a, b| {
         let total = |g: &QuoteGroup| -> f64 {
-            g.pools
+            let tvl_usd: f64 = g
+                .pools
                 .iter()
-                .map(|p| p.liquidity.parse::<f64>().unwrap_or(0.0))
-                .sum()
+                .filter_map(|p| {
+                    p.stats
+                        .as_ref()
+                        .filter(|stats| stats.dalam_usd)
+                        .and_then(|stats| stats.tvl)
+                })
+                .sum();
+            if tvl_usd > 0.0 {
+                tvl_usd
+            } else {
+                g.pools
+                    .iter()
+                    .map(|p| p.liquidity.parse::<f64>().unwrap_or(0.0))
+                    .sum()
+            }
         };
         b.canonical
             .cmp(&a.canonical)
@@ -2232,16 +2233,20 @@ mod tests {
         let mut besar_tapi_sepi = pool("besar", 10_000, "1000000", 1.0);
         besar_tapi_sepi.stats = Some(PoolStats {
             volume: Some(1.0),
+            volume_30d: None,
             jendela_menit: Some(1_440.0),
             tvl: Some(1_000.0),
             apr: Some(2.0),
+            dalam_usd: false,
         });
         let mut kecil_tapi_menghasilkan = pool("menghasilkan", 3_000, "1000", 1.0);
         kecil_tapi_menghasilkan.stats = Some(PoolStats {
             volume: Some(100.0),
+            volume_30d: None,
             jendela_menit: Some(1_440.0),
             tvl: Some(100.0),
             apr: Some(40.0),
+            dalam_usd: false,
         });
         let mut pools = vec![besar_tapi_sepi, kecil_tapi_menghasilkan];
 
@@ -2255,16 +2260,20 @@ mod tests {
         let mut pasar = pool("pasar", 10_000, "1000000", 1.0);
         pasar.stats = Some(PoolStats {
             volume: Some(100.0),
+            volume_30d: None,
             jendela_menit: Some(1_440.0),
             tvl: Some(100.0),
             apr: Some(1_000.0),
+            dalam_usd: false,
         });
         let mut tipis = pool("tipis", 96_500, "1000", 1.0);
         tipis.stats = Some(PoolStats {
             volume: Some(0.01),
+            volume_30d: None,
             jendela_menit: Some(1_440.0),
             tvl: Some(0.01),
             apr: Some(10_000.0),
+            dalam_usd: false,
         });
         let mut pools = vec![tipis, pasar];
 

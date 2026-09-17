@@ -45,14 +45,6 @@ use crate::chain::registry::Registry;
 /// sebelumnya dibesarkan 8.760 kali saat diproyeksikan menjadi APR tahunan.
 pub const JENDELA_VOLUME_BLOK: u64 = 864_000;
 
-/// Jendela snapshot awal, kira kira tiga jam.
-///
-/// Setengah potongan normal dipilih karena rentang 216.000 blok kadang perlu
-/// dipecah oleh RPC dan membuat snapshot pertama melewati tujuh detik. Angkanya
-/// cukup untuk memilih pool saat halaman baru dibuka, lalu pengukuran 24 jam
-/// menggantikannya di belakang layar.
-pub const JENDELA_VOLUME_CEPAT_BLOK: u64 = 108_000;
-
 /// Ukuran awal tiap permintaan log.
 ///
 /// Seluruh 24 jam tetap dibaca. Potongan ini hanya menjaga satu jawaban di
@@ -125,43 +117,6 @@ pub async fn ukur_volume_v3<P: Provider>(
         tugas_latar,
         JENDELA_VOLUME_BLOK,
         None,
-    )
-    .await
-}
-
-/// Ukur volume V3 tiga jam untuk snapshot pertama yang dibatasi tujuh detik.
-pub async fn ukur_volume_v3_cepat<P: Provider>(
-    provider: &P,
-    registry: &Registry,
-    pool_alamat: &[String],
-    tugas_latar: Option<&crate::chain::logs::TugasLatar>,
-) -> Result<VolumeTerukur> {
-    ukur_volume_v3_dengan_jendela(
-        provider,
-        registry,
-        pool_alamat,
-        tugas_latar,
-        JENDELA_VOLUME_CEPAT_BLOK,
-        None,
-    )
-    .await
-}
-
-/// Ukur volume V3 cepat pada blok yang sudah dibaca RPC interaktif.
-pub async fn ukur_volume_v3_cepat_pada<P: Provider>(
-    provider: &P,
-    registry: &Registry,
-    pool_alamat: &[String],
-    tugas_latar: Option<&crate::chain::logs::TugasLatar>,
-    sampai_blok: u64,
-) -> Result<VolumeTerukur> {
-    ukur_volume_v3_dengan_jendela(
-        provider,
-        registry,
-        pool_alamat,
-        tugas_latar,
-        JENDELA_VOLUME_CEPAT_BLOK,
-        Some(sampai_blok),
     )
     .await
 }
@@ -289,43 +244,6 @@ pub async fn ukur_volume<P: Provider>(
     .await
 }
 
-/// Ukur volume V4 tiga jam untuk snapshot pertama yang dibatasi tujuh detik.
-pub async fn ukur_volume_cepat<P: Provider>(
-    provider: &P,
-    registry: &Registry,
-    pool_ids: &[String],
-    tugas_latar: Option<&crate::chain::logs::TugasLatar>,
-) -> Result<VolumeTerukur> {
-    ukur_volume_dengan_jendela(
-        provider,
-        registry,
-        pool_ids,
-        tugas_latar,
-        JENDELA_VOLUME_CEPAT_BLOK,
-        None,
-    )
-    .await
-}
-
-/// Ukur volume V4 cepat pada blok yang sudah dibaca RPC interaktif.
-pub async fn ukur_volume_cepat_pada<P: Provider>(
-    provider: &P,
-    registry: &Registry,
-    pool_ids: &[String],
-    tugas_latar: Option<&crate::chain::logs::TugasLatar>,
-    sampai_blok: u64,
-) -> Result<VolumeTerukur> {
-    ukur_volume_dengan_jendela(
-        provider,
-        registry,
-        pool_ids,
-        tugas_latar,
-        JENDELA_VOLUME_CEPAT_BLOK,
-        Some(sampai_blok),
-    )
-    .await
-}
-
 /// Ukur volume V4 penuh pada blok yang sudah dibaca RPC interaktif.
 pub async fn ukur_volume_pada<P: Provider>(
     provider: &P,
@@ -445,13 +363,6 @@ mod tests {
             (detik - 86_400.0).abs() < 1_500.0,
             "jendela {detik} detik, seharusnya sekitar satu hari"
         );
-    }
-
-    #[test]
-    fn snapshot_cepat_kira_kira_tiga_jam() {
-        let detik = JENDELA_VOLUME_CEPAT_BLOK as f64 * 0.1;
-        assert!((detik - 10_800.0).abs() < 250.0);
-        assert_eq!(JENDELA_VOLUME_CEPAT_BLOK * 2, POTONGAN_VOLUME_BLOK);
     }
 
     #[test]

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use super::{urutkan_pool_terukur, PoolInfo, PoolStats};
 use crate::store::Store;
 
-const VERSI: u32 = 11;
+const VERSI: u32 = 12;
 
 /// Dalam batas ini cache tidak perlu dihitung ulang.
 pub const SEGAR_DETIK: i64 = 5 * 60;
@@ -21,9 +21,9 @@ pub const SEGAR_DETIK: i64 = 5 * 60;
 /// Setelah satu jam, perubahan pasar sudah terlalu besar untuk ditampilkan.
 pub const MAKS_TAMPIL_DETIK: i64 = 60 * 60;
 
-/// Snapshot tiga jam boleh langsung ditampilkan, tetapi belum menghentikan
-/// penyegaran 24 jam. Toleransi dua puluh jam menjaga sedikit selisih tinggi
-/// blok tidak membuat hasil penuh terus dianggap sementara.
+/// Hanya snapshot mendekati satu hari yang dianggap lengkap. Toleransi dua
+/// puluh jam menjaga sedikit selisih tinggi blok tidak membuat fallback RPC
+/// terus dianggap sementara.
 const JENDELA_PENUH_MIN_MENIT: f64 = 20.0 * 60.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,10 +57,16 @@ fn kunci(token: &str, quote: &str) -> String {
 }
 
 fn statistik_masuk_akal(stats: &PoolStats) -> bool {
-    [stats.volume, stats.jendela_menit, stats.tvl, stats.apr]
-        .into_iter()
-        .flatten()
-        .all(|v| v.is_finite() && v >= 0.0)
+    [
+        stats.volume,
+        stats.volume_30d,
+        stats.jendela_menit,
+        stats.tvl,
+        stats.apr,
+    ]
+    .into_iter()
+    .flatten()
+    .all(|v| v.is_finite() && v >= 0.0)
 }
 
 fn statistik_layak_disimpan(stats: &PoolStats) -> bool {
@@ -226,9 +232,11 @@ mod tests {
             raw_price: 1.0,
             stats: volume.map(|volume| PoolStats {
                 volume: Some(volume),
+                volume_30d: None,
                 jendela_menit: Some(1_440.0),
                 tvl: Some(100.0),
                 apr: Some(volume),
+                dalam_usd: false,
             }),
         }
     }
@@ -293,27 +301,6 @@ mod tests {
             StatusCache::Kosong
         );
         assert!(kedaluwarsa[0].stats.is_none());
-        drop(store);
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn snapshot_tiga_jam_tampil_tetapi_tetap_meminta_dua_puluh_empat_jam() {
-        let (store, dir) = store_sementara("cepat");
-        let mut cepat = pool("pool", Some(7.0));
-        cepat.stats.as_mut().unwrap().jendela_menit = Some(180.0);
-        simpan(&store, "token", "quote", &[cepat], 1_000);
-
-        let mut tujuan = vec![pool("pool", None)];
-        assert_eq!(
-            terapkan(&store, "token", "quote", &mut tujuan, 1_010),
-            StatusCache::PerluPenyegaran
-        );
-        assert!(tujuan[0].stats.is_some());
-        assert_eq!(
-            status(&store, "token", "quote", &tujuan, 1_010),
-            StatusCache::PerluPenyegaran
-        );
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }
