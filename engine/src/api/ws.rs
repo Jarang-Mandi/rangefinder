@@ -146,6 +146,14 @@ async fn session(socket: WebSocket, state: AppState) {
                                 let s = state.clone();
                                 tokio::spawn(async move { s.on_remove_rpc(id).await });
                             }
+                            Ok(ClientMessage::SetUniswapApiKey { api_key }) => {
+                                let s = state.clone();
+                                tokio::spawn(async move { s.on_set_uniswap_api_key(api_key).await });
+                            }
+                            Ok(ClientMessage::ForgetUniswapApiKey) => {
+                                let s = state.clone();
+                                tokio::spawn(async move { s.on_forget_uniswap_api_key().await });
+                            }
                             Ok(ClientMessage::GetDepth) => {
                                 let s = state.clone();
                                 tokio::spawn(async move { s.on_get_depth().await });

@@ -963,12 +963,26 @@ async fn ukur_stats_dengan_jendela<L: Provider, S: Provider>(
     // tick yang terinisialisasi dan satu titik tidak mewakili seluruhnya.
     let state_view = registry.contract("uniswap_v4", "state_view").ok();
 
+    // `/lp/pool_info` Uniswap dapat memberi cadangan V4 langsung, dan cache
+    // statistik yang masih segar juga sudah membawa TVL yang layak dipakai.
+    // Jangan ulangi pemindaian seluruh tick untuk pool-pool tersebut. Jalur
+    // distribusi lokal tinggal menjadi fallback bagi pool tanpa TVL siap pakai.
+    let tvl_siap: std::collections::HashMap<String, f64> = kelompok
+        .pools
+        .iter()
+        .filter_map(|pool| {
+            let tvl = pool.stats.as_ref()?.tvl?;
+            (tvl.is_finite() && tvl > 0.0).then(|| (pool.id.to_lowercase(), tvl))
+        })
+        .collect();
+
     // Sumber data per tick berbeda menurut protokol pool. Pool yang sumbernya
     // tidak bisa ditentukan dilewati, bukan diberi TVL nol, karena nol berarti
     // pool kosong dan itu kesimpulan yang berbeda.
     let daftar: Vec<(String, distribusi::SumberTick, distribusi::KeadaanPool)> = kelompok
         .pools
         .iter()
+        .filter(|p| !tvl_siap.contains_key(&p.id.to_lowercase()))
         .filter_map(|p| {
             let sumber = match p.version {
                 PoolVersion::V4 => distribusi::SumberTick::V4 {
@@ -1106,13 +1120,18 @@ async fn ukur_stats_dengan_jendela<L: Provider, S: Provider>(
     };
     let tvl_future = async {
         let mulai = std::time::Instant::now();
-        let hasil = match registry.contract("common", "multicall3") {
-            Ok(mc) => distribusi::tvl_beberapa(provider_state, mc, &daftar).await,
-            Err(_) => Default::default(),
-        };
+        let mut hasil = tvl_siap;
+        if !daftar.is_empty() {
+            let tambahan = match registry.contract("common", "multicall3") {
+                Ok(mc) => distribusi::tvl_beberapa(provider_state, mc, &daftar).await,
+                Err(_) => Default::default(),
+            };
+            hasil.extend(tambahan);
+        }
         tracing::info!(
             cepat,
             durasi_ms = mulai.elapsed().as_millis(),
+            dihitung = daftar.len(),
             "pengukuran TVL pool selesai"
         );
         hasil

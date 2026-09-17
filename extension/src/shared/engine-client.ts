@@ -461,6 +461,14 @@ export class EngineClient {
     this.send({ type: "remove_rpc", id });
   }
 
+  setUniswapApiKey(apiKey: string) {
+    this.send({ type: "set_uniswap_api_key", api_key: apiKey });
+  }
+
+  forgetUniswapApiKey() {
+    this.send({ type: "forget_uniswap_api_key" });
+  }
+
   /**
    * Setujui sebuah hook V4 secara sadar, PRD 5.4.
    *

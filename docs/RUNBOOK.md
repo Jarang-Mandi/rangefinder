@@ -137,6 +137,24 @@ Token tersimpan di penyimpanan ekstensi dan tidak diminta lagi. Kalau token
 hilang atau ingin dicabut, hapus `pairing.token` di direktori data lalu
 jalankan ulang engine, dan lakukan pairing ulang.
 
+## Mengaktifkan jalur langsung Uniswap
+
+Buat API key di [Uniswap Developer Platform](https://developers.uniswap.org/),
+lalu buka **Settings > Uniswap** di side panel dan tekan **Simpan**. Engine
+menyimpan key di Windows Credential Manager; nilainya tidak masuk
+`config.toml`, log, status, atau bundle extension.
+
+Saat aktif, state pool yang sudah dikenal dibaca lewat `/lp/pool_info` secara
+paralel dengan snapshot RPC. Create, increase, decrease, dan claim memakai
+calldata dari Liquidity API setelah tujuan kontrak, chain, wallet, pasangan,
+range, jumlah, dan simulasi RPC cocok. Kalau API lambat atau gagal, engine
+langsung memakai jalur lokal. Swap Zap tetap memakai router Robinhood dan
+rebalance tetap memakai builder lokal karena kedua alur itu berbeda dari
+endpoint LP resmi.
+
+Endpoint pool Uniswap belum membawa volume atau APR. Angka tersebut tetap
+berasal dari index event persisten Rangefinder dan cache statistik lokal.
+
 ## Membuat wallet
 
 Wallet dibuat dari side panel, bukan dari baris perintah, supaya passphrase

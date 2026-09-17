@@ -11,6 +11,7 @@ const positionsOnly = process.argv.includes("--positions-only");
 const statusOnly = process.argv.includes("--status-only");
 let positionsReceived = false;
 let transactionsReceived = positionsOnly;
+let protocolVersion = null;
 
 function finishIfComplete() {
   if (!positionsReceived || !transactionsReceived) return;
@@ -21,6 +22,7 @@ function finishIfComplete() {
 ws.addEventListener("message", (event) => {
   const message = JSON.parse(event.data);
   if (message.type === "hello") {
+    protocolVersion = message.protocol_version;
     if (statusOnly) return;
     ws.send(JSON.stringify({ type: "get_positions" }));
     if (!positionsOnly) ws.send(JSON.stringify({ type: "get_transactions" }));
@@ -29,8 +31,9 @@ ws.addEventListener("message", (event) => {
   if (message.type === "engine_status" && statusOnly) {
     console.log(JSON.stringify({
       type: message.type,
-      protocol: message.protocol_version,
+      protocol: protocolVersion,
       healthy: message.chain?.healthy,
+      uniswap: message.uniswap,
       rpc_endpoints: message.rpc_endpoints ?? [],
     }, null, 2));
     ws.close();

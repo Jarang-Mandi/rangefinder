@@ -1011,6 +1011,7 @@
 }
 
 .rpc-add input {
+  flex: 1;
   min-width: 0;
   padding: 0 7px;
 }

@@ -398,3 +398,45 @@ pengiriman tetap memakai RPC transaksi dan gate eksekusi yang sama. API
 `/lp/pool_info` Uniswap dapat membatch state pool yang sudah diketahui, tetapi
 tidak menggantikan indeks pasangan token atau pengukuran volume 24 jam; untuk
 token yang baru terlihat, sumber indeks yang terus berjalan tetap diperlukan.
+
+---
+
+## 0013 Uniswap API menjadi jalur utama state dan transaksi LP
+
+**Tanggal** 17 September 2026. **Status** berlaku.
+
+**Konteks.** Pembacaan langsung dari beberapa RPC cukup cepat untuk saldo dan
+state kontrak tunggal, tetapi discovery, statistik, dan perakitan beberapa
+langkah masih kalah responsif dari aplikasi yang memakai indexer serta layanan
+transaksi Uniswap. Liquidity API resmi mendukung Robinhood Chain 4663, dapat
+membaca sampai dua puluh pool yang sudah dikenal dalam satu permintaan, dan
+mengembalikan transaksi siap tanda tangan untuk create, increase, decrease,
+serta claim. API tetap membutuhkan RPC aplikasi untuk simulasi, tanda tangan,
+broadcast, dan receipt.
+
+**Pilihan.** Engine memakai `https://liquidity.api.uniswap.org` sebagai jalur
+utama ketika API key tersedia. `/lp/pool_info` menimpa harga, tick, dan
+likuiditas snapshot pool yang sudah ditemukan. `/lp/create`, `/lp/increase`,
+`/lp/decrease`, dan `/lp/claim_fees` merakit transaksi LP. Setiap payload wajib
+cocok dengan chain 4663, wallet aktif, PositionManager yang dipin, pasangan
+token, range, dan batas nominal, lalu disimulasikan lewat RPC sebelum disimpan.
+Swap zap tetap memakai jalur Robinhood yang sudah diverifikasi. Rebalance tetap
+memakai builder lokal karena API tidak menyediakan close dan mint atomik.
+
+API key disimpan di Windows Credential Manager dan tidak pernah masuk
+`config.toml`, log, status, atau bundle extension. Bila key belum ada, API
+melewati batas waktu, respons tidak cocok, atau simulasi gagal, engine memakai
+snapshot dan builder lokal yang selesai secara paralel.
+
+**Alasan.** Ini mengikuti arsitektur resmi Uniswap tanpa menjadikan layanan
+HTTP sebagai sumber kepercayaan transaksi. Jalur resmi mengurangi pekerjaan
+yang berulang, sedangkan pemeriksaan on-chain mempertahankan batas risiko dan
+kemampuan berjalan saat API gagal.
+
+**Konsekuensi.** API mempercepat state pool dan transaksi pool yang sudah
+diketahui. Cadangan V4 dari `/lp/pool_info` langsung menjadi TVL dan membuat
+pembacaan distribusi tick lama dilewati. Endpoint itu tidak menyediakan volume
+atau APR; volume tetap berasal dari index event persisten Rangefinder, lalu APR
+dihitung dari volume tersebut dan TVL Uniswap. Token baru tetap memerlukan
+discovery pertama; sesudah kuncinya masuk cache, pemuatan berikutnya memakai
+batch API dengan fallback on-chain.

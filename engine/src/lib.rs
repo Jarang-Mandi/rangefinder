@@ -24,4 +24,5 @@ pub mod risk;
 pub mod signals;
 pub mod store;
 pub mod telemetry;
+pub mod uniswap;
 pub mod wallet;

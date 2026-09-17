@@ -1617,6 +1617,7 @@ Alasan pembagian: browser memegang sesi gmgn dan chart, sehingga semua yang butu
 | Runtime engine | Rust stable, tokio | Diminta eksplisit. Latensi dan determinisme cocok untuk sequencer 100 ms. |
 | Server lokal | axum plus tower-http | Ringan, WebSocket bawaan, ekosistem tokio. |
 | Akses chain | alloy | Penerus ethers-rs, tipe kuat, `sol!` macro untuk ABI. |
+| API Uniswap | reqwest plus Windows Credential Manager | `/lp/pool_info` mempercepat state pool yang sudah ditemukan dan endpoint LP merakit transaksi resmi tanpa membuka API key ke extension. |
 | Matematika Uniswap | `uniswap-v3-math` sebagai basis, plus modul sendiri | Matematika likuiditas V4 identik dengan V3, satu modul melayani keduanya. |
 | Penyimpanan | SQLite lewat sqlx | Satu file, mudah diperiksa, cukup untuk skala satu pengguna. |
 | Kripto | aes-gcm, argon2, keyring | Enkripsi keystore dan integrasi Credential Manager. |
@@ -1630,7 +1631,7 @@ pesan mulai ada. `cargo xtask docs-check` memeriksa satu arah: setiap pesan yang
 sudah ada di kode wajib tercantum di sini. Sebaliknya tidak diwajibkan, karena
 rencana boleh mendahului implementasi.
 
-Versi protokol saat ini 7. Nama field di kabel memakai snake_case. Engine dan
+Versi protokol saat ini 9. Nama field di kabel memakai snake_case. Engine dan
 ekstensi harus dimuat ulang bersama ketika kontrak ini berubah.
 
 Panel ke engine:
@@ -1667,6 +1668,8 @@ Panel ke engine:
 | `forget_hook` | `{ hook }`. Cabut persetujuan sebuah hook | 6 |
 | `add_rpc` | `{ purpose, endpoint }`. Tambahkan RPC ke jalur `transaction`, `read`, atau `logs`. Konfigurasi disimpan dan provider baru langsung memakai daftar tersebut; permintaan yang sudah berjalan menyelesaikan snapshot lamanya | 8 |
 | `remove_rpc` | `{ id }`. Hapus RPC melalui ID aman dari `engine_status`, sehingga URL berkunci tidak perlu dikirim kembali dari panel. RPC transaksi terakhir tidak dapat dihapus | 8 |
+| `set_uniswap_api_key` | `{ api_key }`. Simpan API key resmi Uniswap langsung ke Windows Credential Manager. Nilainya hanya mengalir masuk ke engine dan tidak pernah dikirim kembali | 9 |
+| `forget_uniswap_api_key` | tanpa isi. Hapus API key resmi Uniswap dan kembali ke pembacaan serta builder lokal | 9 |
 | `get_depth` | tanpa isi. Minta distribusi likuiditas pool yang sedang aktif. Terpisah dari `range_view` dengan sengaja: distribusi butuh dua perjalanan ke rantai sedangkan `range_view` dikirim ulang setiap geseran garis, dan menggabungkannya membuat garis terasa berat persis saat digeser | 6 |
 | `scan` | tanpa isi. Pindai pool paling ramai di rantai dan nilai kelayakannya. Mahal, karena engine membaca setiap swap pada jendela terakhir, jadi ia hanya berjalan saat user memintanya. Jawabannya datang belakangan sebagai `scan_results`. Penyaring belum ikut dikirim panel: seluruh penyaringan masih berjalan di engine, lihat 6.13 | 6 |
 
@@ -1675,7 +1678,7 @@ Engine ke panel:
 | Pesan | Isi | Fase |
 | --- | --- | --- |
 | `hello` | `{ engineVersion, protocolVersion }`, dikirim sekali saat tersambung | 1 |
-| `engine_status` | `{ engineVersion, uptimeSecs, chain, wallet, registry, canExecute, blockedReasons[], rpcEndpoints[] }`. Setiap RPC membawa ID aman, URL tersunting, fungsi, dan prioritas failover | 8 |
+| `engine_status` | `{ engineVersion, uptimeSecs, chain, wallet, registry, canExecute, blockedReasons[], rpcEndpoints[], uniswap }`. Setiap RPC membawa ID aman, URL tersunting, fungsi, dan prioritas failover. `uniswap` hanya membawa status configured/connected, tidak pernah API key | 9 |
 | `pong` | balasan denyut | 1 |
 | `open_plan` | `{ plan_id, request_id, deposit, ... }`, seluruh gate termasuk R1/R2, setor, APR yang sudah memakai versi kalibrasi aktif, gas_biaya, gas_gwei, version, zap, expires_at. Langkah izin membawa `{ step_id, jenis, token, spender, needed, current, label }`. Panel hanya menerima request_id miliknya dan memakai rencana untuk jumlah pasangan serta tombol utama; rincian gate dan izin tidak ditampilkan | 3 |
 | `deposit_preview` | `{ request_id, deposit, setor, error }`. Jawaban ringan untuk `preview_deposit`; request_id membuat jawaban input lama dibuang. `setor` hanya untuk tampilan dan tidak pernah dipakai sebagai rencana transaksi | 7 |

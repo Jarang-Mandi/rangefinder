@@ -134,6 +134,12 @@ pub enum ClientMessage {
     /// Hapus endpoint memakai identitas aman yang dikirim EngineStatus.
     RemoveRpc { id: String },
 
+    /// Simpan API key resmi Uniswap di Windows Credential Manager.
+    SetUniswapApiKey { api_key: String },
+
+    /// Hapus API key resmi Uniswap dari Windows Credential Manager.
+    ForgetUniswapApiKey,
+
     /// Minta distribusi likuiditas pool yang sedang aktif.
     ///
     /// Terpisah dari `range_view` dengan sengaja. Distribusi butuh dua
@@ -269,6 +275,8 @@ pub struct EngineStatus {
     /// Seluruh endpoint aktif beserta jalur pemakaiannya. URL berkunci sudah
     /// disunting dan operasi hapus memakai `id`, bukan URL tampilan.
     pub rpc_endpoints: Vec<RpcEndpointView>,
+    /// Status jalur resmi Uniswap. Kunci API tidak pernah ikut status.
+    pub uniswap: crate::uniswap::Status,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -419,7 +427,7 @@ pub struct SignalsView {
     pub dihitung_pada: String,
 }
 
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// Tentukan apakah engine boleh mengeksekusi transaksi, beserta alasannya.
 ///

@@ -45,6 +45,10 @@ pub struct RencanaTersimpan {
     pub revision: u64,
     pub allowances: Vec<crate::exec::plan::LangkahIzin>,
     pub plan: OpenPlan,
+    /// Nilai native token untuk transaksi mint yang benar benar disimpan.
+    /// Jalur lokal menurunkannya dari permintaan V4; jalur resmi Uniswap
+    /// mengambilnya dari payload API yang sudah divalidasi dan disimulasikan.
+    pub transaction_value: U256,
     /// Vektor fitur dan versi kalibrasi yang menyusun prediksi pada rencana.
     /// Baru dipersistenkan setelah receipt open lolos verifikasi penuh.
     pub learning: crate::learning::Draft,
@@ -575,6 +579,7 @@ mod tests {
             revision: 0,
             allowances: Vec::new(),
             plan: contoh_plan(),
+            transaction_value: U256::ZERO,
             learning: crate::learning::Draft {
                 feature: fitur_uji(),
             },
@@ -603,6 +608,7 @@ mod tests {
             revision: 0,
             allowances: Vec::new(),
             plan: contoh_plan(),
+            transaction_value: U256::ZERO,
             learning: crate::learning::Draft {
                 feature: fitur_uji(),
             },

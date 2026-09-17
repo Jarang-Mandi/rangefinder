@@ -3762,6 +3762,7 @@ dependencies = [
  "keyring",
  "rand 0.10.2",
  "redb",
+ "reqwest",
  "serde",
  "serde_json",
  "subtle",

@@ -113,6 +113,7 @@ async fn main() -> Result<()> {
     }
 
     let store = store::Store::open(&data_dir)?;
+    let uniswap = Arc::new(rangefinder_engine::uniswap::Client::load()?);
     let (events, _) = broadcast::channel(256);
 
     let state = AppState {
@@ -128,6 +129,7 @@ async fn main() -> Result<()> {
         auth: Arc::new(token),
         wallet: Arc::new(Mutex::new(wallet)),
         chain: chain_client.clone(),
+        uniswap,
         registry: Arc::new(registry),
         store: Arc::new(store),
         events,

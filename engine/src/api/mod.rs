@@ -99,6 +99,9 @@ pub struct AppState {
     pub auth: Arc<PairingToken>,
     pub wallet: Arc<Mutex<Wallet>>,
     pub chain: Arc<ChainClient>,
+    /// Adapter resmi Uniswap untuk state pool dan perakitan transaksi LP.
+    /// Tanpa API key seluruh jalur otomatis kembali ke pembaca/builder lokal.
+    pub uniswap: Arc<crate::uniswap::Client>,
     pub registry: Arc<Registry>,
     #[allow(dead_code)] // Dipakai mulai fase 3 saat posisi mulai disimpan.
     pub store: Arc<Store>,
@@ -180,6 +183,15 @@ struct HasilKirimAksi {
     konversi: Option<RingkasanKonversi>,
 }
 
+struct PermintaanAksiUniswap<'a> {
+    alamat: &'a crate::exec::plan::AlamatEksekusi,
+    posisi: &'a crate::positions::Posisi,
+    aksi: crate::exec::aksi::JenisAksi,
+    planned: Option<(alloy::primitives::U256, alloy::primitives::U256)>,
+    deadline: alloy::primitives::U256,
+    wallet: alloy::primitives::Address,
+}
+
 struct PenjagaStatistik {
     berjalan: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     kunci: String,
@@ -246,6 +258,32 @@ fn pool_dari_posisi(posisi: &crate::positions::Posisi) -> Result<crate::pools::P
         raw_price: f64::NAN,
         stats: None,
     })
+}
+
+fn referensi_v4_uniswap_tersimpan(
+    store: &crate::store::Store,
+    token: &str,
+) -> Vec<crate::pools::PoolInfo> {
+    crate::pools::cache::baca(store, token)
+        .keys
+        .into_iter()
+        .filter(|key| !crate::pools::implausible_fee_raw(key.fee))
+        .map(|key| crate::pools::PoolInfo {
+            version: crate::pools::PoolVersion::V4,
+            id: key.id,
+            token0: key.currency0,
+            token1: key.currency1,
+            fee: key.fee,
+            dynamic_fee: key.fee & crate::pools::DYNAMIC_FEE_FLAG != 0,
+            tick_spacing: key.tick_spacing,
+            hooks: Some(key.hooks),
+            sqrt_price_x96: String::new(),
+            tick: 0,
+            liquidity: String::new(),
+            raw_price: f64::NAN,
+            stats: None,
+        })
+        .collect()
 }
 
 fn jumlah_aksi(input: Option<&str>, decimals: u8) -> Result<alloy::primitives::U256, String> {
@@ -368,6 +406,7 @@ impl AppState {
                     })
             })
             .collect(),
+            uniswap: self.uniswap.status().await,
         }
     }
 
@@ -535,6 +574,32 @@ impl AppState {
             }
         };
 
+        // Untuk pemuatan dari cache, referensi pool V4 sudah diketahui sebelum
+        // RPC dimulai. Minta state resmi Uniswap pada saat yang sama dengan
+        // batch RPC lokal. Hasil API hanya dipakai bila sudah siap ketika RPC
+        // selesai; layanan eksternal yang lambat tidak pernah menahan panel.
+        let uniswap_state_task =
+            if mode == crate::pools::ModePencarian::CacheSaja && self.uniswap.configured().await {
+                let pools = referensi_v4_uniswap_tersimpan(&self.store, &address);
+                if pools.is_empty() {
+                    None
+                } else {
+                    let uniswap = self.uniswap.clone();
+                    let chain_id = self.registry.chain.id;
+                    Some(tokio::spawn(async move {
+                        tokio::time::timeout(
+                            std::time::Duration::from_millis(2_500),
+                            uniswap.pool_states(&pools, chain_id),
+                        )
+                        .await
+                        .map_err(|_| "Uniswap API melewati batas 2,5 detik".to_string())?
+                        .map_err(|error| error.to_string())
+                    }))
+                }
+            } else {
+                None
+            };
+
         // Metadata token, pool V3, dan keadaan pool V4 dibaca dalam satu
         // permintaan. Pasangannya TIDAK ditebak: token bisa berpasangan dengan
         // stablecoin, ETH asli, atau apa pun. Menebak WETH pernah membuat kita
@@ -595,6 +660,44 @@ impl AppState {
 
         let mut groups = snapshot.quotes;
 
+        // Beri hasil paralel maksimal 75 ms setelah RPC lokal selesai. Biasanya
+        // API sudah selesai lebih dulu; kalau belum, snapshot on-chain langsung
+        // dipakai dan tugas API menyelesaikan pemeriksaan koneksinya di latar.
+        let uniswap_states = match uniswap_state_task {
+            Some(task) => {
+                match tokio::time::timeout(std::time::Duration::from_millis(75), task).await {
+                    Ok(Ok(Ok(states))) => Some(states),
+                    Ok(Ok(Err(error))) => {
+                        tracing::warn!(%error, "state pool Uniswap gagal, memakai snapshot on-chain");
+                        None
+                    }
+                    Ok(Err(error)) => {
+                        tracing::warn!(%error, "tugas state pool Uniswap berhenti");
+                        None
+                    }
+                    Err(_) => None,
+                }
+            }
+            None => None,
+        };
+        let uniswap_states: std::collections::HashMap<String, crate::uniswap::PoolState> =
+            uniswap_states
+                .unwrap_or_default()
+                .into_iter()
+                .map(|state| (state.id.to_lowercase(), state))
+                .collect();
+        if !uniswap_states.is_empty() {
+            for pool in groups.iter_mut().flat_map(|group| group.pools.iter_mut()) {
+                let Some(state) = uniswap_states.get(&pool.id.to_lowercase()) else {
+                    continue;
+                };
+                pool.sqrt_price_x96 = state.sqrt_price_x96.to_string();
+                pool.tick = state.tick;
+                pool.liquidity = state.liquidity.to_string();
+                pool.raw_price = crate::pools::raw_price_from_sqrt_x96(state.sqrt_price_x96);
+            }
+        }
+
         // APR, TVL, dan volume berubah lebih lambat daripada harga spot.
         // Snapshot terakhir yang masih layak langsung ikut kiriman pertama,
         // sementara cache yang sudah lama tetap disegarkan oleh tugas latar.
@@ -607,6 +710,39 @@ impl AppState {
                 &mut kelompok.pools,
                 sekarang_unix,
             );
+            for pool in &mut kelompok.pools {
+                let Some(state) = uniswap_states.get(&pool.id.to_lowercase()) else {
+                    continue;
+                };
+                let quote_token1 = pool.token1.eq_ignore_ascii_case(&kelompok.quote);
+                let Some(tvl) =
+                    state.tvl_dalam_kutipan(quote_token1, kelompok.quote_decimals, pool.raw_price)
+                else {
+                    continue;
+                };
+                let stats = pool.stats.get_or_insert(crate::pools::PoolStats {
+                    volume: None,
+                    jendela_menit: None,
+                    tvl: None,
+                    apr: None,
+                });
+                stats.tvl = Some(tvl);
+                stats.apr = if pool.dynamic_fee {
+                    None
+                } else {
+                    stats
+                        .volume
+                        .zip(stats.jendela_menit)
+                        .and_then(|(volume, menit)| {
+                            crate::pools::kandidat::proyeksi_apr_pool(
+                                volume,
+                                pool.fee,
+                                tvl,
+                                menit * 60.0,
+                            )
+                        })
+                };
+            }
         }
 
         if groups.is_empty() {
@@ -1433,6 +1569,34 @@ impl AppState {
             &pool, tick_lower, tick_upper, available0, available1,
         )
         .unwrap_or_default();
+        let uniswap_create_task = if (task.deposit.zap && task.budget_override.is_none())
+            || !self.uniswap.configured().await
+        {
+            None
+        } else {
+            let uniswap = self.uniswap.clone();
+            let params = crate::uniswap::CreateParams {
+                wallet: pemilik,
+                chain_id: self.registry.chain.id,
+                pool: pool.clone(),
+                amount0: amount0_awal,
+                amount1: amount1_awal,
+                tick_lower,
+                tick_upper,
+                deadline: req.deadline.to::<u64>(),
+                slippage_bps: self.cfg.limits.max_slippage_bps,
+                native_balance: (token0.is_zero() || token1.is_zero()).then_some(eth_balance),
+            };
+            Some(tokio::spawn(async move {
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(5_500),
+                    uniswap.create_position(&params),
+                )
+                .await
+                .map_err(|_| "Uniswap API melewati batas 5,5 detik".to_string())?
+                .map_err(|error| error.to_string())
+            }))
+        };
         let (mut plan, zap, harga_gas) = tokio::join!(
             crate::exec::plan::plan_open_auto(
                 &provider,
@@ -1461,6 +1625,37 @@ impl AppState {
             },
             provider.get_gas_price()
         );
+        let uniswap_build = match uniswap_create_task {
+            Some(task) => {
+                match tokio::time::timeout(std::time::Duration::from_millis(150), task).await {
+                    Ok(Ok(result)) => Some(result),
+                    Ok(Err(error)) => Some(Err(format!("tugas create Uniswap berhenti: {error}"))),
+                    Err(_) => None,
+                }
+            }
+            None => None,
+        };
+        let mut transaction_value = plan
+            .v4_request
+            .as_ref()
+            .map(|request| request.value())
+            .unwrap_or_default();
+        if let Some(result) = uniswap_build {
+            match result {
+                Ok(build) => match self
+                    .terapkan_open_uniswap(&provider, &alamat, &req, &mut plan, build)
+                    .await
+                {
+                    Ok(value) => transaction_value = value,
+                    Err(error) => {
+                        tracing::warn!(%error, "transaksi create Uniswap ditolak, memakai builder lokal")
+                    }
+                },
+                Err(error) => {
+                    tracing::warn!(%error, "transaksi create Uniswap gagal, memakai builder lokal")
+                }
+            }
+        }
         let amount0: alloy::primitives::U256 = plan.amount0.parse().unwrap_or_default();
         let amount1: alloy::primitives::U256 = plan.amount1.parse().unwrap_or_default();
 
@@ -1739,6 +1934,7 @@ impl AppState {
                 revision,
                 allowances: allowances.clone(),
                 plan: plan.clone(),
+                transaction_value,
                 learning,
                 zap_calldata: zap.as_ref().map(|(_, c, v)| (c.clone(), *v)),
                 versi: pool.version,
@@ -1767,6 +1963,126 @@ impl AppState {
             },
             expires_at,
         })
+    }
+
+    /// Ganti calldata lokal dengan transaksi `/lp/create` resmi setelah
+    /// seluruh identitas, batas jumlah, dan simulasi RPC cocok. Kegagalan di
+    /// sini selalu kembali ke builder lokal yang sudah selesai lebih dulu.
+    async fn terapkan_open_uniswap<P: alloy::providers::Provider>(
+        &self,
+        provider: &P,
+        alamat: &crate::exec::plan::AlamatEksekusi,
+        req: &crate::exec::pipeline::OpenRequest,
+        plan: &mut crate::exec::pipeline::OpenPlan,
+        build: crate::uniswap::LpBuild,
+    ) -> Result<alloy::primitives::U256, String> {
+        // Builder lokal harus sudah membuktikan matematika, hook, dan risiko.
+        // API mengganti perakitan transaksi, bukan melewati gate tersebut.
+        if !plan.gates.iter().any(|gate| gate.id == "G5" && gate.passed) {
+            return Err("gate lokal belum lengkap; transaksi API belum dipakai".into());
+        }
+        let manager = alamat.position_manager(req.pool.version);
+        build
+            .transaction
+            .validate(self.registry.chain.id, req.recipient, manager)
+            .map_err(|error| error.to_string())?;
+        if build.tick_lower != Some(req.tick_lower) || build.tick_upper != Some(req.tick_upper) {
+            return Err("Uniswap API mengembalikan tick range yang berbeda".into());
+        }
+
+        let expected0: alloy::primitives::Address = req
+            .pool
+            .token0
+            .parse()
+            .map_err(|_| "token0 pool tidak valid")?;
+        let expected1: alloy::primitives::Address = req
+            .pool
+            .token1
+            .parse()
+            .map_err(|_| "token1 pool tidak valid")?;
+        let token0 = build
+            .token0
+            .ok_or("respons create Uniswap tidak punya token0")?;
+        let token1 = build
+            .token1
+            .ok_or("respons create Uniswap tidak punya token1")?;
+        if token0.address != expected0 || token1.address != expected1 {
+            return Err("urutan token respons create Uniswap berbeda dari pool".into());
+        }
+        if token0.amount > req.available0 || token1.amount > req.available1 {
+            return Err("jumlah create Uniswap melebihi saldo yang disetujui".into());
+        }
+        if token0.amount.is_zero() && token1.amount.is_zero() {
+            return Err("jumlah create Uniswap nol".into());
+        }
+        if !expected0.is_zero() && !expected1.is_zero() && !build.transaction.value.is_zero() {
+            return Err("create ERC20 Uniswap membawa native token yang tidak diminta".into());
+        }
+        let native_limit = if expected0.is_zero() {
+            req.available0
+        } else if expected1.is_zero() {
+            req.available1
+        } else {
+            alloy::primitives::U256::ZERO
+        };
+        if build.transaction.value > native_limit {
+            return Err("native token create Uniswap melebihi batas setoran".into());
+        }
+
+        let (liquidity, _, _) = crate::exec::pipeline::hitung_jumlah(
+            &req.pool,
+            req.tick_lower,
+            req.tick_upper,
+            token0.amount,
+            token1.amount,
+        )?;
+        let tx = alloy::rpc::types::TransactionRequest::default()
+            .from(req.recipient)
+            .to(manager)
+            .value(build.transaction.value)
+            .input(build.transaction.data.clone().into());
+        let gas = provider.estimate_gas(tx).await.map_err(|error| {
+            format!(
+                "simulasi transaksi create Uniswap gagal: {}",
+                crate::exec::simulate::jelaskan_revert(&error.to_string())
+            )
+        })?;
+
+        plan.amount0 = token0.amount.to_string();
+        plan.amount1 = token1.amount.to_string();
+        plan.liquidity = liquidity.to_string();
+        plan.gas_estimate = gas;
+        plan.calldata = Some(build.transaction.data);
+        if let Some(request) = plan.request.as_mut() {
+            request.amount0_desired = token0.amount;
+            request.amount1_desired = token1.amount;
+            request.amount0_min = crate::exec::limits::apply_slippage(
+                token0.amount,
+                self.cfg.limits.max_slippage_bps,
+            );
+            request.amount1_min = crate::exec::limits::apply_slippage(
+                token1.amount,
+                self.cfg.limits.max_slippage_bps,
+            );
+        }
+        if let Some(request) = plan.v4_request.as_mut() {
+            request.liquidity = liquidity;
+        }
+        for gate in &mut plan.gates {
+            if gate.id == "G2" {
+                gate.detail = format!(
+                    "{} byte dari Uniswap Liquidity API, tujuan dan jumlah tervalidasi",
+                    plan.calldata.as_ref().map_or(0, |data| data.len())
+                );
+            } else if gate.id == "G4" {
+                gate.detail = format!("transaksi resmi Uniswap tersimulasi, gas {gas}");
+            }
+        }
+        tracing::debug!(
+            request_id = %build.request_id,
+            "transaksi create memakai Uniswap Liquidity API"
+        );
+        Ok(build.transaction.value)
     }
 
     /// Ubah jumlah setoran menjadi satuan yang bisa dibaca, lalu proyeksikan
@@ -2909,6 +3225,138 @@ impl AppState {
             .send(protocol::ServerMessage::Signals(Box::new(view)));
     }
 
+    /// Minta transaksi aksi posisi dari Liquidity API, lalu periksa seluruh
+    /// identitas dan simulasikan payload persis sebelum mengganti builder
+    /// lokal. Rebalance tidak masuk sini karena API tidak menyediakan operasi
+    /// close lalu mint atomik.
+    async fn transaksi_aksi_uniswap<P: alloy::providers::Provider>(
+        &self,
+        provider: &P,
+        request: PermintaanAksiUniswap<'_>,
+    ) -> Result<Option<(alloy::primitives::Bytes, alloy::primitives::U256)>, String> {
+        let PermintaanAksiUniswap {
+            alamat,
+            posisi,
+            aksi,
+            planned,
+            deadline,
+            wallet,
+        } = request;
+        if !self.uniswap.configured().await || aksi == crate::exec::aksi::JenisAksi::Rebalance {
+            return Ok(None);
+        }
+        let token0: alloy::primitives::Address = posisi
+            .token0
+            .parse()
+            .map_err(|_| "token0 posisi tidak valid")?;
+        let token1: alloy::primitives::Address = posisi
+            .token1
+            .parse()
+            .map_err(|_| "token1 posisi tidak valid")?;
+        let token_id: alloy::primitives::U256 = posisi
+            .token_id
+            .parse()
+            .map_err(|_| "token ID posisi tidak valid")?;
+        let common = crate::uniswap::PositionParams {
+            wallet,
+            chain_id: self.registry.chain.id,
+            version: posisi.version,
+            token0,
+            token1,
+            token_id,
+            deadline: deadline.to::<u64>(),
+            slippage_bps: self.cfg.limits.max_slippage_bps,
+        };
+        let request = async {
+            match aksi {
+                crate::exec::aksi::JenisAksi::TambahLikuiditas => {
+                    let (amount0, amount1) =
+                        planned.ok_or_else(|| anyhow::anyhow!("jumlah tambah belum tersedia"))?;
+                    self.uniswap
+                        .increase_position(&crate::uniswap::IncreaseParams {
+                            wallet,
+                            chain_id: self.registry.chain.id,
+                            version: posisi.version,
+                            token0,
+                            token1,
+                            token_id,
+                            amount0,
+                            amount1,
+                            deadline: deadline.to::<u64>(),
+                            slippage_bps: self.cfg.limits.max_slippage_bps,
+                        })
+                        .await
+                }
+                crate::exec::aksi::JenisAksi::KlaimFee => self.uniswap.claim_fees(&common).await,
+                crate::exec::aksi::JenisAksi::TutupPosisi => {
+                    self.uniswap.decrease_position(&common).await
+                }
+                crate::exec::aksi::JenisAksi::Rebalance => unreachable!(),
+            }
+        };
+        let build = tokio::time::timeout(std::time::Duration::from_millis(5_500), request)
+            .await
+            .map_err(|_| "Uniswap API melewati batas 5,5 detik".to_string())?
+            .map_err(|error| error.to_string())?;
+        let target = alamat.position_manager(posisi.version);
+        build
+            .transaction
+            .validate(self.registry.chain.id, wallet, target)
+            .map_err(|error| error.to_string())?;
+
+        if let (Some(returned0), Some(returned1)) = (&build.token0, &build.token1) {
+            if returned0.address != token0 || returned1.address != token1 {
+                return Err("urutan token respons aksi Uniswap berbeda dari posisi".into());
+            }
+            if aksi == crate::exec::aksi::JenisAksi::TambahLikuiditas {
+                let (max0, max1) = planned.ok_or("batas tambah likuiditas tidak tersedia")?;
+                if returned0.amount > max0 || returned1.amount > max1 {
+                    return Err("jumlah tambah dari Uniswap melebihi batas yang disetujui".into());
+                }
+            }
+        } else if aksi == crate::exec::aksi::JenisAksi::TambahLikuiditas {
+            return Err("respons increase Uniswap tidak punya jumlah kedua token".into());
+        }
+
+        if aksi != crate::exec::aksi::JenisAksi::TambahLikuiditas
+            && !build.transaction.value.is_zero()
+        {
+            return Err("transaksi penarikan Uniswap membawa native token masuk".into());
+        }
+        if aksi == crate::exec::aksi::JenisAksi::TambahLikuiditas {
+            let (max0, max1) = planned.unwrap_or_default();
+            let native_limit = if token0.is_zero() {
+                max0
+            } else if token1.is_zero() {
+                max1
+            } else {
+                alloy::primitives::U256::ZERO
+            };
+            if build.transaction.value > native_limit {
+                return Err("native token increase Uniswap melebihi batas".into());
+            }
+        }
+
+        let tx = alloy::rpc::types::TransactionRequest::default()
+            .from(wallet)
+            .to(target)
+            .value(build.transaction.value)
+            .input(build.transaction.data.clone().into());
+        provider.call(tx).await.map_err(|error| {
+            format!(
+                "simulasi transaksi {} dari Uniswap gagal: {}",
+                aksi.nama(),
+                crate::exec::simulate::jelaskan_revert(&error.to_string())
+            )
+        })?;
+        tracing::debug!(
+            request_id = %build.request_id,
+            action = aksi.nama(),
+            "transaksi aksi memakai Uniswap Liquidity API"
+        );
+        Ok(Some((build.transaction.data, build.transaction.value)))
+    }
+
     /// Susun rencana sebuah aksi pada posisi, jalankan simulasinya, TIDAK kirim.
     ///
     /// PRD 3.5 menuntut simulasi hasil ditampilkan sebelum tombol konfirmasi
@@ -3038,7 +3486,7 @@ impl AppState {
         let mut planned_raw = None;
         let mut planned_liquidity = None;
         let mut allowances = Vec::new();
-        let (rencana, value, harapan) = match aksi {
+        let (mut rencana, mut value, harapan) = match aksi {
             crate::exec::aksi::JenisAksi::KlaimFee | crate::exec::aksi::JenisAksi::TutupPosisi => {
                 let rencana = crate::exec::aksi::susun(&posisi, aksi, pemilik, deadline)
                     .map_err(|e| e.to_string())?;
@@ -3337,6 +3785,34 @@ impl AppState {
                 )
             }
         };
+
+        if aksi != crate::exec::aksi::JenisAksi::Rebalance && self.uniswap.configured().await {
+            match self
+                .transaksi_aksi_uniswap(
+                    &provider,
+                    PermintaanAksiUniswap {
+                        alamat: &alamat,
+                        posisi: &posisi,
+                        aksi,
+                        planned: planned_raw,
+                        deadline,
+                        wallet: pemilik,
+                    },
+                )
+                .await
+            {
+                Ok(Some((calldata, api_value))) => {
+                    rencana.calldata = calldata;
+                    value = api_value;
+                }
+                Ok(None) => {}
+                Err(error) => tracing::warn!(
+                    %error,
+                    action = aksi.nama(),
+                    "transaksi aksi Uniswap ditolak, memakai builder lokal"
+                ),
+            }
+        }
 
         let mut izin_risiko_kurang = false;
         let uji_jual = if aksi == crate::exec::aksi::JenisAksi::TambahLikuiditas {
@@ -4578,6 +5054,48 @@ impl AppState {
         }
     }
 
+    pub async fn on_set_uniswap_api_key(&self, api_key: String) {
+        let _edit = self.rpc_lock.lock().await;
+        match self.uniswap.set_api_key(&api_key).await {
+            Ok(()) => {
+                let _ = self
+                    .events
+                    .send(protocol::ServerMessage::EngineStatus(Box::new(
+                        self.status().await,
+                    )));
+                self.alert_info(
+                    "uniswap_api_saved",
+                    "Uniswap API aktif untuk data pool dan transaksi LP".into(),
+                );
+                let address = self
+                    .active
+                    .read()
+                    .await
+                    .as_ref()
+                    .map(|active| active.meta.address.clone());
+                if let Some(address) = address {
+                    self.spawn_token_lookup(address);
+                }
+            }
+            Err(error) => self.alert_kritis("uniswap_api_failed", error.to_string()),
+        }
+    }
+
+    pub async fn on_forget_uniswap_api_key(&self) {
+        let _edit = self.rpc_lock.lock().await;
+        match self.uniswap.forget_api_key().await {
+            Ok(()) => {
+                let _ = self
+                    .events
+                    .send(protocol::ServerMessage::EngineStatus(Box::new(
+                        self.status().await,
+                    )));
+                self.alert_info("uniswap_api_removed", "Uniswap API dinonaktifkan".into());
+            }
+            Err(error) => self.alert_kritis("uniswap_api_failed", error.to_string()),
+        }
+    }
+
     pub async fn on_get_depth(&self) {
         let Some(view) = self.susun_depth().await else {
             return;
@@ -5396,16 +5914,6 @@ impl AppState {
         let signer = wallet.signer().map_err(|e| e.to_string())?.clone();
         drop(wallet);
 
-        // Nilai ETH hanya ikut kalau salah satu currency V4 adalah ETH asli.
-        // Posisi V3 selalu memakai WETH, jadi nilainya nol. Mengirim ETH ke
-        // pool yang tidak memakainya membuatnya tersangkut di kontrak.
-        let value = tersimpan
-            .plan
-            .v4_request
-            .as_ref()
-            .map(|r| r.value())
-            .unwrap_or(alloy::primitives::U256::ZERO);
-
         let outcome = crate::exec::send::send_open(
             &provider,
             &self.nonce,
@@ -5414,7 +5922,7 @@ impl AppState {
             alamat.multicall,
             &tersimpan.plan,
             self.registry.chain.id,
-            value,
+            tersimpan.transaction_value,
             &self.cfg.execution,
             &self.cfg.limits,
             &crate::exec::journal::Journal {

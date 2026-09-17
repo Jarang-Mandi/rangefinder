@@ -1004,6 +1004,8 @@ function SettingsTab({
         status={status}
         onAddRpc={(purpose, endpoint) => client?.addRpc(purpose, endpoint)}
         onRemoveRpc={(id) => client?.removeRpc(id)}
+        onSetUniswapKey={(apiKey) => client?.setUniswapApiKey(apiKey)}
+        onForgetUniswapKey={() => client?.forgetUniswapApiKey()}
         onForget={onForget}
       />
     </div>
@@ -3390,11 +3392,15 @@ function EngineCard({
   status,
   onAddRpc,
   onRemoveRpc,
+  onSetUniswapKey,
+  onForgetUniswapKey,
   onForget,
 }: {
   status: EngineStatus;
   onAddRpc: (purpose: RpcPurpose, endpoint: string) => void;
   onRemoveRpc: (id: string) => void;
+  onSetUniswapKey: (apiKey: string) => void;
+  onForgetUniswapKey: () => void;
   onForget: () => void;
 }) {
   const alasanTampil = status.blocked_reasons.filter(alasanStatusTerlihat);
@@ -3420,12 +3426,72 @@ function EngineCard({
 
       <RpcEditor endpoints={status.rpc_endpoints} onAdd={onAddRpc} onRemove={onRemoveRpc} />
 
-      
+      <UniswapEditor
+        status={status.uniswap}
+        onSave={onSetUniswapKey}
+        onForget={onForgetUniswapKey}
+      />
 
       <button style="margin-top: var(--s3); width: 100%" onClick={onForget}>
         Lupakan pairing
       </button>
     </section>
+  );
+}
+
+function UniswapEditor({
+  status,
+  onSave,
+  onForget,
+}: {
+  status: EngineStatus["uniswap"];
+  onSave: (apiKey: string) => void;
+  onForget: () => void;
+}) {
+  const [apiKey, setApiKey] = useState("");
+  const valid = apiKey.trim().length > 0 && !/\s/.test(apiKey.trim());
+  const label = !status.configured
+    ? "Belum aktif"
+    : status.connected === false
+      ? "Periksa key"
+      : "Aktif";
+
+  return (
+    <div class="rpc">
+      <div class="rpc-title">
+        <h3>Uniswap</h3>
+        <span>{label}</span>
+      </div>
+      <div class="rpc-add">
+        <input
+          type="password"
+          spellcheck={false}
+          placeholder={status.configured ? "Ganti API key" : "Uniswap API key"}
+          value={apiKey}
+          onInput={(event) => setApiKey((event.target as HTMLInputElement).value)}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter" || !valid) return;
+            onSave(apiKey.trim());
+            setApiKey("");
+          }}
+        />
+        <button
+          type="button"
+          disabled={!valid}
+          onClick={() => {
+            onSave(apiKey.trim());
+            setApiKey("");
+          }}
+        >
+          Simpan
+        </button>
+      </div>
+      {status.configured ? (
+        <button type="button" class="rpc-remove" onClick={onForget}>
+          Hapus API key
+        </button>
+      ) : null}
+    </div>
   );
 }
 

@@ -36,6 +36,7 @@ dirs = "6.0.0"
 alloy = { version = "2.1.1", default-features = false, features = ["std", "provider-http", "provider-ws-native-tls", "reqwest-native-tls", "signer-local", "contract", "sol-types", "rpc-types-eth", "json-rpc", "k256", "serde", "json"] }
 keyring = { version = "4.2.0", default-features = false, features = ["v1", "windows-native-keyring-store"] }
 futures-util = "0.3.34"
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "native-tls"] }
 toml = "1.1.5"
 chrono = { version = "0.4.45", features = ["serde"] }
 getrandom = "0.4.3"
