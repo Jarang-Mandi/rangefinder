@@ -260,6 +260,108 @@ pub async fn muat_v4<P: Provider>(
     baca_fee_v4(provider, registry, &dasar).await
 }
 
+/// Muat satu NFT yang dipilih untuk quote aksi. Pembacaan ini tidak melakukan
+/// enumerasi V3, pemindaian Transfer V4, atau membaca NFT lain; ownerOf,
+/// likuiditas, harga, dan fee tetap dibuktikan langsung dari rantai.
+pub async fn muat_posisi_spesifik<P: Provider>(
+    provider: &P,
+    registry: &Registry,
+    store: Option<&crate::store::Store>,
+    owner: Address,
+    position_id: &str,
+) -> Result<Posisi> {
+    let (version, token_id) = identitas_posisi(registry, position_id)?;
+    let mut posisi = match version {
+        PoolVersion::V3 => {
+            let npm = registry.contract("uniswap_v3", "position_manager")?;
+            let current_owner = Npm::new(npm, provider)
+                .ownerOf(token_id)
+                .call()
+                .await
+                .context("pemilik NFT V3 tidak terbaca")?;
+            anyhow::ensure!(
+                current_owner == owner,
+                "posisi V3 tidak lagi dimiliki wallet"
+            );
+            let mut positions = baca_v3(provider, registry, owner, &[token_id]).await?;
+            lengkapi_tick_v3(provider, registry, &mut positions).await?;
+            positions.pop().context("posisi V3 tidak terbaca")?
+        }
+        PoolVersion::V4 => {
+            let pm = registry.contract("uniswap_v4", "position_manager")?;
+            let mc = registry.contract("common", "multicall3")?;
+            let hasil = multicall::batch_call(
+                provider,
+                mc,
+                vec![
+                    multicall::encode(pm, &PmV4::ownerOfCall { tokenId: token_id }),
+                    multicall::encode(pm, &PmV4::getPoolAndPositionInfoCall { tokenId: token_id }),
+                    multicall::encode(pm, &PmV4::getPositionLiquidityCall { tokenId: token_id }),
+                ],
+            )
+            .await?;
+            let current_owner = multicall::decode::<PmV4::ownerOfCall>(
+                hasil.first().and_then(|value| value.as_ref()),
+            )
+            .context("pemilik NFT V4 tidak terbaca")?;
+            anyhow::ensure!(
+                current_owner == owner,
+                "posisi V4 tidak lagi dimiliki wallet"
+            );
+            let info = multicall::decode::<PmV4::getPoolAndPositionInfoCall>(
+                hasil.get(1).and_then(|value| value.as_ref()),
+            )
+            .context("kunci pool posisi V4 tidak terbaca")?;
+            let liquidity = multicall::decode::<PmV4::getPositionLiquidityCall>(
+                hasil.get(2).and_then(|value| value.as_ref()),
+            )
+            .context("likuiditas posisi V4 tidak terbaca")?;
+            let (lower, upper) = crate::exec::v4::verify::bongkar_tick(info._1);
+            let mut positions = baca_fee_v4(
+                provider,
+                registry,
+                &[(token_id, info._0, lower, upper, liquidity)],
+            )
+            .await?;
+            positions.pop().context("posisi V4 tidak terbaca")?
+        }
+    };
+    lengkapi_pnl(std::slice::from_mut(&mut posisi), registry, store, owner);
+    Ok(posisi)
+}
+
+fn identitas_posisi(registry: &Registry, position_id: &str) -> Result<(PoolVersion, U256)> {
+    let mut parts = position_id.split(':');
+    let chain = parts
+        .next()
+        .context("chain id posisi tidak ada")?
+        .parse::<u64>()
+        .context("chain id posisi tidak valid")?;
+    anyhow::ensure!(chain == registry.chain.id, "chain posisi tidak cocok");
+    let manager = parts
+        .next()
+        .context("manager posisi tidak ada")?
+        .parse::<Address>()
+        .context("manager posisi tidak valid")?;
+    let token_id = parts
+        .next()
+        .context("token id posisi tidak ada")?
+        .parse::<U256>()
+        .context("token id posisi tidak valid")?;
+    anyhow::ensure!(
+        parts.next().is_none(),
+        "identitas posisi memiliki segmen tambahan"
+    );
+    let version = if manager == registry.contract("uniswap_v3", "position_manager")? {
+        PoolVersion::V3
+    } else if manager == registry.contract("uniswap_v4", "position_manager")? {
+        PoolVersion::V4
+    } else {
+        anyhow::bail!("manager posisi tidak ada di registry");
+    };
+    Ok((version, token_id))
+}
+
 /// Lengkapi posisi V4 dengan fee yang belum diklaim.
 ///
 /// Fee dihitung dari pertumbuhan fee di dalam range, karena V4 tidak punya
@@ -896,6 +998,90 @@ pub fn urutkan(posisi: &mut [Posisi]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use alloy::sol_types::SolCall;
+
+    fn registry_asli() -> Registry {
+        Registry::load_from(&crate::config::repo_root().join("chain.toml")).unwrap()
+    }
+
+    #[test]
+    fn identitas_posisi_hanya_menerima_chain_dan_manager_registry() {
+        let registry = registry_asli();
+        let manager = registry.contract("uniswap_v4", "position_manager").unwrap();
+        let id = super::super::position_id(registry.chain.id, manager, U256::from(77));
+        assert_eq!(
+            identitas_posisi(&registry, &id).unwrap(),
+            (PoolVersion::V4, U256::from(77))
+        );
+        assert!(identitas_posisi(&registry, &id.replace("4663:", "1:")).is_err());
+        assert!(identitas_posisi(
+            &registry,
+            "4663:0x1111111111111111111111111111111111111111:77"
+        )
+        .is_err());
+        assert!(identitas_posisi(&registry, &format!("{id}:extra")).is_err());
+    }
+
+    #[tokio::test]
+    async fn aksi_posisi_spesifik_menolak_nft_yang_bukan_milik_wallet() {
+        let registry = registry_asli();
+        let owner = Address::repeat_byte(1);
+        let manager = registry.contract("uniswap_v4", "position_manager").unwrap();
+        let id = super::super::position_id(registry.chain.id, manager, U256::from(77));
+        let rpc = alloy::transports::mock::Asserter::new();
+        rpc.push_success(&multicall::respons_uji(vec![
+            Some(PmV4::ownerOfCall::abi_encode_returns(&Address::repeat_byte(2)).into()),
+            None,
+            None,
+        ]));
+        let provider = alloy::providers::ProviderBuilder::new().connect_mocked_client(rpc);
+        let error = muat_posisi_spesifik(&provider, &registry, None, owner, &id)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("tidak lagi dimiliki wallet"));
+    }
+
+    #[tokio::test]
+    async fn aksi_v4_memuat_satu_nft_dalam_dua_multicall_tanpa_pemindaian_log() {
+        use alloy::primitives::aliases::{I24, U24};
+
+        let registry = registry_asli();
+        let owner = Address::repeat_byte(1);
+        let manager = registry.contract("uniswap_v4", "position_manager").unwrap();
+        let id = super::super::position_id(registry.chain.id, manager, U256::from(77));
+        let key = PmV4::PoolKey {
+            currency0: Address::ZERO,
+            currency1: Address::repeat_byte(3),
+            fee: U24::from(3_000u32),
+            tickSpacing: I24::try_from(60).unwrap(),
+            hooks: Address::ZERO,
+        };
+        let packed = (U256::from(120) << 32) | (U256::from(60) << 8);
+        let rpc = alloy::transports::mock::Asserter::new();
+        rpc.push_success(&multicall::respons_uji(vec![
+            Some(PmV4::ownerOfCall::abi_encode_returns(&owner).into()),
+            Some(
+                PmV4::getPoolAndPositionInfoCall::abi_encode_returns(
+                    &PmV4::getPoolAndPositionInfoReturn {
+                        _0: key,
+                        _1: packed,
+                    },
+                )
+                .into(),
+            ),
+            Some(PmV4::getPositionLiquidityCall::abi_encode_returns(&100u128).into()),
+        ]));
+        rpc.push_success(&multicall::respons_uji(vec![None, None, None]));
+        let provider = alloy::providers::ProviderBuilder::new().connect_mocked_client(rpc);
+        let position = muat_posisi_spesifik(&provider, &registry, None, owner, &id)
+            .await
+            .unwrap();
+        assert_eq!(position.position_id, id);
+        assert_eq!(position.liquidity, "100");
+        assert_eq!((position.tick_lower, position.tick_upper), (60, 120));
+        assert!(!position.kosong);
+    }
 
     fn p(nama: &str, in_range: bool, kosong: bool, liq: &str) -> Posisi {
         Posisi {

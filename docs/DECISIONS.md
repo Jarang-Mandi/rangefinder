@@ -389,3 +389,12 @@ Probe PONS `0x39dbed3a2bd333467115de45665cc57f813c4571` pada data dir
 baru dengan `dry_run` menghasilkan tiga pool beserta statistik awal lengkap
 dalam 4,137 detik. Probe engine terpasang yang berbagi proses dengan ekstensi
 aktif menyelesaikannya dalam 6,838 detik dan mengirim saldo pada 1,998 detik.
+
+Pada 15 September 2026, jalur `plan_action` diperpendek: quote untuk satu NFT
+langsung membaca `ownerOf`, kunci pool, likuiditas, harga, dan fee NFT itu dari
+RPC baca cepat. Sebelumnya ia memuat seluruh posisi V3 dan V4, termasuk
+pemindaian log Transfer V4, sebelum memilih satu posisi. Validasi sebelum
+pengiriman tetap memakai RPC transaksi dan gate eksekusi yang sama. API
+`/lp/pool_info` Uniswap dapat membatch state pool yang sudah diketahui, tetapi
+tidak menggantikan indeks pasangan token atau pengukuran volume 24 jam; untuk
+token yang baru terlihat, sumber indeks yang terus berjalan tetap diperlukan.

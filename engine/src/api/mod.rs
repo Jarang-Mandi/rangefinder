@@ -2957,21 +2957,20 @@ impl AppState {
         };
 
         // Fee, likuiditas, dan kepemilikan harus segar sebelum quote aksi.
-        let provider = self.chain.provider().await.map_err(|e| e.to_string())?;
-        let posisi = {
-            let daftar = crate::positions::muat::muat_semua(
-                &provider,
-                &self.registry,
-                Some(&self.store),
-                pemilik,
-            )
-            .await;
-            daftar
-                .iter()
-                .find(|p| p.position_id == position_id)
-                .cloned()
-                .ok_or("posisi tidak ada di daftar. Muat ulang tab Positions dulu")?
-        };
+        let provider = self
+            .chain
+            .read_provider()
+            .await
+            .map_err(|e| e.to_string())?;
+        let posisi = crate::positions::muat::muat_posisi_spesifik(
+            &provider,
+            &self.registry,
+            Some(&self.store),
+            pemilik,
+            &position_id,
+        )
+        .await
+        .map_err(|e| format!("posisi tidak bisa dibaca: {e}"))?;
         let token_id = posisi.token_id.clone();
         let token_id_u256: alloy::primitives::U256 = token_id
             .parse()
