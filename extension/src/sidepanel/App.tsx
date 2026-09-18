@@ -2751,12 +2751,6 @@ function PoolRow({
           <i>{labelJendelaVolume(s?.jendela_menit ?? null)}</i>
           {s?.volume == null ? "-" : formatPoolMetric(s.volume, s.dalam_usd)}
         </span>
-        {s?.volume_30d != null ? (
-          <span>
-            <i>vol 30D</i>
-            {formatPoolMetric(s.volume_30d, s.dalam_usd)}
-          </span>
-        ) : null}
       </span>
     </button>
   );
