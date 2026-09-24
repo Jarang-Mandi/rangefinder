@@ -42,6 +42,7 @@ import {
   type PositionsView,
   type TransactionsView,
   type RangeView,
+  type RangePreset,
   type RpcPurpose,
   type Distribusi,
   type ScanView,
@@ -496,6 +497,11 @@ export class EngineClient {
   /** Batas dalam market cap USD, karena itu satuan yang dipakai chart. */
   setRange(lowerMcap: number, upperMcap: number) {
     this.send({ type: "set_range", lower_mcap: lowerMcap, upper_mcap: upperMcap });
+  }
+
+  /** Terapkan strategi harga; engine menghitung batas dari grid pool aktif. */
+  setRangePreset(preset: RangePreset) {
+    this.send({ type: "set_range_preset", preset });
   }
 
   /**

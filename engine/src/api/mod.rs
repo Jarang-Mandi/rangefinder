@@ -172,6 +172,8 @@ pub struct ActiveToken {
     /// Batas yang diminta user dalam market cap USD. `None` berarti pakai
     /// range bawaan.
     pub requested: Option<(f64, f64)>,
+    /// Preset yang menghasilkan `requested`. `None` berarti batas custom.
+    pub range_preset: Option<crate::range::RangePreset>,
     /// Market cap terakhir yang dilaporkan chart.
     pub chart_mcap_usd: Option<f64>,
 }
@@ -891,6 +893,7 @@ impl AppState {
                 .map(|p| p.id.clone())
                 .unwrap_or(selected);
             let requested = sebelumnya.and_then(|a| a.requested);
+            let range_preset = sebelumnya.and_then(|a| a.range_preset);
             let chart_mcap_usd = sebelumnya.and_then(|a| a.chart_mcap_usd);
             out.selected_quote = Some(kelompok.quote.clone());
             out.selected_pool_id = Some(selected.clone());
@@ -908,6 +911,7 @@ impl AppState {
                 // USDG memakai 6, dan salah desimal menggeser harga sejuta kali.
                 quote_decimals: kelompok.quote_decimals,
                 requested,
+                range_preset,
                 chart_mcap_usd,
             });
         }
@@ -943,14 +947,17 @@ impl AppState {
         {
             let mut guard = self.active.write().await;
             let Some(active) = guard.as_mut() else { return };
-            if !active.pools.iter().any(|p| p.id == pool_id) {
+            let Some(pool) = active.pools.iter().find(|p| p.id == pool_id).cloned() else {
                 return;
-            }
+            };
             self.intent.change();
             active.selected_pool_id = pool_id;
-            // Grid tick tiap pool berbeda, jadi batas yang diminta user pada
-            // pool lama tidak lagi berlaku apa adanya. Dibiarkan supaya niat
-            // user tetap terjaga, dan snap yang menyesuaikannya.
+            // Preset mengikuti grid pool baru. Batas custom tetap absolut,
+            // karena itu memang angka yang dipilih user pada chart.
+            if let (Some(preset), Some(mcap)) = (active.range_preset, active.chart_mcap_usd) {
+                active.requested =
+                    crate::range::preset_bounds_for_pool(&pool, &active.meta.address, mcap, preset);
+            }
         }
         self.batalkan_lookup();
         self.broadcast_range_view().await;
@@ -984,9 +991,14 @@ impl AppState {
             active.quote_decimals = kelompok.quote_decimals;
             active.selected_pool_id = kelompok.pools[0].id.clone();
             active.pools = kelompok.pools.clone();
-            // Batas yang diminta user dinyatakan dalam market cap USD, jadi
-            // ia tetap berlaku setelah berpindah pasangan. Yang berubah
-            // hanya grid tick, dan snap yang menyesuaikannya.
+            if let (Some(preset), Some(mcap), Some(pool)) = (
+                active.range_preset,
+                active.chart_mcap_usd,
+                active.pools.first(),
+            ) {
+                active.requested =
+                    crate::range::preset_bounds_for_pool(pool, &active.meta.address, mcap, preset);
+            }
 
             protocol::TokenState {
                 address: active.meta.address.clone(),
@@ -1259,6 +1271,21 @@ impl AppState {
             .find(|g| g.quote.eq_ignore_ascii_case(&kelompok.quote))
         {
             *g = kelompok.clone();
+        }
+
+        if pool_berganti {
+            if let (Some(preset), Some(mcap), Some(pool)) = (
+                active.range_preset,
+                active.chart_mcap_usd,
+                active
+                    .pools
+                    .iter()
+                    .find(|p| p.id == active.selected_pool_id)
+                    .cloned(),
+            ) {
+                active.requested =
+                    crate::range::preset_bounds_for_pool(&pool, &active.meta.address, mcap, preset);
+            }
         }
 
         let pilihan = active.selected_pool_id.clone();
@@ -6331,6 +6358,16 @@ impl AppState {
     /// biasa. Tidak ada jalur eksekusi terpisah untuk range penuh, dan itu
     /// disengaja: jalur yang jarang dipakai adalah jalur yang jarang teruji.
     pub async fn on_set_full_range(&self) {
+        self.on_set_range_preset(crate::range::RangePreset::Full)
+            .await;
+    }
+
+    /// Terapkan preset dari keadaan pool aktif yang sudah ada di memori.
+    ///
+    /// Tidak ada RPC di jalur ini. Harga aktif, tick spacing, dan orientasi
+    /// token sudah tersedia dari pemuatan pool, sehingga pilihan terasa
+    /// seketika dan hasilnya tetap dibulatkan oleh jalur range yang sama.
+    pub async fn on_set_range_preset(&self, preset: crate::range::RangePreset) {
         let batas = {
             let guard = self.active.read().await;
             let Some(active) = guard.as_ref() else { return };
@@ -6341,16 +6378,25 @@ impl AppState {
                 return;
             };
 
-            let Some(batas) = crate::range::full_bounds(pool, &active.meta.address, mcap) else {
-                return;
-            };
+            let batas =
+                crate::range::preset_bounds_for_pool(pool, &active.meta.address, mcap, preset);
+            let Some(batas) = batas else { return };
             batas
         };
 
-        self.on_set_range(batas.0, batas.1).await;
+        self.set_range(batas.0, batas.1, Some(preset)).await;
     }
 
     pub async fn on_set_range(&self, lower_mcap: f64, upper_mcap: f64) {
+        self.set_range(lower_mcap, upper_mcap, None).await;
+    }
+
+    async fn set_range(
+        &self,
+        lower_mcap: f64,
+        upper_mcap: f64,
+        preset: Option<crate::range::RangePreset>,
+    ) {
         if !(lower_mcap.is_finite() && upper_mcap.is_finite()) {
             return;
         }
@@ -6366,6 +6412,7 @@ impl AppState {
             let mut guard = self.active.write().await;
             let Some(active) = guard.as_mut() else { return };
             active.requested = Some((lo, hi));
+            active.range_preset = preset;
             self.intent.change();
         }
         self.broadcast_range_view().await;
@@ -6408,7 +6455,13 @@ impl AppState {
             active.requested,
             self.quote_adalah_eth(&active.selected_quote),
         ) {
-            Ok(view) => {
+            Ok(mut view) => {
+                view.preset = active.range_preset.or_else(|| {
+                    active
+                        .requested
+                        .is_none()
+                        .then_some(crate::range::RangePreset::Stable)
+                });
                 let _ = self
                     .events
                     .send(protocol::ServerMessage::RangeView(Box::new(view)));

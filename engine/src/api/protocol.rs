@@ -48,6 +48,12 @@ pub enum ClientMessage {
     /// User menggeser garis. Batasnya dalam market cap USD, satuan chart.
     SetRange { lower_mcap: f64, upper_mcap: f64 },
 
+    /// Pilih strategi harga seperti pada antarmuka Uniswap.
+    ///
+    /// Engine menghitung batas dari harga dan tick spacing pool aktif. Panel
+    /// hanya mengirim keputusan user, tidak menduplikasi matematika tick.
+    SetRangePreset { preset: crate::range::RangePreset },
+
     /// Pasang range selebar yang diizinkan protokol.
     ///
     /// Pesan tersendiri, bukan `set_range` dengan angka raksasa. Market cap
@@ -427,7 +433,7 @@ pub struct SignalsView {
     pub dihitung_pada: String,
 }
 
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// Tentukan apakah engine boleh mengeksekusi transaksi, beserta alasannya.
 ///
@@ -579,6 +585,16 @@ mod tests {
                     && deposit.side == super::super::deposit::Side::Meme
                     && deposit.amount == "12.5"
                     && !deposit.zap
+        ));
+
+        let preset: ClientMessage =
+            serde_json::from_str(r#"{"type":"set_range_preset","preset":"one_sided_upper"}"#)
+                .unwrap();
+        assert!(matches!(
+            preset,
+            ClientMessage::SetRangePreset {
+                preset: crate::range::RangePreset::OneSidedUpper
+            }
         ));
 
         let execute_zap: ClientMessage =

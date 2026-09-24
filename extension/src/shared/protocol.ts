@@ -10,7 +10,14 @@
  *   tidak mengizinkan memasang header pada koneksi WebSocket.
  */
 
-export const PROTOCOL_VERSION = 9;
+export const PROTOCOL_VERSION = 10;
+
+export type RangePreset =
+  | "stable"
+  | "wide"
+  | "one_sided_lower"
+  | "one_sided_upper"
+  | "full";
 export const WS_SUBPROTOCOL = "rangefinder";
 export const DEFAULT_ENGINE_ORIGIN = "http://127.0.0.1:8787";
 
@@ -233,6 +240,8 @@ export interface RangeView {
   upper: RangeBound;
   width_pct: number;
   in_range: boolean;
+  /** Preset yang menghasilkan batas ini; null berarti custom. */
+  preset: RangePreset | null;
   warnings: string[];
 }
 
@@ -868,6 +877,7 @@ export type ClientMessage =
   | { type: "select_pool"; pool_id: string }
   | { type: "select_quote"; quote: string }
   | { type: "set_range"; lower_mcap: number; upper_mcap: number }
+  | { type: "set_range_preset"; preset: RangePreset }
   | { type: "set_full_range" }
   | { type: "invalidate_plan" }
   | { type: "preview_deposit"; deposit: Deposit; request_id: string }

@@ -1341,10 +1341,13 @@ sekitar setengah detik, sedangkan `range_view` dikirim ulang setiap kali user
 menggeser garis. Bentuk pool tidak berubah secepat harganya, jadi satu
 pembacaan per pool menemani banyak geseran.
 
-**Preset lebar range mengikuti acuan**, yaitu kurang lebih 0,2 sampai 20 persen
-ke tiap arah. Gerakan satu persen pada harga adalah gerakan satu persen pada
-market cap, jadi preset dinyatakan sebagai kelipatan terhadap market cap
-sekarang dan tidak ada konversi satuan yang bisa meleset.
+**Preset range mengikuti strategi harga Uniswap.** `Stable` memakai tiga langkah
+tick spacing ke tiap arah, sehingga persentasenya berubah sesuai grid pool.
+`Wide` memakai 0,5x sampai 2x harga. `One-sided lower` memakai sisi bawah rentang
+wide dan menaruh batas dalam satu langkah grid di bawah harga; `one-sided upper`
+melakukan kebalikannya. Jarak satu langkah itu wajib: batas yang hanya menyentuh
+harga bisa melebar kembali saat snap dan tidak lagi satu sisi. Pada posisi satu
+sisi panel hanya menerima aset yang dibutuhkan range dan mengirim `zap=false`.
 
 ### 6.15 Penyesuaian antarmuka setelah dipakai
 
@@ -1628,7 +1631,7 @@ pesan mulai ada. `cargo xtask docs-check` memeriksa satu arah: setiap pesan yang
 sudah ada di kode wajib tercantum di sini. Sebaliknya tidak diwajibkan, karena
 rencana boleh mendahului implementasi.
 
-Versi protokol saat ini 9. Nama field di kabel memakai snake_case. Engine dan
+Versi protokol saat ini 10. Nama field di kabel memakai snake_case. Engine dan
 ekstensi harus dimuat ulang bersama ketika kontrak ini berubah.
 
 Panel ke engine:
@@ -1644,6 +1647,7 @@ Panel ke engine:
 | `select_pool` | `{ poolId }`, user memilih pool lain dari daftar | 2 |
 | `select_quote` | `{ quote }`, user berpindah ke pasangan token lawan yang lain. Tidak menyentuh jaringan, seluruh kelompok sudah ada di memori sejak token dimuat | 2 |
 | `set_range` | `{ lowerMcap, upperMcap }`, user menggeser garis. Batas dalam market cap USD karena itu satuan chart | 2 |
+| `set_range_preset` | `{ preset }`, dengan nilai `stable`, `wide`, `one_sided_lower`, `one_sided_upper`, atau `full`. Engine menghitung batas dari harga dan tick spacing pool aktif; panel tidak menghitung tick transaksi | 9 |
 | `set_full_range` | tanpa isi. Pasang range selebar yang diizinkan protokol. Pesan tersendiri, bukan `set_range` dengan angka raksasa: market cap dikali sepuluh pangkat empat puluh menghasilkan harga yang tidak lagi bisa diubah menjadi tick, dan engine menolaknya tanpa ada yang berubah di layar. Batas sebenarnya hanya diketahui engine, karena ia bergantung pada tick spacing pool | 6 |
 | `invalidate_plan` | tanpa isi, membatalkan rencana saat setoran sedang disunting | 3 |
 | `preview_deposit` | `{ deposit: { side, amount, zap }, request_id }`. Menghitung nominal pasangan dari snapshot pool yang sudah ada di memori tanpa RPC, saldo, allowance, simulasi, atau estimasi gas. Tidak pernah mengaktifkan tombol transaksi | 7 |

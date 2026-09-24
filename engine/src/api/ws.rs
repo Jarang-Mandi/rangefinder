@@ -104,6 +104,9 @@ async fn session(socket: WebSocket, state: AppState) {
                             Ok(ClientMessage::SetRange { lower_mcap, upper_mcap }) => {
                                 state.on_set_range(lower_mcap, upper_mcap).await;
                             }
+                            Ok(ClientMessage::SetRangePreset { preset }) => {
+                                state.on_set_range_preset(preset).await;
+                            }
                             Ok(ClientMessage::SetFullRange) => {
                                 state.on_set_full_range().await;
                             }

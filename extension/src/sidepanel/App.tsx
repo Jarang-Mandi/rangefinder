@@ -53,6 +53,7 @@ import {
   type SinyalSideways,
   type QuoteGroup,
   type RangeBound,
+  type RangePreset,
   type RangeView,
   type RpcEndpointView,
   type RpcPurpose,
@@ -672,6 +673,12 @@ export function App() {
               clientRef.current?.invalidatePlan();
               clientRef.current?.setRange(lo, hi);
             }}
+            onSetRangePreset={(preset) => {
+              setOpenPlan(null);
+              setDepositPreview(null);
+              clientRef.current?.invalidatePlan();
+              clientRef.current?.setRangePreset(preset);
+            }}
             onSetFullRange={() => {
               setOpenPlan(null);
               setDepositPreview(null);
@@ -888,6 +895,7 @@ function RangeTab({
   rangeView,
   depth,
   onSetRange,
+  onSetRangePreset,
   onSetFullRange,
   onMuatDepth,
   onSelectPool,
@@ -908,6 +916,7 @@ function RangeTab({
   rangeView: RangeView | null;
   depth: Distribusi | null;
   onSetRange: (lowerMcap: number, upperMcap: number) => void;
+  onSetRangePreset: (preset: RangePreset) => void;
   onSetFullRange: () => void;
   onMuatDepth: () => void;
   onSelectPool: (poolId: string) => void;
@@ -941,6 +950,7 @@ function RangeTab({
           rangeView={rangeView}
           depth={depth}
           onSetRange={onSetRange}
+          onSetRangePreset={onSetRangePreset}
           onSetFullRange={onSetFullRange}
           onMuatDepth={onMuatDepth}
           onSelectPool={onSelectPool}
@@ -1051,6 +1061,7 @@ function TokenCard({
   rangeView,
   depth,
   onSetRange,
+  onSetRangePreset,
   onSetFullRange,
   onMuatDepth,
   onSelectPool,
@@ -1060,6 +1071,7 @@ function TokenCard({
   rangeView: RangeView | null;
   depth: Distribusi | null;
   onSetRange: (lowerMcap: number, upperMcap: number) => void;
+  onSetRangePreset: (preset: RangePreset) => void;
   onSetFullRange: () => void;
   onMuatDepth: () => void;
   onSelectPool: (poolId: string) => void;
@@ -1129,6 +1141,7 @@ function TokenCard({
             view={rangeView}
             depth={depth}
             onSetRange={onSetRange}
+            onSetRangePreset={onSetRangePreset}
             onSetFullRange={onSetFullRange}
             onMuat={onMuatDepth}
           />
@@ -2374,6 +2387,15 @@ export function SetoranCard({
   const kutipanTerakhir = useRef("");
   const versi = token?.pools.find(p => p.id === token.selected_pool_id)?.version;
   useEffect(() => { if (versi === "v3") setZap(false); }, [versi]);
+  const satuSisi: "meme" | "quote" | null = view && !view.in_range
+    ? view.upper.mcap_usd < view.current.mcap_usd
+      ? "quote"
+      : view.lower.mcap_usd > view.current.mcap_usd
+        ? "meme"
+        : null
+    : null;
+  const sisiSetoran = satuSisi ?? sisiAktif;
+  const zapAktif = satuSisi ? false : zap;
 
   // Kotak diisi ulang dari rencana begitu ia datang, karena angka engine yang
   // benar, bukan yang diketik. Sisi yang sedang disunting tidak ditimpa.
@@ -2398,40 +2420,40 @@ export function SetoranCard({
     const sidikJari = [
       sisi,
       teks,
-      zap,
+      zapAktif,
       view?.pool_id ?? "",
       view?.lower.tick ?? "",
       view?.upper.tick ?? "",
     ].join(":");
     if (!paksa && kutipanTerakhir.current === sidikJari) return;
     kutipanTerakhir.current = sidikJari;
-    onQuote({ side: sisi, amount: teks, zap });
+    onQuote({ side: sisi, amount: teks, zap: zapAktif });
   };
 
-  const tampilkanPasangan = (sisi: "meme" | "quote", teks: string, zapAktif = zap) => {
+  const tampilkanPasangan = (sisi: "meme" | "quote", teks: string, pakaiZap = zapAktif) => {
     const n = Number(teks);
     if (!Number.isFinite(n) || n <= 0 || !view) {
       onPreview(null);
       return;
     }
-    onPreview({ side: sisi, amount: teks, zap: zapAktif });
+    onPreview({ side: sisi, amount: teks, zap: pakaiZap });
   };
 
   // Mengetik dan menggeser range bisa menghasilkan banyak perubahan dalam
   // satu detik. Debounce menunggu input stabil, sedangkan sidik jari mencegah
   // jawaban engine memicu permintaan identik berulang tanpa akhir.
   useEffect(() => {
-    const teks = sisiAktif === "meme" ? isiMeme : isiQuote;
-    const harga = sisiAktif === "meme" ? hargaMeme : hargaQuote;
+    const teks = sisiSetoran === "meme" ? isiMeme : isiQuote;
+    const harga = sisiSetoran === "meme" ? hargaMeme : hargaQuote;
     const n = Number(teks);
     if (plan || !canExecute || busy || !Number.isFinite(n) || n <= 0 || harga <= 0) return;
-    const timer = window.setTimeout(() => susun(sisiAktif), 180);
+    const timer = window.setTimeout(() => susun(sisiSetoran), 180);
     return () => window.clearTimeout(timer);
   }, [
     isiMeme,
     isiQuote,
-    sisiAktif,
-    zap,
+    sisiSetoran,
+    zapAktif,
     canExecute,
     busy,
     plan?.plan_id,
@@ -2444,24 +2466,56 @@ export function SetoranCard({
     <div class="setoran">
       <div class="execution-deposit-header">
         <h2>Set Deposit Amounts</h2>
-        <button
-          type="button"
-          class={`sakelar${zap ? " nyala" : ""}`}
-          disabled={versi === "v3"}
-          onClick={() => {
-            const berikut = !zap;
-            setZap(berikut);
-            onQuote(null);
-            tampilkanPasangan(sisiAktif, sisiAktif === "meme" ? isiMeme : isiQuote, berikut);
-          }}
-          aria-pressed={zap}
-        >
-          <span class="sakelar-tuas" />
-          <span class="sakelar-teks">Zap in</span>
-        </button>
+        {satuSisi === null ? (
+          <button
+            type="button"
+            class={`sakelar${zap ? " nyala" : ""}`}
+            disabled={versi === "v3"}
+            onClick={() => {
+              const berikut = !zap;
+              setZap(berikut);
+              onQuote(null);
+              tampilkanPasangan(sisiAktif, sisiAktif === "meme" ? isiMeme : isiQuote, berikut);
+            }}
+            aria-pressed={zap}
+          >
+            <span class="sakelar-tuas" />
+            <span class="sakelar-teks">Zap in</span>
+          </button>
+        ) : null}
       </div>
 
-      {zap ? (
+      {satuSisi === "meme" ? (
+        <KotakSetor
+          simbol={simbolMeme}
+          nilai={isiMeme}
+          usd={Number(isiMeme) * hargaMeme}
+          saldo={saldo ? saldo.memecoin : null}
+          onInput={(v) => {
+            onQuote(null);
+            setSisiAktif("meme");
+            setIsiMeme(v);
+            setIsiQuote("");
+            tampilkanPasangan("meme", v, false);
+          }}
+          onSelesai={() => susun("meme", plan === null)}
+        />
+      ) : satuSisi === "quote" ? (
+        <KotakSetor
+          simbol={simbolQuote}
+          nilai={isiQuote}
+          usd={Number(isiQuote) * hargaQuote}
+          saldo={saldo ? saldo.quote : null}
+          onInput={(v) => {
+            onQuote(null);
+            setSisiAktif("quote");
+            setIsiQuote(v);
+            setIsiMeme("");
+            tampilkanPasangan("quote", v, false);
+          }}
+          onSelesai={() => susun("quote", plan === null)}
+        />
+      ) : zap ? (
         sisiAktif === "meme" ? (
           <KotakSetor
             simbol={simbolMeme}
@@ -2532,7 +2586,7 @@ export function SetoranCard({
         </>
       )}
 
-      {plan?.zap && !zap ? (
+      {plan?.zap && !zapAktif ? (
         <p class="warn-line">
           Tanpa zap, sebagian modal menganggur tanpa menghasilkan fee.
         </p>
@@ -2768,8 +2822,29 @@ function labelJendelaVolume(menit: number | null): string {
   return `vol ${Math.round(menit)}m`;
 }
 
-/** Preset lebar range, dalam persen ke tiap arah. */
-const PRESET_LEBAR = [1, 5, 10, 20];
+const PRESET_RANGE: { id: RangePreset; label: string }[] = [
+  { id: "stable", label: "Stable" },
+  { id: "wide", label: "Wide" },
+  { id: "one_sided_lower", label: "One-sided lower" },
+  { id: "one_sided_upper", label: "One-sided upper" },
+];
+
+function labelPreset(preset: RangePreset, tickSpacing: number): string {
+  switch (preset) {
+    case "stable": {
+      const persen = (Math.pow(1.0001, tickSpacing * 3) - 1) * 100;
+      return `±${persen.toLocaleString("id-ID", { maximumFractionDigits: 2 })}%`;
+    }
+    case "wide":
+      return "−50% — +100%";
+    case "one_sided_lower":
+      return "−50%";
+    case "one_sided_upper":
+      return "+100%";
+    default:
+      return "0 — ∞";
+  }
+}
 
 /**
  * Atur range di atas gambar likuiditas yang sudah ada di pool.
@@ -2788,12 +2863,14 @@ function DepthCard({
   view,
   depth,
   onSetRange,
+  onSetRangePreset,
   onSetFullRange,
   onMuat,
 }: {
   view: RangeView;
   depth: Distribusi | null;
   onSetRange: (lowerMcap: number, upperMcap: number) => void;
+  onSetRangePreset: (preset: RangePreset) => void;
   onSetFullRange: () => void;
   onMuat: () => void;
 }) {
@@ -2802,19 +2879,9 @@ function DepthCard({
   const [bawah, setBawah] = useState("");
   const [atas, setAtas] = useState("");
 
-  // Preset mana yang sedang berlaku ditentukan lebar range yang sebenarnya,
-  // bukan tombol mana yang terakhir ditekan. Engine membulatkan batas ke grid
-  // tick, jadi lebarnya bisa bergeser sedikit, dan menandai tombol menurut
-  // ingatan panel akan berbohong setelah pembulatan.
-  const lebarSekarang = view.width_pct / 2;
-  const presetAktif =
-    PRESET_LEBAR.find((x) => Math.abs(lebarSekarang - x) / x < 0.1) ?? null;
-  const penuhAktif = view.width_pct > 1_000;
-
-  const pilihLebar = (persen: number) => {
+  const pilihPreset = (preset: RangePreset) => {
     setCustom(false);
-    const f = persen / 100;
-    onSetRange(mcapSekarang * (1 - f), mcapSekarang * (1 + f));
+    onSetRangePreset(preset);
   };
 
   const pilihPenuh = () => {
@@ -2855,24 +2922,28 @@ function DepthCard({
         ) : null}
       </div>
 
-      <div class="preset-row">
-        {PRESET_LEBAR.map((x) => (
+      <div class="strategy-grid">
+        {PRESET_RANGE.map((preset) => (
           <button
-            key={x}
-            class={`preset${presetAktif === x ? " aktif" : ""}`}
-            onClick={() => pilihLebar(x)}
+            key={preset.id}
+            class={`strategy${view.preset === preset.id ? " aktif" : ""}`}
+            onClick={() => pilihPreset(preset.id)}
           >
-            ±{x}%
+            <span>{preset.label}</span>
+            <strong>{labelPreset(preset.id, view.tick_spacing)}</strong>
           </button>
         ))}
-        <button class={`preset${penuhAktif ? " aktif" : ""}`} onClick={pilihPenuh}>
-          penuh
+      </div>
+
+      <div class="preset-row">
+        <button class={`preset${view.preset === "full" ? " aktif" : ""}`} onClick={pilihPenuh}>
+          Full range
         </button>
         <button
-          class={`preset${custom ? " aktif" : ""}`}
+          class={`preset${custom || view.preset === null ? " aktif" : ""}`}
           onClick={() => (custom ? setCustom(false) : bukaCustom())}
         >
-          custom
+          Custom
         </button>
       </div>
 

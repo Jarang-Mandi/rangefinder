@@ -11,7 +11,7 @@
 //! - Kurs ETH ke USD diturunkan dari chart, bukan dari sumber luar. Alasannya
 //!   ada di `math::calibrate_eth_usd`.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::math::{
     self, calibrate_eth_usd, mcap_to_price_weth, price_weth_to_mcap, price_weth_to_usd,
@@ -20,14 +20,24 @@ use crate::math::{
 };
 use crate::pools::{PoolInfo, TokenMeta};
 
-/// Lebar range bawaan saat user belum menggeser apa pun.
+/// Lebar range bawaan mengikuti preset Stable: tiga langkah grid ke tiap arah.
+/// Persentasenya sengaja tidak tetap karena tick spacing adalah sifat pool.
+pub const STABLE_GRID_STEPS: i32 = 3;
+
+/// Strategi harga yang sama dengan pilihan utama pada antarmuka Uniswap.
 ///
-/// Ini nilai sementara yang sengaja sederhana. Doktrin penempatan sebenarnya di
-/// PRD 5.7 memakai struktur harga, yaitu dasar basis, area nilai, dan point of
-/// control, dan itu butuh data lilin yang baru masuk di fase 6. Sampai saat itu
-/// tiba, lebih jujur memakai lebar tetap yang jelas dinyatakan sebagai bawaan
-/// daripada berpura pura sudah pintar.
-pub const DEFAULT_WIDTH_PCT: f64 = 0.15;
+/// Nilai ini melintasi protokol panel/engine, jadi nama serde adalah bagian
+/// dari kontrak. Perhitungan batas tetap dikerjakan di engine agar snap tick
+/// yang ditampilkan sama dengan tick yang akhirnya dikirim ke rantai.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RangePreset {
+    Stable,
+    Wide,
+    OneSidedLower,
+    OneSidedUpper,
+    Full,
+}
 
 /// Satu batas range, ditampilkan dalam tiga satuan sekaligus.
 #[derive(Debug, Clone, Serialize)]
@@ -67,6 +77,8 @@ pub struct RangeView {
     pub width_pct: f64,
     /// Benar kalau harga sekarang berada di dalam range.
     pub in_range: bool,
+    /// Preset yang menghasilkan batas ini. `None` berarti batas custom.
+    pub preset: Option<RangePreset>,
     pub warnings: Vec<String>,
 }
 
@@ -103,9 +115,63 @@ pub fn orientation_for(
 
 /// Range bawaan di sekitar harga sekarang.
 pub fn default_range(price_weth: f64, o: PoolOrientation, spacing: i32) -> Option<TickRange> {
-    let bawah = price_weth * (1.0 - DEFAULT_WIDTH_PCT);
-    let atas = price_weth * (1.0 + DEFAULT_WIDTH_PCT);
+    let (bawah, atas) = preset_price_bounds(price_weth, spacing, RangePreset::Stable)?;
     range_from_prices(bawah, atas, o, spacing)
+}
+
+/// Batas harga untuk preset Uniswap sebelum dibulatkan ke grid tick.
+///
+/// `Stable` memakai tiga langkah grid ke tiap arah. Karena tick spacing V4
+/// merupakan bagian PoolKey dan dapat berbeda pada setiap pool, persentasenya
+/// memang berubah antar-pool. `Wide` memakai rentang log-simetris 0,5x--2x.
+/// Batas dalam one-sided digeser satu langkah penuh dari harga aktif supaya
+/// pembulatan keluar oleh `range_from_prices` tidak memasukkannya kembali.
+pub fn preset_price_bounds(
+    current_price: f64,
+    spacing: i32,
+    preset: RangePreset,
+) -> Option<(f64, f64)> {
+    if !(current_price.is_finite() && current_price > 0.0) || spacing <= 0 {
+        return None;
+    }
+    let satu_grid = 1.0001_f64.powi(spacing);
+    let (lower, upper) = match preset {
+        RangePreset::Stable => {
+            let delta = 1.0001_f64.powi(spacing.checked_mul(STABLE_GRID_STEPS)?) - 1.0;
+            // Tick spacing yang kelewat besar dapat membuat batas aritmetis
+            // bawah nol. Pool semacam itu tetap mendapat range sah dengan
+            // memakai lebar logaritmis yang setara.
+            if delta < 1.0 {
+                (current_price * (1.0 - delta), current_price * (1.0 + delta))
+            } else {
+                (current_price / (1.0 + delta), current_price * (1.0 + delta))
+            }
+        }
+        RangePreset::Wide => (current_price * 0.5, current_price * 2.0),
+        RangePreset::OneSidedLower => (current_price * 0.5, current_price / satu_grid),
+        RangePreset::OneSidedUpper => (current_price * satu_grid, current_price * 2.0),
+        RangePreset::Full => return None,
+    };
+    (lower.is_finite() && upper.is_finite() && lower > 0.0 && upper > lower)
+        .then_some((lower, upper))
+}
+
+/// Batas preset dalam market cap, satuan yang dipakai chart dan state aktif.
+pub fn preset_bounds(current_mcap: f64, spacing: i32, preset: RangePreset) -> Option<(f64, f64)> {
+    preset_price_bounds(current_mcap, spacing, preset)
+}
+
+/// Hitung preset lengkap untuk sebuah pool, termasuk full range.
+pub fn preset_bounds_for_pool(
+    pool: &PoolInfo,
+    token: &str,
+    current_mcap: f64,
+    preset: RangePreset,
+) -> Option<(f64, f64)> {
+    match preset {
+        RangePreset::Full => full_bounds(pool, token, current_mcap),
+        _ => preset_bounds(current_mcap, pool.tick_spacing, preset),
+    }
 }
 
 /// Batas penuh dinyatakan pada sumbu harga memecoin, yang bisa kebalikan tick.
@@ -186,10 +252,8 @@ pub fn build_view(
                 .ok_or_else(|| "batas atas tidak masuk akal".to_string())?;
             (b, a)
         }
-        None => (
-            price_weth * (1.0 - DEFAULT_WIDTH_PCT),
-            price_weth * (1.0 + DEFAULT_WIDTH_PCT),
-        ),
+        None => preset_price_bounds(price_weth, spacing, RangePreset::Stable)
+            .ok_or_else(|| "preset range bawaan tidak valid".to_string())?,
     };
 
     let range = range_from_prices(minta_bawah_weth, minta_atas_weth, orientation, spacing)
@@ -230,7 +294,10 @@ pub fn build_view(
         mcap_usd: chart_mcap_usd,
     };
 
-    let in_range = chart_mcap_usd >= lower.mcap_usd && chart_mcap_usd <= upper.mcap_usd;
+    // Uniswap memakai interval tick [lower, upper): batas bawah termasuk,
+    // batas atas tidak. Membandingkan market cap dengan <= pada kedua sisi
+    // salah menandai posisi yang tepat menyentuh batas atas sebagai aktif.
+    let in_range = pool.tick >= range.lower && pool.tick < range.upper;
     if !in_range {
         warnings.push("harga sekarang berada di luar range".into());
     }
@@ -255,6 +322,7 @@ pub fn build_view(
         upper,
         width_pct,
         in_range,
+        preset: requested.is_none().then_some(RangePreset::Stable),
         warnings,
     })
 }
@@ -409,9 +477,12 @@ mod tests {
             "range bawaan harus melingkupi harga sekarang"
         );
 
-        // Lebar bawaan sekitar 30 persen, yaitu 15 persen ke tiap arah.
+        // Stable meminta tiga langkah grid ke tiap arah. Snap yang melebarkan
+        // batas boleh menambah paling banyak satu langkah pada tiap sisi.
+        let target = 2.0 * (1.0001_f64.powi(60 * STABLE_GRID_STEPS) - 1.0) * 100.0;
+        let dua_grid = 2.0 * (1.0001_f64.powi(60) - 1.0) * 100.0;
         assert!(
-            (view.width_pct - 30.0).abs() < 5.0,
+            view.width_pct >= target && view.width_pct <= target + dua_grid,
             "lebar {} persen di luar dugaan",
             view.width_pct
         );
@@ -468,6 +539,48 @@ mod tests {
         let view = build_view(&p, &m, 18, 937_234_340.0, Some((1.5e9, 2.0e9)), true).unwrap();
         assert!(!view.in_range);
         assert!(view.warnings.iter().any(|w| w.contains("luar range")));
+    }
+
+    #[test]
+    fn preset_stable_mengikuti_tiga_langkah_grid() {
+        let current = 1_000_000.0;
+        let (lower, upper) = preset_bounds(current, 200, RangePreset::Stable).unwrap();
+        let expected = 1.0001_f64.powi(600) - 1.0;
+        assert!(((current - lower) / current - expected).abs() < 1e-12);
+        assert!(((upper - current) / current - expected).abs() < 1e-12);
+        assert!((expected * 100.0 - 6.183_654).abs() < 0.001);
+    }
+
+    #[test]
+    fn preset_one_sided_tetap_di_luar_harga_setelah_snap() {
+        let m = meta();
+        for memecoin_token0 in [false, true] {
+            let mut p = pool_memecoin_token1(2638.0);
+            if memecoin_token0 {
+                std::mem::swap(&mut p.token0, &mut p.token1);
+            }
+            let current = 937_234_340.0;
+
+            let lower_bounds =
+                preset_bounds(current, p.tick_spacing, RangePreset::OneSidedLower).unwrap();
+            let lower = build_view(&p, &m, 18, current, Some(lower_bounds), false).unwrap();
+            assert!(!lower.in_range);
+            assert!(
+                lower.upper.mcap_usd < current,
+                "batas atas lower harus tetap di bawah harga: {} >= {current}",
+                lower.upper.mcap_usd
+            );
+
+            let upper_bounds =
+                preset_bounds(current, p.tick_spacing, RangePreset::OneSidedUpper).unwrap();
+            let upper = build_view(&p, &m, 18, current, Some(upper_bounds), false).unwrap();
+            assert!(!upper.in_range);
+            assert!(
+                upper.lower.mcap_usd > current,
+                "batas bawah upper harus tetap di atas harga: {} <= {current}",
+                upper.lower.mcap_usd
+            );
+        }
     }
 
     #[test]
