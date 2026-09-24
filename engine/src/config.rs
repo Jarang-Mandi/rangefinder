@@ -240,7 +240,7 @@ impl Default for LimitsConfig {
             max_daily_deploy_usd: Some(5.0),
             max_open_positions: Some(2),
             new_pool_first_size_usd: Some(2.5),
-            min_eth_reserve: 0.002,
+            min_eth_reserve: 0.0001,
             max_slippage_bps: 200,
         }
     }
@@ -402,7 +402,7 @@ mod tests {
         assert_eq!(l.max_daily_deploy_usd, Some(5.0));
         assert_eq!(l.max_open_positions, Some(2));
         assert_eq!(l.new_pool_first_size_usd, Some(2.5));
-        assert_eq!(l.min_eth_reserve, 0.002);
+        assert_eq!(l.min_eth_reserve, 0.0001);
         assert_eq!(l.max_slippage_bps, 200);
     }
 

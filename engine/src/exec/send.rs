@@ -361,10 +361,11 @@ pub async fn send_calldata<P: Provider>(
 
     // build(wallet) tidak menjalankan filler provider. Fee harus sudah lengkap
     // sebelum request diberikan kepada signer, bukan setelah menjadi envelope.
-    let fees = provider
-        .estimate_eip1559_fees()
-        .await
-        .map_err(|e| SendError::Rpc(format!("estimasi biaya gas gagal: {e}")))?;
+    // Saldo dan fee tidak saling bergantung. Mulai keduanya bersama supaya
+    // tombol kirim tidak membayar satu perjalanan RPC tambahan.
+    let (fees, saldo) = tokio::join!(provider.estimate_eip1559_fees(), provider.get_balance(from));
+    let fees = fees.map_err(|e| SendError::Rpc(format!("estimasi biaya gas gagal: {e}")))?;
+    let saldo = saldo.map_err(|e| SendError::Rpc(e.to_string()))?;
     let dasar = isi_biaya(dasar, fees.max_fee_per_gas, fees.max_priority_fee_per_gas)?;
 
     // Estimasi dijalankan pada transaksi yang persis sama dengan yang akan
@@ -379,10 +380,6 @@ pub async fn send_calldata<P: Provider>(
         return Err(SendError::GasTerlaluBesar(gas_limit));
     }
 
-    let saldo = provider
-        .get_balance(from)
-        .await
-        .map_err(|e| SendError::Rpc(e.to_string()))?;
     periksa_cadangan(
         saldo,
         value,
@@ -903,6 +900,14 @@ mod tests {
             periksa_cadangan(saldo, value + U256::from(1), 100_000, 1_000_000_000, 0.002).is_err()
         );
         assert!(periksa_cadangan(saldo, U256::MAX, 100_000, 1_000_000_000, 0.002).is_err());
+    }
+
+    #[test]
+    fn saldo_kecil_yang_masih_cukup_gas_tidak_ditolak_profil_bawaan() {
+        let saldo = U256::from(587_918_836_296_124u64);
+        let biaya_maksimum = 7_113_081_838_474u64;
+        assert!(periksa_cadangan(saldo, U256::ZERO, biaya_maksimum, 1, 0.0001).is_ok());
+        assert!(periksa_cadangan(saldo, U256::ZERO, biaya_maksimum, 1, 0.002).is_err());
     }
 
     #[tokio::test]

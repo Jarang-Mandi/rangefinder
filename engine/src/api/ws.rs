@@ -107,7 +107,7 @@ async fn session(socket: WebSocket, state: AppState) {
                             Ok(ClientMessage::SetFullRange) => {
                                 state.on_set_full_range().await;
                             }
-                            Ok(ClientMessage::InvalidatePlan) => { state.intent.change(); }
+                            Ok(ClientMessage::InvalidatePlan) => { state.batalkan_quote(); }
                             Ok(ClientMessage::PreviewDeposit { deposit, request_id }) => {
                                 let s = state.clone();
                                 tokio::spawn(async move { s.on_preview_deposit(deposit, request_id).await });
@@ -117,11 +117,7 @@ async fn session(socket: WebSocket, state: AppState) {
                             // membalas denyut selama transaksi menunggu receipt,
                             // yang bisa memakan puluhan detik.
                             Ok(ClientMessage::QuoteRange { deposit, request_id }) => {
-                                let s = state.clone();
-                                let revision = s.intent.change();
-                                tokio::spawn(async move { s.on_quote_range(super::execute::QuoteTask {
-                                    deposit, request_id, revision, budget_override: None,
-                                }).await });
+                                state.spawn_quote_range(deposit, request_id);
                             }
                             Ok(ClientMessage::ApproveToken { plan_id, step_id }) => {
                                 let s = state.clone();

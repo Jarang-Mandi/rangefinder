@@ -49,7 +49,7 @@ pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// sengaja dilebihkan: rantai ini murah, dan menolak transaksi karena terlalu
 /// hati hati jauh lebih baik daripada wallet yang kehabisan gas di tengah
 /// rangkaian aksi.
-const PERKIRAAN_GAS_ETH: f64 = 0.0005;
+const PERKIRAAN_GAS_ETH: f64 = 0.00005;
 
 /// Umur deadline yang dibawa MintParams, dalam detik.
 ///
@@ -87,6 +87,9 @@ pub struct AppState {
     /// tugas lama agar pemindaian yang hasilnya sudah tidak akan dipakai tidak
     /// terus membebani RPC dan menahan saldo token terbaru.
     pub lookup_task: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// Rencana interaktif yang sedang disusun. Input baru membatalkan tugas
+    /// lama supaya perubahan angka atau range tidak menumpuk pekerjaan RPC.
+    pub quote_task: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// Penanda permintaan interaktif agar pembacaan statistik per potongan
     /// memberi jalan kepada rencana dan transaksi yang sedang ditunggu user.
     pub jeda_latar: Arc<crate::chain::logs::JedaLatar>,
@@ -362,6 +365,35 @@ impl AppState {
         if let Some(lama) = self.lookup_task.lock().expect("mutex tugas lookup").take() {
             lama.abort();
         }
+    }
+
+    /// Batalkan rencana interaktif yang hasilnya sudah tidak dibutuhkan.
+    pub fn batalkan_quote(&self) {
+        if let Some(lama) = self.quote_task.lock().expect("mutex tugas quote").take() {
+            lama.abort();
+        }
+        self.intent.change();
+    }
+
+    /// Susun hanya rencana terbaru. Tugas lama langsung dihentikan agar tidak
+    /// berebut RPC dengan input yang sedang dilihat user.
+    pub fn spawn_quote_range(&self, deposit: deposit::Deposit, request_id: String) {
+        let mut slot = self.quote_task.lock().expect("mutex tugas quote");
+        if let Some(lama) = slot.take() {
+            lama.abort();
+        }
+        let revision = self.intent.change();
+        let state = self.clone();
+        *slot = Some(tokio::spawn(async move {
+            state
+                .on_quote_range(execute::QuoteTask {
+                    deposit,
+                    request_id,
+                    revision,
+                    budget_override: None,
+                })
+                .await;
+        }));
     }
 
     pub async fn status(&self) -> EngineStatus {
@@ -1237,16 +1269,30 @@ impl AppState {
         self.batalkan_lookup();
         let _prioritas = self.jeda_latar.prioritaskan();
         let revision = task.revision;
+        let mulai = Instant::now();
         match self.susun_rencana(task).await {
             Ok(view) => {
                 if !self.intent.current(revision) {
                     return;
                 }
+                tracing::info!(
+                    durasi_ms = mulai.elapsed().as_millis(),
+                    "rencana posisi siap"
+                );
                 let _ = self
                     .events
                     .send(protocol::ServerMessage::OpenPlan(Box::new(view)));
             }
-            Err(pesan) => self.alert_kritis("plan_failed", pesan),
+            Err(pesan) => {
+                if self.intent.current(revision) {
+                    tracing::warn!(
+                        durasi_ms = mulai.elapsed().as_millis(),
+                        error = %pesan,
+                        "rencana posisi gagal"
+                    );
+                    self.alert_kritis("plan_failed", pesan);
+                }
+            }
         }
     }
 
@@ -1494,9 +1540,10 @@ impl AppState {
             return Err("nilai setoran tidak dapat dihitung".into());
         }
 
-        // Pembatas opsional harus memakai keadaan persisten dan pembacaan
-        // posisi aktual. Kalau pembacaan yang dibutuhkan gagal, rencana
-        // ditolak alih alih menyisipkan nol yang tampak sah.
+        // Pembatas deploy memakai jurnal persisten. Jumlah posisi memakai
+        // snapshot yang disegarkan setiap 30 detik dan setelah transaksi.
+        // Perencanaan interaktif tidak boleh menunggu pemindaian log seluruh
+        // posisi yang dapat berlangsung lama atau sedang dipegang loop latar.
         let perlu_usage = self.cfg.limits.max_daily_deploy_usd.is_some()
             || self.cfg.limits.new_pool_first_size_usd.is_some();
         let usage = if perlu_usage {
@@ -1511,22 +1558,15 @@ impl AppState {
             crate::exec::journal::LimitUsage::default()
         };
         let open_positions = if self.cfg.limits.max_open_positions.is_some() {
-            let _pemuatan = self.positions_lock.lock().await;
-            let snapshot = crate::positions::muat::muat_snapshot_operasional(
-                &provider,
-                &self.registry,
-                Some(&self.store),
-                pemilik,
+            u32::try_from(
+                self.positions
+                    .read()
+                    .await
+                    .iter()
+                    .filter(|p| !p.kosong)
+                    .count(),
             )
-            .await;
-            if !snapshot.errors.is_empty() {
-                return Err(format!(
-                    "jumlah posisi terbuka tidak dapat dibuktikan: {}",
-                    snapshot.errors.join("; ")
-                ));
-            }
-            u32::try_from(snapshot.positions.iter().filter(|p| !p.kosong).count())
-                .map_err(|_| "jumlah posisi terbuka melampaui u32".to_string())?
+            .map_err(|_| "jumlah posisi terbuka melampaui u32".to_string())?
         } else {
             0
         };

@@ -2424,8 +2424,8 @@ export function SetoranCard({
     const teks = sisiAktif === "meme" ? isiMeme : isiQuote;
     const harga = sisiAktif === "meme" ? hargaMeme : hargaQuote;
     const n = Number(teks);
-    if (!canExecute || busy || !Number.isFinite(n) || n <= 0 || harga <= 0) return;
-    const timer = window.setTimeout(() => susun(sisiAktif), 90);
+    if (plan || !canExecute || busy || !Number.isFinite(n) || n <= 0 || harga <= 0) return;
+    const timer = window.setTimeout(() => susun(sisiAktif), 180);
     return () => window.clearTimeout(timer);
   }, [
     isiMeme,
@@ -2434,6 +2434,7 @@ export function SetoranCard({
     zap,
     canExecute,
     busy,
+    plan?.plan_id,
     view?.pool_id,
     view?.lower.tick,
     view?.upper.tick,

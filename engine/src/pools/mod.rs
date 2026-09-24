@@ -2050,7 +2050,7 @@ pub fn usable_pools(mut pools: Vec<PoolInfo>) -> Vec<PoolInfo> {
         // Tanpa ini, pool fee 80 persen justru menang karena skornya
         // likuiditas dikali fee. Lihat MAX_PLAUSIBLE_FEE.
         if implausible_fee(p) {
-            tracing::warn!(
+            tracing::debug!(
                 pool = %p.id,
                 fee_persen = p.fee as f64 / 10_000.0,
                 "pool dengan fee di luar akal sehat dibuang"

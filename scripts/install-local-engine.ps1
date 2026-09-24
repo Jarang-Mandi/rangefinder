@@ -41,6 +41,8 @@ if (Test-Path -LiteralPath $configPath) {
     $configText = Get-Content -LiteralPath $configPath -Raw
     $configText = $configText -replace '(?m)^auto_lock_minutes\s*=\s*\d+\s*$', 'auto_lock_minutes = 0'
     $configText = $configText -replace '(?m)^use_credential_manager\s*=\s*(true|false)\s*$', 'use_credential_manager = true'
+    # Migrasikan hanya nilai bawaan lama. Nilai lain dianggap pilihan user.
+    $configText = $configText -replace '(?m)^min_eth_reserve\s*=\s*0\.0020*\s*$', 'min_eth_reserve = 0.0001'
     Set-Content -LiteralPath $configPath -Value $configText -Encoding UTF8
 }
 
