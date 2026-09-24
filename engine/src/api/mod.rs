@@ -61,8 +61,9 @@ const DEADLINE_DETIK: u64 = 300;
 /// Batas transaksi nyata dalam satu klik. Perencanaan ulang tidak ikut dihitung:
 /// alur V4 single-token yang sah dapat membutuhkan banyak approval, satu zap,
 /// lalu mint, dan sebelumnya berhenti hanya karena setiap replan memakan slot.
-const MAX_FLOW_TRANSACTIONS: usize = 16;
-const MAX_FLOW_REPLANS: usize = 8;
+const MAX_FLOW_TRANSACTIONS: usize = 12;
+const MAX_FLOW_REPLANS: usize = 4;
+const MAX_MINT_RETRIES: usize = 1;
 
 /// Deret candle beserta alamat token yang memilikinya.
 ///
@@ -485,11 +486,29 @@ impl AppState {
         if self.cfg.execution.dry_run {
             return Err("engine sedang dry run".into());
         }
-        let health = self.chain.check_health().await;
+        // Health loop memperbarui keadaan setiap lima detik dan memverifikasi
+        // ulang registry setiap sepuluh menit. Mengulang 17 pembacaan bytecode
+        // sebelum SETIAP approval, swap, dan mint membuat satu flow memakan
+        // puluhan detik. Pintu kirim tetap memeriksa chain id, gas, saldo, dan
+        // mensimulasikan calldata persis pada state terbaru.
+        let health = self.chain.health().await;
         if !health.healthy {
             return Err(health.error.unwrap_or_else(|| "RPC belum sehat".into()));
         }
-        self.reverify_registry().await?;
+        let total = self
+            .registry
+            .all_contracts()
+            .map_err(|e| e.to_string())?
+            .len();
+        let checks = self.registry_checks.read().await;
+        if total == 0
+            || checks.len() != total
+            || checks
+                .iter()
+                .any(|check| check.status != crate::chain::RegistryStatus::Verified)
+        {
+            return Err("G1: bytecode kontrak belum seluruhnya cocok dengan pin".into());
+        }
         crate::exec::golden::verify_embedded()?;
         Ok(())
     }
@@ -1625,17 +1644,27 @@ impl AppState {
         {
             None
         } else {
+            let (api_amount0, api_amount1, api_slippage_bps) =
+                if pool.version == crate::pools::PoolVersion::V4 {
+                    (
+                        crate::exec::v4::pipeline::modal_setelah_cadangan(amount0_awal),
+                        crate::exec::v4::pipeline::modal_setelah_cadangan(amount1_awal),
+                        self.cfg.limits.max_slippage_bps.max(1_000),
+                    )
+                } else {
+                    (amount0_awal, amount1_awal, self.cfg.limits.max_slippage_bps)
+                };
             let uniswap = self.uniswap.clone();
             let params = crate::uniswap::CreateParams {
                 wallet: pemilik,
                 chain_id: self.registry.chain.id,
                 pool: pool.clone(),
-                amount0: amount0_awal,
-                amount1: amount1_awal,
+                amount0: api_amount0,
+                amount1: api_amount1,
                 tick_lower,
                 tick_upper,
                 deadline: req.deadline.to::<u64>(),
-                slippage_bps: self.cfg.limits.max_slippage_bps,
+                slippage_bps: api_slippage_bps,
                 native_balance: (token0.is_zero() || token1.is_zero()).then_some(eth_balance),
             };
             Some(tokio::spawn(async move {
@@ -1743,7 +1772,14 @@ impl AppState {
                 self.registry.contract("uniswap_v4", "universal_router"),
                 v.dari.parse::<alloy::primitives::Address>(),
             ) {
-                let jumlah: alloy::primitives::U256 = v.jumlah.parse().unwrap_or_default();
+                // Izin memakai seluruh anggaran sisi sumber agar perubahan
+                // kutipan zap setelah approval tidak meminta transaksi baru.
+                let jumlah = if dari == token0 {
+                    available0
+                } else {
+                    available1
+                }
+                .min(crate::exec::v4::permit::maks_uint160());
                 match crate::exec::plan::izin_permit2_untuk(
                     &provider,
                     &alamat,
@@ -1794,8 +1830,15 @@ impl AppState {
                 })
                 .filter(|jumlah| !jumlah.is_zero());
 
+        let bukti_jual_segar = crate::risk::token::bukti_jual_segar(
+            &self.store,
+            self.registry.chain.id,
+            &pool.id,
+            memecoin,
+        );
+
         let mut izin_risiko_kurang = false;
-        if let Some(jumlah) = jumlah_uji {
+        if let Some(_jumlah) = jumlah_uji.filter(|_| !bukti_jual_segar) {
             let router = match pool.version {
                 crate::pools::PoolVersion::V3 => self
                     .registry
@@ -1806,6 +1849,15 @@ impl AppState {
                     .contract("uniswap_v4", "universal_router")
                     .map_err(|e| e.to_string())?,
             };
+            // Izin uji jual harus stabil sepanjang flow. Jika nominalnya tepat
+            // sepuluh sen, perubahan harga sekecil apa pun akan memicu approve
+            // Permit2 baru pada setiap replan.
+            let batas_izin = match pool.version {
+                crate::pools::PoolVersion::V3 => saldo_meme,
+                crate::pools::PoolVersion::V4 => {
+                    saldo_meme.min(crate::exec::v4::permit::maks_uint160())
+                }
+            };
             let izin_risiko = match pool.version {
                 crate::pools::PoolVersion::V3 => {
                     crate::exec::plan::izin_erc20_untuk(
@@ -1815,7 +1867,7 @@ impl AppState {
                         router,
                         "SwapRouter02",
                         memecoin,
-                        jumlah,
+                        batas_izin,
                     )
                     .await?
                 }
@@ -1827,7 +1879,7 @@ impl AppState {
                         router,
                         "UniversalRouter",
                         memecoin,
-                        jumlah,
+                        batas_izin,
                         chrono::Utc::now().timestamp().max(0) as u64,
                     )
                     .await?
@@ -1845,8 +1897,17 @@ impl AppState {
             }
         }
 
-        let jual_kecil_lolos = match jumlah_uji {
-            None => {
+        let jual_kecil_lolos = match (bukti_jual_segar, jumlah_uji) {
+            (true, _) => {
+                plan.gates
+                    .push(crate::exec::pipeline::GateResult::lolos_publik(
+                        "R2",
+                        "simulasi jual kecil",
+                        "uji jual pool ini masih segar",
+                    ));
+                true
+            }
+            (false, None) => {
                 plan.gates.push(crate::exec::pipeline::GateResult::gagal_publik(
                     "R2",
                     "simulasi jual kecil",
@@ -1854,7 +1915,7 @@ impl AppState {
                 ));
                 false
             }
-            Some(_) if izin_risiko_kurang => {
+            (false, Some(_)) if izin_risiko_kurang => {
                 plan.gates.push(crate::exec::pipeline::GateResult::gagal_publik(
                     "R2",
                     "simulasi jual kecil",
@@ -1862,7 +1923,7 @@ impl AppState {
                 ));
                 false
             }
-            Some(jumlah) => match crate::risk::token::uji_jual_kecil(
+            (false, Some(jumlah)) => match crate::risk::token::uji_jual_kecil(
                 &provider,
                 &self.registry,
                 &pool,
@@ -2585,6 +2646,7 @@ impl AppState {
         let mut izin_selesai = false;
         let mut transaksi = 0usize;
         let mut replan = 0usize;
+        let mut ulang_mint = 0usize;
         loop {
             let (step_id, perlu_zap, siap) = {
                 let guard = self.pending_plan.read().await;
@@ -2689,12 +2751,23 @@ impl AppState {
             if transaksi >= MAX_FLOW_TRANSACTIONS {
                 return Err("Alur pembukaan melebihi batas transaksi yang aman".into());
             }
-            let view = self.kirim_open(plan_id).await?;
+            transaksi += 1;
+            let (view, lanjut) = self.kirim_open(plan_id).await?;
             let status = view.outcome.status;
             let terverifikasi = view.outcome.fully_verified();
             let _ = self
                 .events
                 .send(protocol::ServerMessage::SendResult(Box::new(view)));
+            if status == crate::exec::send::TxStatus::Revert && ulang_mint < MAX_MINT_RETRIES {
+                ulang_mint += 1;
+                let task = lanjut.ok_or("rencana ulang setelah mint ditolak tidak tersedia")?;
+                let view = self.susun_rencana(task).await?;
+                plan_id = view.plan_id.clone();
+                let _ = self
+                    .events
+                    .send(protocol::ServerMessage::OpenPlan(Box::new(view)));
+                continue;
+            }
             return Ok((status, terverifikasi));
         }
     }
@@ -5874,21 +5947,18 @@ impl AppState {
                 Ok(after) => {
                     let input: alloy::primitives::U256 =
                         zap.jumlah.parse().map_err(|_| "jumlah zap tidak valid")?;
-                    let cap: alloy::primitives::U256 = zap
-                        .perkiraan_diterima
-                        .parse()
-                        .map_err(|_| "kutipan zap tidak valid")?;
                     let source0 = zap.dari.eq_ignore_ascii_case(&rencana.token0.to_string());
                     // Anggaran berikutnya hanya sisa input dan hasil swap yang
-                    // diterima. Saldo tujuan yang sudah ada tidak ikut dipakai.
+                    // benar benar diterima. Hasil yang lebih baik dari kutipan
+                    // tidak boleh dibuang karena itulah saldo untuk mint.
                     let budget = if source0 {
                         (
                             rencana.budget.0.saturating_sub(input),
-                            after.1.saturating_sub(before.1).min(cap),
+                            after.1.saturating_sub(before.1),
                         )
                     } else {
                         (
-                            after.0.saturating_sub(before.0).min(cap),
+                            after.0.saturating_sub(before.0),
                             rencana.budget.1.saturating_sub(input),
                         )
                     };
@@ -5922,9 +5992,10 @@ impl AppState {
     pub async fn on_open_position(&self, plan_id: String) {
         let _flow = self.flow_lock.lock().await;
         match self.kirim_open(plan_id).await {
-            Ok(view) => {
+            Ok((view, lanjut)) => {
                 let terverifikasi = view.outcome.fully_verified();
                 let sukses = view.outcome.status == crate::exec::send::TxStatus::Sukses;
+                let ditolak = view.outcome.status == crate::exec::send::TxStatus::Revert;
                 let _ = self
                     .events
                     .send(protocol::ServerMessage::SendResult(Box::new(view)));
@@ -5939,12 +6010,27 @@ impl AppState {
                             .into(),
                     );
                 }
+                if ditolak {
+                    if let Some(task) = lanjut {
+                        match self.susun_rencana(task).await {
+                            Ok(view) => {
+                                let _ = self
+                                    .events
+                                    .send(protocol::ServerMessage::OpenPlan(Box::new(view)));
+                            }
+                            Err(error) => self.alert_kritis("plan_failed", error),
+                        }
+                    }
+                }
             }
             Err(pesan) => self.alert_kritis("open_failed", pesan),
         }
     }
 
-    async fn kirim_open(&self, plan_id: String) -> Result<execute::SendResultView, String> {
+    async fn kirim_open(
+        &self,
+        plan_id: String,
+    ) -> Result<(execute::SendResultView, Option<execute::QuoteTask>), String> {
         let _eksekusi = self.execution_lock.lock().await;
         self.ensure_execution().await?;
         let tersimpan = {
@@ -6073,10 +6159,22 @@ impl AppState {
             }
         }
 
-        Ok(execute::SendResultView {
-            kind: "open",
-            outcome,
-        })
+        let lanjut = if outcome.status == crate::exec::send::TxStatus::Revert {
+            self.intent.advance(tersimpan.revision).map(|revision| {
+                let mut task = tersimpan.quote.clone();
+                task.revision = revision;
+                task
+            })
+        } else {
+            None
+        };
+        Ok((
+            execute::SendResultView {
+                kind: "open",
+                outcome,
+            },
+            lanjut,
+        ))
     }
 
     /// Kabar biasa yang bukan kegagalan.

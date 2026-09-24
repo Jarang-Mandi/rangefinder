@@ -7,8 +7,8 @@
 //! INVARIAN
 //! - Urutan gate sama dengan V3: yang murah dan pasti berjalan lebih dulu.
 //! - Batas atas jumlah adalah SATU SATUNYA pengaman slippage di V4. Tidak ada
-//!   `amountMin` seperti V3, jadi kalau batas atas disetel sebesar saldo, pool
-//!   boleh mengambil seluruh saldo saat harga bergerak.
+//!   `amountMin` seperti V3. Likuiditas sengaja dibangun dari 90 persen modal,
+//!   sedangkan batas atas tetap tidak boleh melewati anggaran user.
 //! - Rencana yang gagal di gate mana pun TIDAK membawa calldata.
 
 use alloy::primitives::{Address, Bytes, U256};
@@ -21,6 +21,9 @@ use crate::exec::pipeline::{hitung_jumlah, GateResult, OpenPlan, OpenRequest};
 
 use super::abi::IPositionManagerV4::PoolKey;
 use super::calldata::{self, MintV4Request};
+
+/// Ruang perubahan rasio antara simulasi dan blok masuk pada pasar cepat.
+const CADANGAN_VOLATIL_BPS: u32 = 1_000;
 
 /// Susun rencana membuka posisi V4, jalankan gate G0, G6, G2, G4, G5.
 ///
@@ -111,31 +114,28 @@ pub async fn plan_open_v4<P: Provider>(
     }
 
     // ─── Hitungan likuiditas, sama untuk V3 dan V4 ────────────────
-    let (liquidity, butuh0, butuh1) = match hitung_jumlah(
-        &req.pool,
-        req.tick_lower,
-        req.tick_upper,
-        req.available0,
-        req.available1,
-    ) {
-        Ok(v) => v,
-        Err(e) => {
-            gates.push(GateResult::gagal_publik("G2", "builder calldata", e));
-            plan.gates = gates;
-            plan.warnings = warnings;
-            return plan;
-        }
-    };
+    let aman0 = modal_setelah_cadangan(req.available0);
+    let aman1 = modal_setelah_cadangan(req.available1);
+    let (liquidity, butuh0, butuh1) =
+        match hitung_jumlah(&req.pool, req.tick_lower, req.tick_upper, aman0, aman1) {
+            Ok(v) => v,
+            Err(e) => {
+                gates.push(GateResult::gagal_publik("G2", "builder calldata", e));
+                plan.gates = gates;
+                plan.warnings = warnings;
+                return plan;
+            }
+        };
 
     plan.liquidity = liquidity.to_string();
     plan.amount0 = butuh0.to_string();
     plan.amount1 = butuh1.to_string();
 
-    // Batas atas dengan margin slippage, tapi tidak pernah melampaui yang
-    // benar benar tersedia. Tanpa batas atas ini, pergerakan harga antara
-    // rencana dan eksekusi bisa membuat pool mengambil jauh lebih banyak.
-    let maks0 = batas_atas(butuh0, limits_cfg.max_slippage_bps, req.available0);
-    let maks1 = batas_atas(butuh1, limits_cfg.max_slippage_bps, req.available1);
+    // Likuiditas hanya memakai modal aman di atas, tetapi batas kontrak boleh
+    // memakai seluruh anggaran yang sudah disetujui. Selisihnya menyerap
+    // perubahan rasio antartoken sampai transaksi masuk blok.
+    let maks0 = req.available0;
+    let maks1 = req.available1;
 
     // ─── G2, builder calldata ─────────────────────────────────────
     let pool_key = match pool_key_dari(&req.pool) {
@@ -283,16 +283,15 @@ pub async fn plan_open_v4<P: Provider>(
     plan
 }
 
-/// Batas atas jumlah yang boleh dipakai, dengan margin slippage.
-///
-/// Tidak pernah melampaui yang benar benar tersedia, karena batas yang lebih
-/// besar dari saldo tidak menambah keamanan apa pun dan hanya memberi izin
-/// lebih luas dari yang dimaksud.
-fn batas_atas(butuh: U256, slippage_bps: u32, tersedia: U256) -> U256 {
+pub(crate) fn modal_setelah_cadangan(tersedia: U256) -> U256 {
     let bps = U256::from(10_000u32);
-    let tambahan = U256::from(slippage_bps.min(10_000));
-    let dengan_margin = butuh * (bps + tambahan) / bps;
-    dengan_margin.min(tersedia).max(butuh.min(tersedia))
+    let dipakai = bps - U256::from(CADANGAN_VOLATIL_BPS);
+    let aman = crate::math::liquidity_math::mul_div(tersedia, dipakai, bps).unwrap_or(tersedia);
+    if aman.is_zero() && !tersedia.is_zero() {
+        tersedia
+    } else {
+        aman
+    }
 }
 
 /// Potong ke `u128` yang diterima kontrak.
@@ -415,26 +414,12 @@ mod tests {
     }
 
     #[test]
-    fn batas_atas_menambah_margin_tapi_tidak_melebihi_saldo() {
-        let butuh = U256::from(1_000u64);
-        let tersedia = U256::from(1_020u64);
-        // Margin 3 persen akan meminta 1030, tapi saldonya hanya 1020.
-        assert_eq!(batas_atas(butuh, 300, tersedia), tersedia);
-    }
-
-    #[test]
-    fn batas_atas_memakai_margin_penuh_kalau_saldo_cukup() {
-        let butuh = U256::from(1_000u64);
-        let tersedia = U256::from(10_000u64);
-        assert_eq!(batas_atas(butuh, 300, tersedia), U256::from(1_030u64));
-    }
-
-    #[test]
-    fn batas_atas_tidak_pernah_di_bawah_yang_dibutuhkan_kalau_saldo_cukup() {
-        // Slippage nol pun batasnya harus tetap menutup kebutuhan, kalau tidak
-        // kontrak pasti menolak.
-        let butuh = U256::from(1_000u64);
-        assert_eq!(batas_atas(butuh, 0, U256::from(5_000u64)), butuh);
+    fn cadangan_volatil_menyisakan_sepuluh_persen() {
+        assert_eq!(
+            modal_setelah_cadangan(U256::from(10_000u64)),
+            U256::from(9_000u64)
+        );
+        assert_eq!(modal_setelah_cadangan(U256::from(1u64)), U256::from(1u64));
     }
 
     #[test]

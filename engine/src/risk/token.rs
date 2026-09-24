@@ -72,6 +72,11 @@ pub struct BuktiToken {
     pub diperiksa_pada: String,
 }
 
+/// Bukti jual dipakai ulang sebentar selama satu flow pembukaan. Token dan
+/// pool tetap terikat di kunci, sedangkan batas umur mencegah hasil lama
+/// dianggap berlaku selamanya.
+pub const BUKTI_JUAL_SEGAR_DETIK: i64 = 900;
+
 fn kunci_bukti(chain_id: u64, pool_id: &str, token: Address) -> String {
     format!(
         "risk/token:v1:{chain_id}:{}:{}",
@@ -100,6 +105,29 @@ pub fn simpan_bukti(
             diperiksa_pada: chrono::Utc::now().to_rfc3339(),
         },
     )
+}
+
+pub fn bukti_jual_segar(
+    store: &crate::store::Store,
+    chain_id: u64,
+    pool_id: &str,
+    token: Address,
+) -> bool {
+    let Ok(Some(bukti)) = store.get::<BuktiToken>(&kunci_bukti(chain_id, pool_id, token)) else {
+        return false;
+    };
+    if !bukti.jual_kecil_lolos
+        || bukti.chain_id != chain_id
+        || !bukti.pool_id.eq_ignore_ascii_case(pool_id)
+        || !bukti.token.eq_ignore_ascii_case(&token.to_string())
+    {
+        return false;
+    }
+    let Ok(waktu) = chrono::DateTime::parse_from_rfc3339(&bukti.diperiksa_pada) else {
+        return false;
+    };
+    let umur = chrono::Utc::now().signed_duration_since(waktu.with_timezone(&chrono::Utc));
+    umur.num_seconds() >= 0 && umur.num_seconds() <= BUKTI_JUAL_SEGAR_DETIK
 }
 
 pub async fn uji_jual_kecil<P: Provider>(
@@ -237,6 +265,21 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(bukti.transfer_tax_bps, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bukti_jual_yang_baru_dipakai_ulang_dalam_flow() {
+        let dir = std::env::temp_dir().join(format!(
+            "rangefinder-risk-token-fresh-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = crate::store::Store::open(&dir).unwrap();
+        let token = Address::repeat_byte(8);
+        simpan_bukti(&store, 4663, "0xpool", token, true, true).unwrap();
+        assert!(bukti_jual_segar(&store, 4663, "0xPOOL", token));
+        assert!(!bukti_jual_segar(&store, 4664, "0xpool", token));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
