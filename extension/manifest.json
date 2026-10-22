@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "Rangefinder",
+  "version": "0.1.0",
+  "description": "Range LP Uniswap V3 dan V4 di Robinhood Chain, digambar langsung di chart gmgn.",
+  "minimum_chrome_version": "116",
+  "permissions": ["sidePanel", "storage", "tabs"],
+  "host_permissions": ["https://gmgn.ai/*", "http://127.0.0.1:8787/*"],
+  "background": {
+    "service_worker": "background/service-worker.js"
+  },
+  "side_panel": {
+    "default_path": "sidepanel/index.html"
+  },
+  "action": {
+    "default_title": "Rangefinder"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://gmgn.ai/*"],
+      "js": ["content/chart-bridge.js"],
+      "world": "MAIN",
+      "run_at": "document_idle",
+      "all_frames": false
+    },
+    {
+      "matches": ["https://gmgn.ai/*"],
+      "js": ["content/relay.js"],
+      "world": "ISOLATED",
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}

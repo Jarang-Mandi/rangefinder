@@ -1,0 +1,637 @@
+//! Akses Robinhood Chain: penyedia RPC, pemeriksaan kesehatan, dan gate G1.
+//!
+//! INVARIAN
+//! - Engine TIDAK BOLEH mengeksekusi transaksi saat kesehatan buruk. Yang
+//!   dianggap buruk: chain id tidak cocok, lag blok melebihi ambang, atau
+//!   seluruh endpoint gagal. Lihat PRD 7.5.
+//! - Gate G1 di PRD 6.4 dijalankan di sini lewat `verify_registry`. Kalau ada
+//!   `code_hash` terpin yang tidak cocok, engine menolak start. Ini bukan
+//!   peringatan, ini penghentian.
+//! - Chain ini secara resmi dinyatakan tidak stabil oleh gmgn, jadi kegagalan
+//!   RPC adalah kondisi normal yang harus ditangani, bukan kejadian luar biasa.
+
+pub mod endpoint;
+pub mod logs;
+pub mod multicall;
+pub mod registry;
+
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+use std::task::{Context as TaskContext, Poll};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use alloy::primitives::keccak256;
+use alloy::providers::{Provider, ProviderBuilder};
+use alloy::rpc::json_rpc::{RequestPacket, ResponsePacket};
+use alloy::transports::{BoxTransport, TransportError, TransportErrorKind, TransportFut};
+use anyhow::{Context, Result};
+use serde::Serialize;
+use tokio::sync::RwLock;
+use tower::Service;
+
+use crate::config::RpcConfig;
+use registry::Registry;
+
+/// Ringkasan kesehatan yang dikirim ke panel.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChainHealth {
+    pub healthy: bool,
+    /// URL RPC yang sedang dipakai, SUDAH disamarkan.
+    ///
+    /// Field ini dikirim ke panel dan ikut tercetak di layar, sedangkan URL
+    /// penyedia berbayar memuat API key di jalurnya. Penyamarannya wajib
+    /// terjadi sebelum nilainya masuk ke sini, bukan saat ditampilkan, karena
+    /// tempat penampilan bisa bertambah tanpa siapa pun ingat menyamarkannya.
+    /// Lihat `chain::endpoint`.
+    pub endpoint: String,
+    pub chain_id: Option<u64>,
+    pub block_number: Option<u64>,
+    pub block_lag_secs: Option<u64>,
+    pub max_block_lag_secs: u64,
+    pub error: Option<String>,
+    pub checked_at: String,
+}
+
+impl ChainHealth {
+    fn unknown(endpoint: &str, max_lag: u64) -> Self {
+        Self {
+            healthy: false,
+            endpoint: endpoint::aman(endpoint),
+            chain_id: None,
+            block_number: None,
+            block_lag_secs: None,
+            max_block_lag_secs: max_lag,
+            error: Some("belum ada pemeriksaan".into()),
+            checked_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+}
+
+/// Hasil satu kontrak pada gate G1.
+#[derive(Debug, Clone, Serialize)]
+pub struct RegistryCheck {
+    pub section: String,
+    pub name: String,
+    pub address: String,
+    pub has_code: bool,
+    pub code_hash: String,
+    pub pinned: Option<String>,
+    pub status: RegistryStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistryStatus {
+    /// Terpin dan cocok. Satu satunya status yang benar benar hijau.
+    Verified,
+    /// Ada kode di alamat itu tapi hash belum pernah dipin.
+    Unpinned,
+    /// Tidak ada kode sama sekali di alamat itu.
+    NoCode,
+    /// Terpin tapi tidak cocok. Ini kegagalan keras.
+    Mismatch,
+}
+
+pub struct ChainClient {
+    /// Konfigurasi diambil sebagai snapshot setiap kali sebuah provider baru
+    /// dibuat. Mengganti snapshot tidak mengubah permintaan yang sudah jalan.
+    cfg: RwLock<RpcConfig>,
+    /// Endpoint aktif saat ini. Failover mengubah indeks ini.
+    endpoint: RwLock<usize>,
+    /// Pilihan terakhir yang berhasil untuk dua jalur baca yang berbeda.
+    read_endpoint: Arc<AtomicUsize>,
+    logs_endpoint: Arc<AtomicUsize>,
+    health: RwLock<ChainHealth>,
+}
+
+/// Transport baca yang mencoba endpoint satu per satu.
+///
+/// Endpoint sehat terakhir menjadi pilihan pertama pada permintaan berikutnya.
+/// Respons JSON-RPC error dianggap kegagalan endpoint, bukan jawaban berhasil,
+/// supaya batas laju satu provider benar benar berpindah ke provider lain.
+#[derive(Clone, Debug)]
+struct SequentialFallback {
+    transports: Arc<Vec<BoxTransport>>,
+    labels: Arc<Vec<String>>,
+    preferred: Arc<AtomicUsize>,
+}
+
+impl SequentialFallback {
+    fn new(
+        transports: Vec<BoxTransport>,
+        labels: Vec<String>,
+        preferred: Arc<AtomicUsize>,
+    ) -> Self {
+        Self {
+            transports: Arc::new(transports),
+            labels: Arc::new(labels),
+            preferred,
+        }
+    }
+}
+
+impl Service<RequestPacket> for SequentialFallback {
+    type Response = ResponsePacket;
+    type Error = TransportError;
+    type Future = TransportFut<'static>;
+
+    fn poll_ready(&mut self, _cx: &mut TaskContext<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: RequestPacket) -> Self::Future {
+        let transports = self.transports.clone();
+        let labels = self.labels.clone();
+        let preferred = self.preferred.clone();
+        Box::pin(async move {
+            if transports.is_empty() {
+                return Err(TransportErrorKind::custom_str(
+                    "tidak ada endpoint RPC untuk failover",
+                ));
+            }
+
+            let awal = preferred.load(Ordering::Relaxed) % transports.len();
+            let mut terakhir = None;
+            for offset in 0..transports.len() {
+                let indeks = (awal + offset) % transports.len();
+                let mut transport = transports[indeks].clone();
+                match transport.call(request.clone()).await {
+                    Ok(response) => {
+                        if let Some(error) = response.as_error() {
+                            terakhir = Some(TransportError::ErrorResp(error.clone()));
+                            continue;
+                        }
+                        if indeks != awal {
+                            tracing::warn!(
+                                endpoint = %labels[indeks],
+                                "permintaan baca beralih ke RPC cadangan"
+                            );
+                        }
+                        preferred.store(indeks, Ordering::Relaxed);
+                        return Ok(response);
+                    }
+                    Err(error) => terakhir = Some(error),
+                }
+            }
+
+            Err(terakhir
+                .unwrap_or_else(|| TransportErrorKind::custom_str("seluruh endpoint RPC gagal")))
+        })
+    }
+}
+
+impl ChainClient {
+    pub fn new(cfg: RpcConfig) -> Arc<Self> {
+        let first = cfg.http.first().cloned().unwrap_or_default();
+        let max_lag = cfg.max_block_lag_secs;
+        Arc::new(Self {
+            cfg: RwLock::new(cfg),
+            endpoint: RwLock::new(0),
+            read_endpoint: Arc::new(AtomicUsize::new(0)),
+            logs_endpoint: Arc::new(AtomicUsize::new(0)),
+            health: RwLock::new(ChainHealth::unknown(&first, max_lag)),
+        })
+    }
+
+    pub async fn health(&self) -> ChainHealth {
+        self.health.read().await.clone()
+    }
+
+    pub async fn rpc_config(&self) -> RpcConfig {
+        self.cfg.read().await.clone()
+    }
+
+    /// Terapkan daftar endpoint untuk provider yang dibuat setelah pemanggilan
+    /// ini. Provider yang sudah dimiliki transaksi lain tetap memakai snapshot
+    /// lamanya sampai permintaan tersebut selesai.
+    pub async fn replace_rpc_config(&self, cfg: RpcConfig) {
+        let first = cfg.http.first().cloned().unwrap_or_default();
+        let max_lag = cfg.max_block_lag_secs;
+        *self.cfg.write().await = cfg;
+        *self.endpoint.write().await = 0;
+        self.read_endpoint.store(0, Ordering::Relaxed);
+        self.logs_endpoint.store(0, Ordering::Relaxed);
+        *self.health.write().await = ChainHealth::unknown(&first, max_lag);
+    }
+
+    async fn current_endpoint(&self) -> String {
+        let cfg = self.cfg.read().await.clone();
+        let idx = *self.endpoint.read().await;
+        cfg.http
+            .get(idx)
+            .or_else(|| cfg.http.first())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Pindah ke endpoint berikutnya. Dipanggil setelah kegagalan.
+    async fn rotate_endpoint(&self) {
+        let cfg = self.cfg.read().await.clone();
+        if cfg.http.len() <= 1 {
+            return;
+        }
+        let mut idx = self.endpoint.write().await;
+        *idx = (*idx + 1) % cfg.http.len();
+        tracing::warn!(
+            endpoint = %endpoint::aman(&cfg.http[*idx]),
+            "beralih ke RPC cadangan"
+        );
+    }
+
+    /// Penyedia RPC untuk endpoint yang sedang aktif.
+    ///
+    /// Dipakai modul lain yang perlu memanggil kontrak. Endpoint yang dipilih
+    /// mengikuti failover, sehingga pemanggil tidak perlu tahu ada berapa
+    /// endpoint cadangan.
+    pub async fn provider(&self) -> Result<impl Provider> {
+        let endpoint = self.current_endpoint().await;
+        Self::provider_for(&endpoint)
+    }
+
+    /// Penyedia untuk semua pembacaan state yang tidak mengirim transaksi.
+    ///
+    /// Berbeda dari `provider`, penyedia ini berpindah endpoint di dalam satu
+    /// permintaan. RPC publik cepat dapat melayani state, sedangkan endpoint
+    /// utama tetap punya kuota dan nonce yang konsisten untuk transaksi.
+    pub async fn read_provider(&self) -> Result<impl Provider> {
+        let cfg = self.cfg.read().await.clone();
+        let endpoints = if cfg.read_http.is_empty() {
+            vec![self.current_endpoint().await]
+        } else {
+            cfg.read_http
+        };
+        Self::provider_for_many(
+            &endpoints,
+            std::time::Duration::from_millis(2_500),
+            self.read_endpoint.clone(),
+        )
+    }
+
+    /// Penyedia RPC untuk pemindaian log bersejarah.
+    ///
+    /// Jangan memakai endpoint ini untuk saldo atau rencana posisi. Endpoint
+    /// log sengaja boleh lebih lambat pada `eth_call` selama menerima rentang
+    /// `eth_getLogs` lebar yang dibutuhkan discovery dan volume.
+    pub async fn logs_provider(&self) -> Result<impl Provider> {
+        let cfg = self.cfg.read().await.clone();
+        let endpoints = if cfg.logs_http.is_empty() {
+            vec![self.current_endpoint().await]
+        } else {
+            cfg.logs_http
+        };
+        Self::provider_for_many(
+            &endpoints,
+            std::time::Duration::from_secs(20),
+            self.logs_endpoint.clone(),
+        )
+    }
+
+    /// Bangun penyedia baca berurutan dengan batas waktu per endpoint.
+    fn provider_for_many(
+        urls: &[String],
+        timeout: std::time::Duration,
+        preferred: Arc<AtomicUsize>,
+    ) -> Result<impl Provider> {
+        use alloy::rpc::client::ClientBuilder;
+        use alloy::transports::http::{Client, Http};
+
+        if urls.is_empty() {
+            anyhow::bail!("daftar endpoint RPC kosong");
+        }
+
+        let client_http = Client::builder()
+            .timeout(timeout)
+            .build()
+            .context("gagal menyiapkan klien HTTP RPC")?;
+        let mut transports = Vec::with_capacity(urls.len());
+        let mut labels = Vec::with_capacity(urls.len());
+        for url in urls {
+            let parsed = url
+                .parse()
+                .with_context(|| format!("URL RPC `{}` tidak valid", endpoint::aman(url)))?;
+            transports.push(BoxTransport::new(Http::with_client(
+                client_http.clone(),
+                parsed,
+            )));
+            labels.push(endpoint::aman(url));
+        }
+
+        let client = ClientBuilder::default().transport(
+            SequentialFallback::new(transports, labels, preferred),
+            false,
+        );
+        Ok(ProviderBuilder::new().connect_client(client))
+    }
+
+    /// Bangun penyedia dengan percobaan ulang otomatis.
+    ///
+    /// RPC publik Robinhood Chain membatasi laju dan menjawab 429 pada
+    /// pemakaian yang sepenuhnya wajar, misalnya membaca saldo beberapa token
+    /// berturut turut. Tanpa lapisan ini, kegagalan rate limit terlihat seperti
+    /// kegagalan sungguhan, dan pemanggil yang menelannya akan melaporkan
+    /// keadaan yang salah, misalnya saldo nol padahal sebenarnya ada.
+    ///
+    /// Ini pernah terjadi dan sempat menyesatkan. Lihat memory/003.
+    fn provider_for(url: &str) -> Result<impl Provider> {
+        use alloy::rpc::client::ClientBuilder;
+        use alloy::transports::layers::RetryBackoffLayer;
+
+        let parsed = url
+            .parse()
+            .with_context(|| format!("URL RPC `{}` tidak valid", endpoint::aman(url)))?;
+
+        // Lima percobaan, jeda awal 200 ms, dan anggaran laju yang longgar.
+        // Angka ini dipilih supaya lonjakan pendek seperti membaca beberapa
+        // saldo sekaligus tetap lewat, tanpa membuat kegagalan sungguhan
+        // menggantung lama.
+        let client = ClientBuilder::default()
+            .layer(RetryBackoffLayer::new(5, 200, 1_000))
+            .http(parsed);
+
+        Ok(ProviderBuilder::new().connect_client(client))
+    }
+
+    /// Satu putaran pemeriksaan kesehatan. Memperbarui state internal.
+    pub async fn check_health(&self) -> ChainHealth {
+        let endpoint = self.current_endpoint().await;
+        let result = self.probe(&endpoint).await;
+
+        let health = match result {
+            Ok(h) => h,
+            Err(e) => {
+                self.rotate_endpoint().await;
+                let max_lag = self.cfg.read().await.max_block_lag_secs;
+                ChainHealth {
+                    healthy: false,
+                    endpoint: endpoint::aman(&endpoint),
+                    chain_id: None,
+                    block_number: None,
+                    block_lag_secs: None,
+                    max_block_lag_secs: max_lag,
+                    error: Some(e.to_string()),
+                    checked_at: chrono::Utc::now().to_rfc3339(),
+                }
+            }
+        };
+
+        *self.health.write().await = health.clone();
+        health
+    }
+
+    async fn probe(&self, endpoint: &str) -> Result<ChainHealth> {
+        let cfg = self.cfg.read().await.clone();
+        let provider = Self::provider_for(endpoint)?;
+
+        let chain_id = provider
+            .get_chain_id()
+            .await
+            .context("RPC tidak menjawab eth_chainId")?;
+
+        // Chain id yang tidak cocok berarti kita bicara dengan jaringan yang
+        // salah. Ini tidak boleh dianggap sehat dalam kondisi apa pun.
+        if chain_id != cfg.chain_id {
+            anyhow::bail!(
+                "chain id RPC {} tidak cocok dengan {} yang diharapkan. \
+                 Periksa rpc.http di config.toml",
+                chain_id,
+                cfg.chain_id
+            );
+        }
+
+        let block_number = provider
+            .get_block_number()
+            .await
+            .context("RPC tidak menjawab eth_blockNumber")?;
+
+        let lag = self.block_lag(&provider, block_number).await;
+
+        let healthy = lag.is_none_or(|l| l <= cfg.max_block_lag_secs);
+
+        Ok(ChainHealth {
+            healthy,
+            endpoint: endpoint::aman(endpoint),
+            chain_id: Some(chain_id),
+            block_number: Some(block_number),
+            block_lag_secs: lag,
+            max_block_lag_secs: cfg.max_block_lag_secs,
+            error: if healthy {
+                None
+            } else {
+                Some(format!(
+                    "lag blok {} detik melebihi ambang {} detik",
+                    lag.unwrap_or_default(),
+                    cfg.max_block_lag_secs
+                ))
+            },
+            checked_at: chrono::Utc::now().to_rfc3339(),
+        })
+    }
+
+    /// Selisih antara waktu blok terakhir dan jam lokal.
+    ///
+    /// Mengembalikan `None` kalau blok tidak bisa dibaca. Ketidaktahuan tidak
+    /// diperlakukan sebagai lag nol, tapi juga tidak menggagalkan kesehatan,
+    /// karena beberapa RPC membatasi endpoint ini.
+    async fn block_lag<P: Provider>(&self, provider: &P, number: u64) -> Option<u64> {
+        let block = provider
+            .get_block_by_number(number.into())
+            .await
+            .ok()
+            .flatten()?;
+        let ts = block.header.timestamp;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+        Some(now.saturating_sub(ts))
+    }
+
+    /// Gate G1: verifikasi setiap alamat di registry punya kode, dan hash-nya
+    /// cocok dengan yang dipin.
+    pub async fn verify_registry(&self, reg: &Registry) -> Result<Vec<RegistryCheck>> {
+        let endpoint = self.current_endpoint().await;
+        let provider = Self::provider_for(&endpoint)?;
+        let mut out = Vec::new();
+
+        for c in reg.all_contracts()? {
+            let code = provider
+                .get_code_at(c.address)
+                .await
+                .with_context(|| format!("gagal membaca kode di {}", c.address))?;
+
+            let has_code = !code.is_empty();
+            let hash = if has_code {
+                hex::encode(keccak256(&code))
+            } else {
+                String::new()
+            };
+
+            let pinned = if c.code_hash.is_empty() {
+                None
+            } else {
+                Some(c.code_hash.clone())
+            };
+
+            let status = match (&pinned, has_code) {
+                (_, false) => RegistryStatus::NoCode,
+                (None, true) => RegistryStatus::Unpinned,
+                (Some(p), true) if p.eq_ignore_ascii_case(&hash) => RegistryStatus::Verified,
+                (Some(_), true) => RegistryStatus::Mismatch,
+            };
+
+            out.push(RegistryCheck {
+                section: c.section.to_string(),
+                name: c.name,
+                address: c.address.to_string(),
+                has_code,
+                code_hash: hash,
+                pinned,
+                status,
+            });
+        }
+
+        Ok(out)
+    }
+}
+
+/// Ringkas hasil G1 menjadi keputusan boleh jalan atau tidak.
+///
+/// Aturannya sengaja tegas: `Mismatch` menghentikan engine, karena artinya
+/// kontrak di alamat itu bukan yang kita harapkan, dan mengirim transaksi ke
+/// sana bisa berarti kehilangan dana.
+pub fn registry_gate(checks: &[RegistryCheck]) -> Result<RegistryReport> {
+    let mismatched: Vec<_> = checks
+        .iter()
+        .filter(|c| c.status == RegistryStatus::Mismatch)
+        .collect();
+
+    if !mismatched.is_empty() {
+        let daftar = mismatched
+            .iter()
+            .map(|c| format!("{}.{} di {}", c.section, c.name, c.address))
+            .collect::<Vec<_>>()
+            .join(", ");
+        anyhow::bail!(
+            "gate G1 gagal, bytecode tidak cocok dengan yang dipin untuk: {daftar}. \
+             Engine tidak akan jalan. Jalankan `cargo xtask verify` untuk rinciannya"
+        );
+    }
+
+    Ok(RegistryReport {
+        total: checks.len(),
+        verified: checks
+            .iter()
+            .filter(|c| c.status == RegistryStatus::Verified)
+            .count(),
+        unpinned: checks
+            .iter()
+            .filter(|c| c.status == RegistryStatus::Unpinned)
+            .count(),
+        no_code: checks
+            .iter()
+            .filter(|c| c.status == RegistryStatus::NoCode)
+            .count(),
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RegistryReport {
+    pub total: usize,
+    pub verified: usize,
+    pub unpinned: usize,
+    pub no_code: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn check(status: RegistryStatus) -> RegistryCheck {
+        RegistryCheck {
+            section: "uniswap_v3".into(),
+            name: "factory".into(),
+            address: "0x1f7d7550B1b028f7571E69a784071f0205fd2eFA".into(),
+            has_code: status != RegistryStatus::NoCode,
+            code_hash: "aabb".into(),
+            pinned: None,
+            status,
+        }
+    }
+
+    #[test]
+    fn mismatch_menghentikan_engine() {
+        let checks = vec![check(RegistryStatus::Mismatch)];
+        assert!(registry_gate(&checks).is_err());
+    }
+
+    #[test]
+    fn unpinned_dan_no_code_tidak_menghentikan() {
+        let checks = vec![
+            check(RegistryStatus::Unpinned),
+            check(RegistryStatus::NoCode),
+        ];
+        let report = registry_gate(&checks).unwrap();
+        assert_eq!(report.total, 2);
+        assert_eq!(report.unpinned, 1);
+        assert_eq!(report.no_code, 1);
+        assert_eq!(report.verified, 0);
+    }
+
+    #[test]
+    fn semua_terverifikasi() {
+        let checks = vec![check(RegistryStatus::Verified); 3];
+        let report = registry_gate(&checks).unwrap();
+        assert_eq!(report.verified, 3);
+    }
+    #[test]
+    fn api_key_tidak_pernah_masuk_status_yang_dikirim_ke_panel() {
+        // Ini penjaga struktural, bukan sekadar uji fungsi. Kalau suatu saat
+        // ada yang menaruh URL mentah ke ChainHealth lagi, uji ini yang
+        // menangkapnya sebelum key user ikut tercetak di layar.
+        let h = ChainHealth::unknown(
+            "https://robinhood-mainnet.g.alchemy.com/v2/kunci_rahasia_user",
+            5,
+        );
+        assert!(
+            !h.endpoint.contains("kunci_rahasia_user"),
+            "API key bocor ke status: {}",
+            h.endpoint
+        );
+        assert!(
+            h.endpoint.contains("alchemy.com"),
+            "host tetap harus terlihat supaya status kesehatan berguna"
+        );
+    }
+
+    #[tokio::test]
+    async fn error_json_rpc_langsung_beralih_dan_endpoint_sehat_menjadi_pilihan() {
+        use alloy::rpc::client::ClientBuilder;
+        use alloy::transports::mock::{Asserter, MockTransport};
+
+        let gagal = Asserter::new();
+        gagal.push_failure_msg("dibatasi provider pertama");
+        let sehat = Asserter::new();
+        sehat.push_success(&4663u64);
+
+        let fallback = SequentialFallback::new(
+            vec![
+                BoxTransport::new(MockTransport::new(gagal.clone())),
+                BoxTransport::new(MockTransport::new(sehat.clone())),
+            ],
+            vec!["rpc-satu".into(), "rpc-dua".into()],
+            Arc::new(AtomicUsize::new(0)),
+        );
+        let preferred = fallback.preferred.clone();
+        let client = ClientBuilder::default().transport(fallback, false);
+        let provider = ProviderBuilder::new().connect_client(client);
+
+        assert_eq!(provider.get_chain_id().await.unwrap(), 4663);
+        assert_eq!(preferred.load(Ordering::Relaxed), 1);
+
+        // Provider pertama sekarang bisa menjawab, tetapi provider kedua yang
+        // baru saja berhasil tetap dicoba lebih dulu dan menghemat satu gagal.
+        gagal.push_success(&1u64);
+        sehat.push_success(&4663u64);
+        assert_eq!(provider.get_chain_id().await.unwrap(), 4663);
+        assert_eq!(gagal.read_q().len(), 1);
+    }
+}

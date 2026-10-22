@@ -1,0 +1,20 @@
+# Normalisasi akhir baris. Repo ini dikembangkan di Windows tapi isinya kode
+# lintas platform, jadi yang disimpan di git selalu LF.
+* text=auto eol=lf
+
+# Berkas biner. Tanpa penandaan ini, git bisa merusak font saat checkout di
+# Windows karena menganggapnya teks dan mengganti akhir barisnya.
+*.woff2 binary
+*.woff binary
+*.png binary
+*.jpg binary
+*.ico binary
+
+# Skrip Windows harus tetap CRLF supaya bisa dijalankan.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Lockfile ikut ter-commit tapi tidak perlu muncul di diff review.
+Cargo.lock linguist-generated=true
+extension/package-lock.json linguist-generated=true

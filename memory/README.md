@@ -1,0 +1,59 @@
+# Memori repo
+
+Catatan per topik yang tumbuh seiring waktu. Isinya jebakan yang sudah
+ditemukan, kesalahan yang pernah dibuat, dan alasan sebuah pendekatan
+ditinggalkan.
+
+## Aturan
+
+Aturan ini diminta user secara eksplisit dan berlaku untuk setiap sesi dan
+setiap agent.
+
+1. **Setiap perubahan dicatat pada sesi yang sama.** Bukan nanti, bukan di
+   akhir minggu.
+2. **Setiap perubahan sistem diikuti pembaruan dokumen dalam commit yang sama.**
+   Kontrak pesan berubah berarti PRD 7.3 ikut berubah. Alamat berubah berarti
+   `docs/CHAIN.md` ikut berubah.
+3. **Asumsi yang terbukti salah dicatat di sini, bukan hanya diperbaiki.**
+   Perbaikan menyelesaikan hari ini. Catatan mencegah pengulangan.
+
+## Bedanya dengan docs
+
+| Tempat | Isi |
+| --- | --- |
+| `docs/PRD.md` | apa yang dibangun dan kenapa |
+| `docs/DECISIONS.md` | keputusan arsitektural beserta pemicu peninjauan ulang |
+| `docs/GMGN.md`, `docs/CHAIN.md` | kontrak terhadap sistem luar dan cara memverifikasinya |
+| `memory/` | pelajaran. Hal hal yang membuang waktu, dan cara tidak mengulanginya |
+
+## Penamaan
+
+`NNN-topik-singkat.md`, nomor berurutan. Satu topik per berkas.
+
+## Daftar
+
+| Berkas | Isi |
+| --- | --- |
+| `001-toolchain-windows.md` | Kenapa build gagal di mesin ini dan apa yang sudah dicoba |
+| `002-tradingview-gmgn.md` | Jebakan saat menyentuh chart gmgn |
+| `003-rpc-rate-limit.md` | RPC membatasi laju, dan bahaya menelan kegagalan jadi nol |
+| `004-rust-di-disk-d.md` | Rust dipindah ke D, dan jebakan saat memindahkannya |
+| `005-pasangan-token-dan-fee-jebakan.md` | Token lawan tidak boleh ditebak, dan pool ber-fee ekstrem |
+| `006-kecepatan-pencarian-pool.md` | Kenapa pencarian pool lambat, dan kenapa paralel justru memperburuk |
+| `007-pengiriman-transaksi.md` | Invarian pengiriman transaksi, dan tiga hal yang hampir terlewat |
+| `008-eksekusi-v4.md` | Cara kerja V4 dibaca dari rantai, izin dua lapis, dan jebakan kebiasaan V3 |
+| `009-zap-dan-router-fork.md` | Zap satu sisi, bug perbandingan desimal, dan cara memulihkan struct fork |
+| `010-posisi-pnl-notifikasi.md` | Enumerasi posisi, fee sebenarnya, satuan PnL, dan aturan notifikasi |
+| `011-mesin-sinyal.md` | Detektor sinyal, pembedaan kosong dari skor rendah, dan koreksi rumus PRD |
+| `012-integrasi-dan-perbaikan.md` | Audit lintas fitur, jurnal eksekusi, rekonstruksi PnL, dan fixture integrasi |
+| `013-drag-range-dan-kartu-eksekusi.md` | Drag range, tata letak setoran, dan pengujian lebar side panel |
+| `014-rencana-otomatis-dan-uji-live.md` | Quote otomatis, approval V4 saat harga bergerak, dan transaksi live pertama |
+| `015-layanan-lokal-dan-angka-posisi.md` | Watchdog engine, sesi wallet lokal, input berpasangan, dan angka PnL/Positions |
+| `016-ui-utama-dan-alur-engine.md` | UI tanpa eyebrow/detail teknis, satu tombol beralur engine, dan saldo yang didahulukan |
+| `017-reload-preview-dan-status-transaksi.md` | Pemulihan garis setelah reload, preview setoran ringan, batching approval, dan status transaksi yang jelas |
+| `018-close-ke-eth-volume-24-jam-dan-pnl.md` | Konversi hasil close, perbandingan volume Uniswap, saldo bertahap, dan PnL perkiraan |
+| `019-prioritas-rpc-dan-zap-paralel.md` | Engine release, prioritas RPC interaktif, deduplikasi statistik, dan kutipan Zap paralel |
+| `020-cache-statistik-dan-pembatalan-lookup.md` | Cache APR/TVL/volume, pembatalan discovery lama, dan probe single input USDG |
+| `021-profil-risiko-modal-di-bawah-50-usd.md` | Batas posisi, eksposur, pool baru, slippage, dan cadangan gas untuk modal kecil |
+| `022-snapshot-pool-tujuh-detik-dan-rpc-berperan.md` | Snapshot pool utuh, statistik awal tiga jam, dan pembagian RPC menurut jenis pekerjaan |
+| `023-failover-rpc-dan-indeks-zenith.md` | Failover baca per permintaan, peran provider publik, dan bukti pola indexer Zenith |

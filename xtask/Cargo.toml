@@ -1,0 +1,20 @@
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Perintah verifikasi Rangefinder: alamat kontrak, hash bytecode, dokumen"
+
+[dependencies]
+alloy = { version = "2.1.1", default-features = false, features = ["std", "provider-http", "reqwest-native-tls", "rpc-types-eth", "serde", "json", "consensus"] }
+anyhow.workspace = true
+rangefinder-engine = { path = "../engine" }
+hex = "0.4.3"
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.11.0"
+tokio.workspace = true
+toml = "1.1.5"
+tracing.workspace = true
+tracing-subscriber.workspace = true

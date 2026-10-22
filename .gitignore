@@ -1,0 +1,30 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Node
+node_modules/
+extension/dist/
+.vite/
+.playwright-cli/
+output/playwright/
+output/*.png
+
+# Rahasia dan state lokal. Tidak boleh ada satu pun dari ini yang ter-commit.
+*.keystore
+*.keystore.json
+/data/
+engine/data/
+.pairing
+pairing.txt
+.env
+.env.*
+!.env.example
+
+# Berkas verifikasi yang dihasilkan mesin, bukan sumber kebenaran
+xtask/out/
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store

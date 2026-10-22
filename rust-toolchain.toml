@@ -1,0 +1,13 @@
+# Toolchain baku Rust di Windows, yaitu host default yang berarti
+# x86_64-pc-windows-msvc.
+#
+# Sebelumnya berkas ini terpaksa memin triple GNU karena mesin ini belum punya
+# MSVC Build Tools lengkap. Windows SDK sekarang sudah terpasang, sehingga
+# jalur baku bisa dipakai dan seluruh penyiasatan raw-dylib tidak lagi
+# dibutuhkan. Riwayat lengkapnya ada di docs/DECISIONS.md entri 0003 dan
+# memory/001-toolchain-windows.md.
+
+[toolchain]
+channel = "stable"
+profile = "default"
+components = ["rustfmt", "clippy"]

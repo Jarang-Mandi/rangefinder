@@ -1,0 +1,61 @@
+# Registry kontrak Robinhood Chain.
+#
+# Berkas ini adalah SUMBER TUNGGAL alamat kontrak. Dibaca oleh engine saat
+# start (gate G1 di PRD 6.4) dan oleh `cargo xtask verify`. Jangan pernah
+# menulis ulang alamat di tempat lain dalam kode.
+#
+# Kolom `code_hash` adalah keccak256 dari bytecode yang terpasang, diisi oleh
+# `cargo xtask verify --pin`. Kosong berarti belum pernah dipin, dan engine
+# akan memperingatkan tapi tetap jalan. Setelah dipin, selisih apa pun membuat
+# engine menolak start, karena artinya kontrak di alamat itu bukan yang kita
+# harapkan.
+#
+# Cara memverifikasi ulang dari nol ada di docs/CHAIN.md.
+
+[chain]
+name = "Robinhood Chain"
+id = 4663
+kind = "Arbitrum Orbit L2"
+gas_token = "ETH"
+explorer = "https://robinhoodchain.blockscout.com"
+block_time_ms = 100
+# Blok saat protokol dipasang. Batas bawah pemindaian log Initialize V4.
+deploy_block = 7887312
+
+[tokens]
+weth = { address = "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73", decimals = 18, note = "aeWETH proxy, kompatibel WETH9" }
+# Stablecoin chain ini. Banyak memecoin justru berpasangan dengan ini, bukan
+# WETH. Ditemukan dari pemindaian log Initialize pada FIG, 33 dari 39 poolnya
+# memakai USDG.
+usdg = { address = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168", decimals = 6, note = "stablecoin, pasangan paling umum untuk memecoin" }
+
+[common]
+permit2 = { address = "0x000000000022D473030F116dDEE9F6B43aC78BA3", code_hash = "5208783f52488f7d3493e5e38311ab707c1d75457fe472a19b0b4d57d66a7fca" }
+multicall3 = { address = "0xcA11bde05977b3631167028862bE2a173976CA11", code_hash = "d5c15df687b16f2ff992fc8d767b4216323184a2bbc6ee2f9c398c318e770891" }
+
+[uniswap_v3]
+factory = { address = "0x1f7d7550b1b028f7571e69a784071f0205fd2efa", code_hash = "ec72b1abd1f2faee020cfea9c646bd8994f9fb389054f6e574f103a895091739" }
+position_manager = { address = "0x73991a25c818bf1f1128deaab1492d45638de0d3", code_hash = "0a493d1af3d0f25fed8efa205244ebee14114267a08647fc38c515c7cd6ead4f" }
+swap_router_02 = { address = "0xcaf681a66d020601342297493863e78c959e5cb2", code_hash = "6f36c378e272c6324c48f045182bcb54bd8ad654cf9ebd42e8893d52c4cb25dc" }
+quoter_v2 = { address = "0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7", code_hash = "3db0868d945e9304c9bc6a8b2181948109ea617647142f3c4083e14393496a28" }
+tick_lens = { address = "0x7dfd4f31be6814d2906bde155c3e1b146eac1468", code_hash = "bf1bb07babb013f146395ed6e1127f8f48d598f1765bc660a91d7b164cf93ff8" }
+interface_multicall = { address = "0x282a3c4d320cc7f0d5eaf56b8029e4b88338f0a3", code_hash = "aa2f42ac8eed7b6fce9828f68d29f3734387c3508e9a71fa83068cdff475cee8" }
+
+[uniswap_v4]
+pool_manager = { address = "0x8366a39CC670B4001A1121B8F6A443A643e40951", code_hash = "bd3881180b547f5fe817545743cfb4343e96b1bc6640dcd70c106b0066e95626" }
+position_manager = { address = "0x58daec3116aae6D93017bAAea7749052E8a04fA7", code_hash = "c873e135dc9aaec88489cfbad146b4cb49d6a32e0d80326377784b7ba17670b2" }
+quoter = { address = "0x8Dc178eFB8111BB0973Dd9d722ebeFF267c98F94", code_hash = "d707b1da8cb165e5ea35a3b4450d971eb562ec171e23492aa117036b78a868f6" }
+state_view = { address = "0xF3334192D15450CdD385c8B70e03f9A6bD9E673b", code_hash = "7d9c591e0956fd89d98feb4ffcfe8bf1f7a62bd485edd979fa21d104b49878a6" }
+# PERINGATAN: UniversalRouter di chain ini adalah fork. Struct swap V4 membawa
+# field tambahan `minHopPriceX36`. Calldata hasil SDK Uniswap standar akan
+# gagal. Lihat PRD 6.3 dan modul exec::router_rbh.
+universal_router = { address = "0x8876789976dEcBfCbBbe364623C63652db8C0904", code_hash = "2ce6aaaf9f4151f5e1cbf774668772f17f532ae11b15e9284fd0a072a8b0fbde", forked = true }
+
+# Kontrak pihak ketiga yang sering muncul. Dicatat untuk pengenalan, BUKAN
+# berarti sudah masuk allowlist. Allowlist hook diputuskan oleh kriteria
+# adopsi di PRD 5.4, dievaluasi saat runtime, bukan dari daftar ini.
+[third_party]
+bags_factory = { address = "0xe8Cc4431adF8b5A847C113EF0c6af9043219Cb37", code_hash = "81489932a2c2dc73badc783623df7631238faed2c6b5119b30eb7f0297825871" }
+bags_lens = { address = "0xC82Db941dAf90B754aecb5F7D14c683dc608d595", code_hash = "dbed338841c242f85077981c68713ab0d016266e4d180c8d12d40b9b34b558e1" }
+bags_v4_hook = { address = "0x2380aBf72C17aABAb76480244759AC7E2932EEcC", code_hash = "61ee07a84bcb4b0e4e48e1d44b4591f022853a06e95face68d5043a3331f1966" }
+bags_vault = { address = "0x4861446aa7fFd9e67a83cBbAcb1A4B70540B83Aa", code_hash = "81489932a2c2dc73badc783623df7631238faed2c6b5119b30eb7f0297825871" }
